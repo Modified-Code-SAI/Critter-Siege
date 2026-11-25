@@ -24,13 +24,16 @@ import { GameClient, type LobbyViewState } from "./net/gameClient.js";
 import { ProgressionStore } from "./profile/progression.js";
 import { CritterRig } from "./scene/critterMesh.js";
 import { EnvironmentProps } from "./scene/environmentProps.js";
+import { preloadAllSpeciesModels } from "./scene/modelLoader.js";
 import { TerrainRenderer } from "./scene/terrainRenderer.js";
 import { VfxSystem } from "./scene/vfx.js";
 import { WorldScene } from "./scene/worldScene.js";
 import {
   HudController,
+  type HudCompassState,
   type LobbySelectionState,
   type MatchEssenceBreakdown,
+  type SelectableCameraMode,
 } from "./ui/hud.js";
 
 const STANDARD_GADGETS: readonly GadgetId[] = [
@@ -223,6 +226,9 @@ class CritterSiegeApp {
   private shotPlayback: ShotPlayback | null = null;
   private lastChargeTickMs = 0;
   private lastCountdownSec = -1;
+  private quickStartMoved = false;
+  private quickStartFired = false;
+  private lobbyHeroPos: Vec3 = { x: WORLD_CENTER_X, y: 10, z: WORLD_CENTER_Z };
 
   // Match-over Siege Essence tracking
   private rewardedMatchId: string | null = null;
@@ -235,6 +241,9 @@ class CritterSiegeApp {
   public constructor(appContainer: HTMLElement, hudRoot: HTMLElement) {
     this.appContainer = appContainer;
     this.hudRoot = hudRoot;
+
+    // Warm the browser cache for all 4 Hunyuan3D GLB hero critter models immediately
+    preloadAllSpeciesModels();
 
     this.progression = new ProgressionStore();
     this.audio = new SynthAudio();
@@ -307,11 +316,17 @@ class CritterSiegeApp {
       onColorChange: (color) => {
         this.audio.playUiClick();
         this.progression.selectColor(color);
+        if (!this.inMatch) {
+          this.spawnLobbyShowcaseCritters();
+        }
         this.refreshLobbyHud();
       },
       onSelectSpecies: (species) => {
         this.audio.playUiClick();
         this.progression.selectSpecies(species);
+        if (!this.inMatch) {
+          this.spawnLobbyShowcaseCritters();
+        }
         if (this.onlineLobby?.mode === "online") {
           this.gameClient.sendLobbyConfig({ species });
         }
@@ -322,6 +337,9 @@ class CritterSiegeApp {
         if (res.ok) {
           this.audio.playMutationChime();
           this.progression.selectSpecies(species);
+          if (!this.inMatch) {
+            this.spawnLobbyShowcaseCritters();
+          }
           this.hud.showToast(
             `Unlocked ${SPECIES_CATALOG[species].name}!`,
             "success",
@@ -451,6 +469,19 @@ class CritterSiegeApp {
         this.audio.playUiClick();
         this.returnToLobby();
       },
+      onSelectCameraMode: (mode: SelectableCameraMode) => {
+        if (!this.inMatch) return;
+        this.audio.playUiClick();
+        if (mode === "over_shoulder") {
+          this.cameraRig.exitDroneRecon();
+          this.cameraRig.setFirstPerson(false);
+        } else if (mode === "first_person") {
+          this.cameraRig.exitDroneRecon();
+          this.cameraRig.setFirstPerson(true);
+        } else if (this.cameraRig.getMode() !== "drone_recon") {
+          this.cameraRig.toggleDroneRecon();
+        }
+      },
     });
 
     // Gameplay Input Controller
@@ -512,6 +543,8 @@ class CritterSiegeApp {
     this.rewardedMatchId = null;
     this.essenceBreakdown = null;
     this.dronePing = null;
+    this.quickStartMoved = false;
+    this.quickStartFired = false;
     this.vfx.setDronePing(null);
     this.shotPlayback = null;
     this.cameraRig.setShotCamActive(false);
@@ -667,9 +700,18 @@ class CritterSiegeApp {
 
         if (isControlling && turnKey !== this.localTurnKey) {
           this.localTurnKey = turnKey;
-          // Face toward nearest enemy at the start of your turn for instant aim feel
-          const aimYaw = this.computeInitialTurnYaw(state, localCritter);
-          this.input.setAim(aimYaw, 0.24);
+          if (state.phase === "ACTIVE") {
+            this.hud.showTurnBanner(
+              "YOUR TURN",
+              "Move · Aim · Hold Click to Fire",
+              "mine",
+            );
+            // Face toward nearest enemy at the start of your turn for instant aim feel
+            const aimYaw = this.computeInitialTurnYaw(state, localCritter);
+            this.input.setAim(aimYaw, 0.24);
+          } else if (state.phase === "RETREAT") {
+            this.hud.showTurnBanner("RETREAT! 6s", "Run to cover!", "retreat");
+          }
         }
       }
 
@@ -733,7 +775,7 @@ class CritterSiegeApp {
           break;
         }
         case "EVO_POD_SPAWNED": {
-          this.hud.showToast("Evo Pod parachuting onto the island!", "info");
+          this.hud.showTurnBanner("EVO POD DROPPED!", "Grab it to evolve!", "pod");
           break;
         }
         case "EVO_POD_COLLECTED": {
@@ -853,6 +895,7 @@ class CritterSiegeApp {
     );
 
     const dir = computeAimDirection(moveSnap.yaw, moveSnap.pitch);
+    this.quickStartFired = true;
     this.gameClient.sendFire(
       this.selectedGadget,
       dir,
@@ -960,13 +1003,46 @@ class CritterSiegeApp {
     this.vfx.updateWindRibbons({ x: 2.4, y: 0, z: 1.1 }, dtSec);
     this.environmentProps.syncHazards(this.previewHazards, this.elapsedSec);
 
-    const orbitAngle = this.elapsedSec * 0.14;
-    const dist = Math.max(24, WORLD_SPAN_X * 0.85);
-    const camX = WORLD_CENTER_X + Math.sin(orbitAngle) * dist;
-    const camZ = WORLD_CENTER_Z + Math.cos(orbitAngle) * dist;
-    const camY = 23.5 + Math.sin(this.elapsedSec * 0.35) * 1.4;
+    // Frame the rotating 3D GLB showcase hero critter on the right-center sunlit ridge
+    // with the sweeping 60m sculpted island, trees, arches, and ocean stretching behind it!
+    const hero = this.lobbyHeroPos;
+    const toCenterX = WORLD_CENTER_X - hero.x;
+    const toCenterZ = WORLD_CENTER_Z - hero.z;
+    const toCenterLen = Math.hypot(toCenterX, toCenterZ);
+    const baseDirX = toCenterLen > 0.1 ? toCenterX / toCenterLen : 0.7;
+    const baseDirZ = toCenterLen > 0.1 ? toCenterZ / toCenterLen : -0.7;
+
+    // Gentle cinematic sway around the outward ocean vantage
+    const sway = Math.sin(this.elapsedSec * 0.24) * 0.22;
+    const cosS = Math.cos(sway);
+    const sinS = Math.sin(sway);
+    const dirX = baseDirX * cosS - baseDirZ * sinS;
+    const dirZ = baseDirX * sinS + baseDirZ * cosS;
+
+    // Right vector in Three.js (+Y up) = forward x up = (-dirZ, 0, dirX)
+    const rightX = -dirZ;
+    const rightZ = dirX;
+
+    const camDist = 5.4;
+    const camX = hero.x - dirX * camDist + rightX * 0.35;
+    const camZ = hero.z - dirZ * camDist + rightZ * 0.35;
+    const rawCamY = hero.y + 2.05 + Math.sin(this.elapsedSec * 0.45) * 0.12;
+    const camGroundY = this.activeWorld.getSurfaceY(camX, camZ);
+    const camY = Math.max(rawCamY, (camGroundY ?? 0) + 1.6);
     this.cameraRig.camera.position.set(camX, camY, camZ);
-    this.cameraRig.camera.lookAt(WORLD_CENTER_X, 9.0, WORLD_CENTER_Z);
+
+    // Shift look target slightly left so the hero sits cleanly clear of the floating left dock
+    this.cameraRig.camera.lookAt(
+      hero.x - rightX * 0.95 + dirX * 1.4,
+      hero.y + 0.92,
+      hero.z - rightZ * 0.95 + dirZ * 1.4,
+    );
+
+    const heroRig = this.critterRigs.get("preview-hero");
+    if (heroRig) {
+      const faceCamYaw = Math.atan2(camX - hero.x, camZ - hero.z);
+      heroRig.root.rotation.y = faceCamYaw + this.elapsedSec * 0.42;
+    }
 
     for (const rig of this.critterRigs.values()) {
       rig.updateAnimation(dtSec, false, 0, false);
@@ -999,6 +1075,10 @@ class CritterSiegeApp {
     this.input.setCanAct(canMove, canFire, isDroneMode);
     this.input.setSelectedGadget(this.selectedGadget);
     const moveInput = this.input.update(dtSec);
+
+    if (canMove && (moveInput.forward !== 0 || moveInput.right !== 0)) {
+      this.quickStartMoved = true;
+    }
 
     // Subtle charge sound ticks while holding fire power
     if (moveInput.charging && nowMs - this.lastChargeTickMs >= 115) {
@@ -1052,10 +1132,11 @@ class CritterSiegeApp {
         : focusCritter
           ? focusCritter.position
           : { x: WORLD_CENTER_X, y: 9, z: WORLD_CENTER_Z };
+    const viewerYaw = canMove ? moveInput.yaw : focusCritter?.yaw ?? 0;
 
     this.cameraRig.update({
       targetPos: focusPos,
-      yaw: canMove ? moveInput.yaw : focusCritter?.yaw ?? 0,
+      yaw: viewerYaw,
       pitch: canMove ? moveInput.pitch : 0.15,
       phase: state.phase,
       localAlive,
@@ -1104,7 +1185,14 @@ class CritterSiegeApp {
         rig.root.visible = c.alive;
       }
       rig.applyMutations(c.equipped, c.apex);
-      rig.updateAnimation(dtSec, moving, vy, c.id === state.activePlayerId);
+      const aimPitch = isLocalControlled ? moveInput.pitch : c.pitch;
+      rig.updateAnimation(
+        dtSec,
+        moving,
+        vy,
+        c.id === state.activePlayerId,
+        aimPitch,
+      );
     }
 
     // Update live 3D Trajectory Preview during local aiming
@@ -1152,6 +1240,19 @@ class CritterSiegeApp {
       );
     }
 
+    // Compute directional compass pips for nearest rival & Evo Pod
+    const compass = this.computeCompassState(
+      state,
+      localCritter,
+      focusPos,
+      viewerYaw,
+    );
+    const showQuickStartHint =
+      isMyTurn &&
+      state.phase === "ACTIVE" &&
+      state.turnNumber <= 2 &&
+      !(this.quickStartMoved && this.quickStartFired);
+
     // Update In-Game HUD
     this.hud.updateGameHud({
       matchState: state,
@@ -1163,6 +1264,8 @@ class CritterSiegeApp {
       muted: this.audio.isMuted(),
       dronePingActive: this.dronePing !== null,
       essenceBreakdown: this.essenceBreakdown,
+      showQuickStartHint,
+      compass,
     });
   }
 
@@ -1479,14 +1582,97 @@ class CritterSiegeApp {
     this.spawnLobbyShowcaseCritters();
   }
 
+  private computeCompassState(
+    state: MatchState,
+    localCritter: CritterState | null,
+    origin: Vec3,
+    viewerYaw: number,
+  ): HudCompassState {
+    const sinY = Math.sin(viewerYaw);
+    const cosY = Math.cos(viewerYaw);
+
+    const calcBearing = (target: Vec3): { bearingRad: number; distanceM: number } => {
+      const dx = target.x - origin.x;
+      const dz = target.z - origin.z;
+      const forwardDot = dx * sinY + dz * cosY;
+      const rightDot = dx * -cosY + dz * sinY;
+      return {
+        bearingRad: Math.atan2(rightDot, forwardDot),
+        distanceM: Math.hypot(dx, dz),
+      };
+    };
+
+    let bestRival: HudCompassState["rival"] = null;
+    for (const c of state.critters) {
+      if (!c.alive) continue;
+      if (localCritter && c.id === localCritter.id) continue;
+      if (
+        state.mode === "2v2" &&
+        localCritter?.team &&
+        c.team === localCritter.team
+      ) {
+        continue;
+      }
+      const res = calcBearing(c.position);
+      if (!bestRival || res.distanceM < bestRival.distanceM) {
+        bestRival = {
+          bearingRad: res.bearingRad,
+          distanceM: res.distanceM,
+          color: c.color,
+          label: c.name,
+        };
+      }
+    }
+
+    let bestPod: HudCompassState["evoPod"] = null;
+    for (const pod of state.evoPods) {
+      if (pod.collected) continue;
+      const res = calcBearing(pod.position);
+      if (!bestPod || res.distanceM < bestPod.distanceM) {
+        bestPod = {
+          bearingRad: res.bearingRad,
+          distanceM: res.distanceM,
+        };
+      }
+    }
+
+    return { rival: bestRival, evoPod: bestPod };
+  }
+
   private spawnLobbyShowcaseCritters(): void {
     this.clearCritterRigs();
+    const profile = this.progression.getProfile();
     const spawns = this.activeWorld.findSpawnPoints(LOBBY_SHOWCASE_SPECIES.length);
-    for (let i = 0; i < LOBBY_SHOWCASE_SPECIES.length; i++) {
-      const spec = LOBBY_SHOWCASE_SPECIES[i];
+    const heroPos = spawns[0] ?? {
+      x: WORLD_CENTER_X - 10,
+      y: 10,
+      z: WORLD_CENTER_Z + 10,
+    };
+    this.lobbyHeroPos = { ...heroPos };
+
+    // Featured rotating 3D GLB Hero Critter matching the player's current selection
+    const heroRig = new CritterRig(
+      profile.selectedSpecies,
+      profile.selectedColor,
+      profile.displayName,
+    );
+    heroRig.root.position.set(heroPos.x, heroPos.y, heroPos.z);
+    const heroHp = heroRig.root.getObjectByName("hp_bar_sprite");
+    if (heroHp) {
+      heroHp.visible = false;
+    }
+    this.critterRoot.add(heroRig.root);
+    this.critterRigs.set("preview-hero", heroRig);
+
+    // Populate the remaining sunlit island ridges with background rival species
+    const others = LOBBY_SHOWCASE_SPECIES.filter(
+      (s) => s.species !== profile.selectedSpecies,
+    );
+    for (let i = 0; i < others.length; i++) {
+      const spec = others[i];
       if (!spec) continue;
-      const pos = spawns[i] ?? {
-        x: WORLD_CENTER_X - 6 + i * 4,
+      const pos = spawns[i + 1] ?? {
+        x: WORLD_CENTER_X - 6 + i * 6,
         y: 10,
         z: WORLD_CENTER_Z,
       };
@@ -1496,6 +1682,10 @@ class CritterSiegeApp {
         WORLD_CENTER_X - pos.x,
         WORLD_CENTER_Z - pos.z,
       );
+      const hpBar = rig.root.getObjectByName("hp_bar_sprite");
+      if (hpBar) {
+        hpBar.visible = false;
+      }
       this.critterRoot.add(rig.root);
       this.critterRigs.set(`preview-${i}`, rig);
     }

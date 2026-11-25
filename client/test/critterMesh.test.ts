@@ -145,6 +145,48 @@ describe("CritterRig & TerrainRenderer", () => {
     rig.dispose();
   });
 
+  it("calibrates hardpoints for GLB custom models, protects cached GLB buffers on dispose, and toggles aiming barrel", () => {
+    const rig = new CritterRig("badger", "#22c55e", "RidgeHero");
+    expect(rig.isUsingCustomModel()).toBe(false);
+
+    // Aiming indicator only visible when critter is active
+    rig.updateAnimation(0.016, false, 0, false, 0.35);
+    const aimIndicator = rig.root.getObjectByName("aim_indicator");
+    expect(aimIndicator).toBeDefined();
+    expect(aimIndicator?.visible).toBe(false);
+
+    rig.updateAnimation(0.016, true, 1.5, true, 0.42);
+    expect(aimIndicator?.visible).toBe(true);
+
+    // Attach a cached GLB clone mock
+    const glbClone = new THREE.Group();
+    glbClone.userData.isCachedGlbClone = true;
+    const sharedGeo = new THREE.SphereGeometry(0.6, 12, 10);
+    const sharedMat = new THREE.MeshStandardMaterial({ color: 0xcccccc });
+    const glbMesh = new THREE.Mesh(sharedGeo, sharedMat);
+    glbMesh.castShadow = false;
+    glbMesh.receiveShadow = false;
+    glbClone.add(glbMesh);
+
+    const sharedDisposeSpy = vi.spyOn(sharedGeo, "dispose");
+
+    rig.attachCustomModel(glbClone);
+    expect(rig.isUsingCustomModel()).toBe(true);
+    expect(glbMesh.castShadow).toBe(true);
+    expect(glbMesh.receiveShadow).toBe(true);
+    expect(glbClone.rotation.y).toBe(0);
+    // Calibrated for taller 1.48m sculpted badger GLB
+    expect(rig.anchors.crest.position.y).toBeGreaterThan(1.0);
+    expect(rig.anchors.back.position.z).toBeLessThan(0);
+
+    // Disposing the rig must NOT destroy shared cached GLB template geometry
+    rig.dispose();
+    expect(sharedDisposeSpy).not.toHaveBeenCalled();
+
+    sharedGeo.dispose();
+    sharedMat.dispose();
+  });
+
   it("builds smooth vertex-colored Surface Nets terrain chunks and rebuilds only dirty chunks on carve", () => {
     const world = new SdfWorld(42, "emerald_spire");
     const renderer = new TerrainRenderer(world);

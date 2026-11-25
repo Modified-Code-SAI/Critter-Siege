@@ -5,6 +5,17 @@ import type {
   MutationId,
   SpeciesId,
 } from "@critter/shared";
+import { hasCustomGlbSpecies, loadSpeciesModel } from "./modelLoader.js";
+
+/** Load a species' sculpted Hunyuan3D GLB model if available in browser runtime. */
+export async function loadCritterGlbModel(
+  species: SpeciesId,
+): Promise<THREE.Group | null> {
+  if (!hasCustomGlbSpecies(species)) {
+    return null;
+  }
+  return loadSpeciesModel(species);
+}
 
 /** Physical 3D attachment anchors on every Critter Siege character rig. */
 export interface HardpointAnchors {
@@ -1165,9 +1176,135 @@ function buildApexVisual(apex: ApexId): THREE.Group {
   return group;
 }
 
+interface AnchorLayout {
+  back: readonly [number, number, number];
+  legs: readonly [number, number, number];
+  offense: readonly [number, number, number];
+  crest: readonly [number, number, number];
+  hpSpriteY: number;
+  apexOffsetY: number;
+  aimY: number;
+  aimZ: number;
+  ringScale: number;
+}
+
+const GLB_ANCHOR_LAYOUTS: Record<SpeciesId, AnchorLayout> = {
+  mole: {
+    back: [0, 0.72, -0.34],
+    legs: [0, 0.14, 0.02],
+    offense: [0, 0.68, 0.14],
+    crest: [0, 1.06, 0.24],
+    hpSpriteY: 1.82,
+    apexOffsetY: 0.22,
+    aimY: 0.68,
+    aimZ: 0.44,
+    ringScale: 1.24,
+  },
+  norway_rat: {
+    back: [0, 0.78, -0.3],
+    legs: [0, 0.14, 0.02],
+    offense: [0, 0.72, 0.14],
+    crest: [0, 1.14, 0.24],
+    hpSpriteY: 1.92,
+    apexOffsetY: 0.3,
+    aimY: 0.74,
+    aimZ: 0.44,
+    ringScale: 1.18,
+  },
+  badger: {
+    back: [0, 0.82, -0.28],
+    legs: [0, 0.14, 0.02],
+    offense: [0, 0.78, 0.12],
+    crest: [0, 1.2, 0.2],
+    hpSpriteY: 1.98,
+    apexOffsetY: 0.34,
+    aimY: 0.78,
+    aimZ: 0.36,
+    ringScale: 1.32,
+  },
+  glider_squirrel: {
+    back: [0, 0.74, -0.32],
+    legs: [0, 0.14, 0.02],
+    offense: [0, 0.68, 0.14],
+    crest: [0, 1.08, 0.22],
+    hpSpriteY: 1.86,
+    apexOffsetY: 0.24,
+    aimY: 0.7,
+    aimZ: 0.44,
+    ringScale: 1.18,
+  },
+  hedgehog: {
+    back: [0, 0.56, -0.32],
+    legs: [0, 0.14, 0.0],
+    offense: [0, 0.54, 0.1],
+    crest: [0, 0.86, 0.2],
+    hpSpriteY: 1.56,
+    apexOffsetY: 0,
+    aimY: 0.54,
+    aimZ: 0.38,
+    ringScale: 1.0,
+  },
+  armadillo: {
+    back: [0, 0.56, -0.32],
+    legs: [0, 0.14, 0.0],
+    offense: [0, 0.54, 0.1],
+    crest: [0, 0.86, 0.2],
+    hpSpriteY: 1.56,
+    apexOffsetY: 0,
+    aimY: 0.54,
+    aimZ: 0.4,
+    ringScale: 1.0,
+  },
+};
+
+function buildAimIndicator(teamColor: string): THREE.Group {
+  const group = new THREE.Group();
+  group.name = "aim_indicator";
+
+  const barrelMat = makeStandard(0x283546, 0.35, 0.72);
+  const barrel = createMesh(
+    new THREE.CylinderGeometry(0.036, 0.052, 0.44, 12),
+    barrelMat,
+    [0.24, 0, 0.22],
+    [Math.PI * 0.5, 0, 0],
+  );
+  barrel.castShadow = false;
+
+  const glowMat = makeStandard(0x4df4ff, 0.18, 0.15, {
+    emissive: 0x38f5ff,
+    emissiveIntensity: 1.2,
+    transparent: true,
+    opacity: 0.92,
+  });
+  const muzzleRing = createMesh(
+    new THREE.TorusGeometry(0.056, 0.015, 8, 18),
+    glowMat,
+    [0.24, 0, 0.44],
+  );
+  muzzleRing.castShadow = false;
+
+  const laserTip = createMesh(
+    new THREE.ConeGeometry(0.038, 0.14, 10),
+    makeStandard(teamColor, 0.2, 0.2, {
+      emissive: teamColor,
+      emissiveIntensity: 0.95,
+      transparent: true,
+      opacity: 0.88,
+    }),
+    [0.24, 0, 0.55],
+    [Math.PI * 0.5, 0, 0],
+  );
+  laserTip.castShadow = false;
+
+  group.add(barrel, muzzleRing, laserTip);
+  group.visible = false;
+  return group;
+}
+
 /**
- * Procedural smooth 3D character rig for Critter Siege with 4 hardpoint anchors,
- * clean GPU disposal on mutation swap, optional custom GLB drop-in hook, and HP bar sprite.
+ * Smooth 3D character rig for Critter Siege with automatic Hunyuan3D GLB hero model
+ * loading, procedural fallback, 4 calibrated hardpoint anchors, active aiming barrel,
+ * squash-stretch animation, clean GPU disposal, and floating HP bar sprite.
  */
 export class CritterRig {
   public readonly root: THREE.Group;
@@ -1176,6 +1313,7 @@ export class CritterRig {
 
   private readonly bodyGroup: THREE.Group;
   private readonly apexGroup: THREE.Group;
+  private readonly aimIndicator: THREE.Group;
   private readonly selectionRing: THREE.Mesh;
   private readonly teamColor: string;
   private readonly label: string;
@@ -1193,8 +1331,15 @@ export class CritterRig {
   private lastHp = 100;
   private lastMaxHp = 100;
   private animTime = 0;
+  private baseRingScale = 1.0;
+  private disposed = false;
 
-  public constructor(species: SpeciesId, teamColor: string, label: string) {
+  public constructor(
+    species: SpeciesId,
+    teamColor: string,
+    label: string,
+    autoLoadGlb = true,
+  ) {
     this.species = species;
     this.teamColor = teamColor;
     this.label = label;
@@ -1220,6 +1365,10 @@ export class CritterRig {
     this.apexGroup.name = "apex_aura";
     this.bodyGroup.add(this.apexGroup);
 
+    this.aimIndicator = buildAimIndicator(teamColor);
+    this.aimIndicator.position.set(0, 0.54, 0.24);
+    this.bodyGroup.add(this.aimIndicator);
+
     const ringGeo = new THREE.TorusGeometry(0.56, 0.036, 10, 28);
     const ringMat = makeStandard(teamColor, 0.25, 0.2, {
       emissive: teamColor,
@@ -1235,13 +1384,29 @@ export class CritterRig {
     this.root.add(this.selectionRing);
 
     this.initHpBarSprite();
+
+    if (autoLoadGlb) {
+      void this.tryLoadCustomModel();
+    }
+  }
+
+  /** Return true when a custom sculpted GLB hero model is currently attached. */
+  public isUsingCustomModel(): boolean {
+    return this.customModel !== null;
   }
 
   /**
    * Drop in a custom external 3D model (e.g. a Blender/Hunyuan3D GLB) while keeping
-   * the 4 physical hardpoint anchors, animations, and HP bar intact.
+   * the 4 physical hardpoint anchors calibrated, animations, and HP bar intact.
    */
   public attachCustomModel(model: THREE.Object3D): void {
+    if (this.disposed) {
+      if (model.userData.isCachedGlbClone !== true) {
+        disposeObjectTree(model);
+      }
+      return;
+    }
+
     if (this.proceduralBody) {
       this.bodyGroup.remove(this.proceduralBody);
       disposeObjectTree(this.proceduralBody);
@@ -1249,10 +1414,50 @@ export class CritterRig {
     }
     if (this.customModel) {
       this.bodyGroup.remove(this.customModel);
+      if (this.customModel.userData.isCachedGlbClone !== true) {
+        disposeObjectTree(this.customModel);
+      }
       this.customModel = null;
     }
+
+    model.traverse((obj) => {
+      if (obj instanceof THREE.Mesh) {
+        obj.castShadow = true;
+        obj.receiveShadow = true;
+      }
+    });
+
     this.customModel = model;
     this.bodyGroup.add(model);
+
+    // Calibrate hardpoint anchors, aiming barrel, Apex halo, and HP bar to GLB proportions
+    const layout = GLB_ANCHOR_LAYOUTS[this.species];
+    this.anchors.back.position.set(
+      layout.back[0],
+      layout.back[1],
+      layout.back[2],
+    );
+    this.anchors.legs.position.set(
+      layout.legs[0],
+      layout.legs[1],
+      layout.legs[2],
+    );
+    this.anchors.offense.position.set(
+      layout.offense[0],
+      layout.offense[1],
+      layout.offense[2],
+    );
+    this.anchors.crest.position.set(
+      layout.crest[0],
+      layout.crest[1],
+      layout.crest[2],
+    );
+    this.apexGroup.position.y = layout.apexOffsetY;
+    this.aimIndicator.position.set(0, layout.aimY, layout.aimZ);
+    this.baseRingScale = layout.ringScale;
+    if (this.hpSprite) {
+      this.hpSprite.position.y = layout.hpSpriteY;
+    }
   }
 
   /**
@@ -1306,24 +1511,35 @@ export class CritterRig {
     }
   }
 
-  /** Advance subtle idle bob, hop tilt, apex halo spin, and active selection ring pulse. */
+  /** Advance idle breathing, lively hop & squash-stretch, aiming barrel pitch, and active ring pulse. */
   public updateAnimation(
     dtSec: number,
     moving: boolean,
     velocityY: number,
     isActive: boolean,
+    aimPitch = 0,
   ): void {
     const safeDt = Number.isFinite(dtSec) ? Math.max(0, Math.min(dtSec, 0.1)) : 0;
     this.animTime += safeDt;
 
-    const bobSpeed = moving ? 12.0 : 3.2;
-    const bobAmp = moving ? 0.065 : 0.022;
-    const bobY = Math.sin(this.animTime * bobSpeed) * bobAmp;
-    this.bodyGroup.position.y = Math.max(0, bobY);
+    const bobSpeed = moving ? 12.5 : 3.2;
+    const bobAmp = moving ? 0.085 : 0.022;
+    const bobWave = Math.sin(this.animTime * bobSpeed);
+    const bobY = Math.max(0, bobWave) * bobAmp;
+    this.bodyGroup.position.y = bobY;
 
     const safeVy = Number.isFinite(velocityY) ? velocityY : 0;
-    const targetPitch = Math.max(-0.28, Math.min(0.28, -safeVy * 0.04));
-    const moveRoll = moving ? Math.sin(this.animTime * 12.0) * 0.09 : 0;
+    const airborneStretch = Math.max(-0.08, Math.min(0.11, safeVy * 0.015));
+    const hopSquash = moving ? bobWave * 0.05 : Math.sin(this.animTime * 3.2) * 0.014;
+    const scaleY = 1.0 + airborneStretch + hopSquash;
+    const scaleXZ = 1.0 / Math.sqrt(Math.max(0.84, scaleY));
+    const lerpK = Math.min(1, safeDt * 14);
+    this.bodyGroup.scale.x += (scaleXZ - this.bodyGroup.scale.x) * lerpK;
+    this.bodyGroup.scale.y += (scaleY - this.bodyGroup.scale.y) * lerpK;
+    this.bodyGroup.scale.z += (scaleXZ - this.bodyGroup.scale.z) * lerpK;
+
+    const targetPitch = Math.max(-0.26, Math.min(0.26, -safeVy * 0.036));
+    const moveRoll = moving ? Math.sin(this.animTime * 12.5) * 0.085 : 0;
     this.bodyGroup.rotation.x += (targetPitch - this.bodyGroup.rotation.x) * Math.min(1, safeDt * 12);
     this.bodyGroup.rotation.z += (moveRoll - this.bodyGroup.rotation.z) * Math.min(1, safeDt * 12);
 
@@ -1331,15 +1547,25 @@ export class CritterRig {
       this.apexGroup.rotation.y += safeDt * 1.4;
     }
 
+    this.aimIndicator.visible = isActive;
+    if (isActive) {
+      const clampedAimPitch = Number.isFinite(aimPitch)
+        ? Math.max(-0.85, Math.min(1.15, aimPitch))
+        : 0;
+      this.aimIndicator.rotation.x = -clampedAimPitch;
+    }
+
     this.selectionRing.visible = isActive;
     if (isActive) {
-      const pulse = 1.0 + Math.sin(this.animTime * 5.0) * 0.09;
+      const pulse = this.baseRingScale * (1.0 + Math.sin(this.animTime * 5.0) * 0.09);
       this.selectionRing.scale.set(pulse, pulse, 1);
     }
   }
 
   /** Dispose all geometries, materials, and textures owned by this rig. */
   public dispose(): void {
+    this.disposed = true;
+
     for (const slot of HARDPOINT_SLOTS) {
       this.clearGroupChildren(this.anchors[slot]);
     }
@@ -1348,6 +1574,9 @@ export class CritterRig {
     this.clearGroupChildren(this.apexGroup);
     this.currentApex = null;
 
+    this.bodyGroup.remove(this.aimIndicator);
+    disposeObjectTree(this.aimIndicator);
+
     if (this.proceduralBody) {
       this.bodyGroup.remove(this.proceduralBody);
       disposeObjectTree(this.proceduralBody);
@@ -1355,7 +1584,9 @@ export class CritterRig {
     }
     if (this.customModel) {
       this.bodyGroup.remove(this.customModel);
-      disposeObjectTree(this.customModel);
+      if (this.customModel.userData.isCachedGlbClone !== true) {
+        disposeObjectTree(this.customModel);
+      }
       this.customModel = null;
     }
 
@@ -1374,6 +1605,14 @@ export class CritterRig {
       this.hpTexture = null;
     }
     this.hpCanvas = null;
+  }
+
+  private async tryLoadCustomModel(): Promise<void> {
+    const model = await loadCritterGlbModel(this.species);
+    if (!model || this.disposed) {
+      return;
+    }
+    this.attachCustomModel(model);
   }
 
   private createAnchor(
