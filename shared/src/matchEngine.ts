@@ -346,6 +346,15 @@ export class MatchEngine {
       if (destination) {
         critter.position = destination;
         events.push(...this.collectPodsInRange(critter));
+        if (critter.position.y <= this.waterLevel) {
+          critter.alive = false;
+          critter.hp = 0;
+          if (this.checkRoundEnded()) {
+            events.push(...this.finishRound());
+          } else {
+            events.push(...this.enterDraftOrNextTurn());
+          }
+        }
       }
       return events;
     }
@@ -1068,14 +1077,19 @@ export class MatchEngine {
       this._world.crumbleOuterRing(crumbleRadius);
       events.push({ type: "WATER_ROSE", waterLevel: this.waterLevel });
 
-      // Drown any critter submerged by rising water or dropped off crumbled rim
+      // Drown any critter submerged by rising water or left over open ocean after cliff crumble
       for (const c of this.critters) {
         if (!c.alive) continue;
         const surfY = this._world.getSurfaceY(c.position.x, c.position.z);
         if (
           c.position.y <= this.waterLevel ||
-          (surfY === null && c.position.y <= this.waterLevel + 0.5)
+          surfY === null ||
+          surfY <= this.waterLevel
         ) {
+          c.position = {
+            ...c.position,
+            y: Math.min(c.position.y, this.waterLevel),
+          };
           c.alive = false;
           c.hp = 0;
         }

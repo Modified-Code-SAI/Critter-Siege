@@ -464,13 +464,14 @@ describe("Authoritative MatchEngine turn state machine & review edge cases", () 
       if (active === "A1") {
         const a2Curr = snap.critters.find((c) => c.id === "A2");
         if (a2Curr && a2Curr.alive) {
-          // Stand 1.5m away from A2 and fire gale_mortar at A2's feet (out of self-KO range)
-          const safeX = a2Curr.position.x - 2.0;
+          // Stand 1.5m inward from A2 (on solid island ground) and slam A2 outward toward the cliff
+          const inwardSign = a2Curr.position.x < 12 ? 1 : -1;
+          const safeX = a2Curr.position.x + inwardSign * 1.5;
           const safeY = engine.world.getSurfaceY(safeX, a2Curr.position.z) ?? a2Curr.position.y;
           engine.applyMove("A1", { x: safeX, y: safeY, z: a2Curr.position.z }, 0, 0);
           engine.applyFire("A1", {
             gadgetId: "quake_club",
-            direction: { x: 1, y: 0.1, z: 0 },
+            direction: { x: -inwardSign, y: 0.1, z: 0 },
             power: 1.0,
           });
           engine.completeResolving();
@@ -857,5 +858,52 @@ describe("Authoritative MatchEngine turn state machine & review edge cases", () 
       const plan2v2 = planBotTurn(snap, duoEngine.world, "A1");
       expect(plan2v2.gadgetId).not.toBe("quake_club");
     }
+  });
+
+  it("drowns an outer-edge critter when Turn 4+ cliff crumble leaves open ocean below and handles vine_grapple water plunge", () => {
+    const engine = new MatchEngine(
+      makeBaseConfig({
+        players: [
+          { id: "p1", name: "Milo", species: "mole", team: 0, isBot: false, color: "#e67e22" },
+          { id: "p2", name: "Remy", species: "norway_rat", team: 1, isBot: false, color: "#3498db" },
+          { id: "p3", name: "Bram", species: "badger", team: 0, isBot: false, color: "#2ecc71" },
+        ],
+      }),
+    );
+
+    // Move p1 out onto the far outer rim (radius > 11.5m from center 12,12) high above waterLevel
+    engine.applyMove("p1", { x: 23.6, y: 7.5, z: 12.0 }, 0, 0);
+    expect(engine.getSnapshot().critters.find((c) => c.id === "p1")?.alive).toBe(true);
+
+    // Advance Turns 1 -> 2 -> 3 -> 4 so crumbleOuterRing(11.5) erodes the rim under p1 (surfY === null)
+    engine.tick(16); // Turn 2
+    engine.tick(16); // Turn 3
+    engine.tick(16); // Turn 4 -> crumbleOuterRing(11.5)
+
+    const snap4 = engine.getSnapshot();
+    const p1AfterCrumble = snap4.critters.find((c) => c.id === "p1");
+    expect(p1AfterCrumble?.alive).toBe(false);
+    expect(p1AfterCrumble?.hp).toBe(0);
+    expect(p1AfterCrumble?.position.y).toBeLessThanOrEqual(snap4.waterLevel);
+
+    // Verify vine_grapple targeting below waterLevel drowns the active critter cleanly
+    const activeId = snap4.activePlayerId;
+    expect(activeId).not.toBeNull();
+    if (!activeId) return;
+    const activeCritter = snap4.critters.find((c) => c.id === activeId);
+    expect(activeCritter).toBeDefined();
+    if (!activeCritter) return;
+
+    engine.applyUtility(activeId, {
+      gadgetId: "vine_grapple",
+      direction: { x: 0, y: -1, z: 0 },
+      target: {
+        x: activeCritter.position.x,
+        y: snap4.waterLevel - 0.5,
+        z: activeCritter.position.z,
+      },
+    });
+    const afterPlunge = engine.getSnapshot();
+    expect(afterPlunge.critters.find((c) => c.id === activeId)?.alive).toBe(false);
   });
 });

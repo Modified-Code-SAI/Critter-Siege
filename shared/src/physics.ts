@@ -326,19 +326,20 @@ function settleCritterPosition(
 
     if (isSolidAfterCarves(world, carveOps, nextX, nextY, nextZ)) {
       if (vel.y <= 0) {
-        // Land smoothly right on top of the solid surface
-        let settleY = pos.y;
-        for (let step = 0; step < 5; step++) {
-          const mid = (settleY + nextY) * 0.5;
+        // Land smoothly right on top of the solid surface using a proper [lo, hi] binary search
+        let lo = nextY;
+        let hi = pos.y;
+        for (let step = 0; step < 6; step++) {
+          const mid = (lo + hi) * 0.5;
           if (isSolidAfterCarves(world, carveOps, nextX, mid, nextZ)) {
-            settleY = Math.max(settleY, mid + 0.05);
+            lo = mid;
           } else {
-            settleY = mid;
+            hi = mid;
           }
         }
         return {
-          position: { x: nextX, y: Math.max(settleY, nextY + 0.1), z: nextZ },
-          drowned: settleY <= waterLevel,
+          position: { x: nextX, y: hi, z: nextZ },
+          drowned: hi <= waterLevel,
         };
       }
       // Hit ceiling or wall while rising: damp velocity and continue falling
