@@ -1,0 +1,31 @@
+{
+  "name": "critter-siege",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "shared",
+    "server",
+    "client"
+  ],
+  "scripts": {
+    "verify": "npm run typecheck && npm run lint && npm test && npm run build",
+    "typecheck": "tsc -p shared/tsconfig.json --noEmit && tsc -p server/tsconfig.json --noEmit && tsc -p client/tsconfig.json --noEmit",
+    "lint": "eslint shared/src shared/test server/src server/test client/src client/test",
+    "test": "vitest run",
+    "build": "npm run build -w shared && npm run build -w server && npm run build -w client",
+    "dev:server": "tsx watch server/src/index.ts",
+    "dev:client": "vite --config client/vite.config.ts"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.1",
+    "@types/node": "^24.10.0",
+    "eslint": "^9.39.1",
+    "globals": "^17.14.0",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.46.3",
+    "vite": "^7.1.12",
+    "vitest": "^4.0.8"
+  }
+}
