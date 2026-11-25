@@ -343,6 +343,15 @@ export class RoomManager {
     socket: ClientSocketLike,
     msg: Extract<ClientMessage, { type: "RECONNECT_ROOM" }>,
   ): void {
+    if (this.socketBindings.has(socket)) {
+      this.sendError(
+        socket,
+        "ALREADY_IN_ROOM",
+        "Socket is already bound to a room seat.",
+      );
+      return;
+    }
+
     const room = this.rooms.get(msg.roomCode);
     if (!room) {
       this.sendError(socket, "ROOM_NOT_FOUND", `Room ${msg.roomCode} not found.`);
@@ -719,6 +728,14 @@ export class RoomManager {
       const now = Date.now();
       const dtSec = Math.min(0.25, Math.max(0.001, (now - room.lastTickMs) / 1000));
       room.lastTickMs = now;
+
+      // Pause turn countdown while a disconnected active player's grace timer is armed
+      if (
+        room.activeTurnTimer !== null &&
+        room.activeTurnAutomationKey?.startsWith("grace:")
+      ) {
+        return;
+      }
 
       const events = room.engine.tick(dtSec);
       if (events.length > 0) {
