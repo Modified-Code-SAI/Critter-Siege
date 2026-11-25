@@ -1,4 +1,4 @@
-import type { CarveOp, ThemeId, Vec3 } from "./types.js";
+import type { CarveOp, HazardType, ThemeId, Vec3 } from "./types.js";
 import { createSeededRng } from "./rng.js";
 
 /** Fixed voxel grid & chunk geometry constants for Critter Siege 60m sculpted SDF worlds. */
@@ -15,6 +15,13 @@ export interface ChunkCoord {
   cx: number;
   cy: number;
   cz: number;
+}
+
+/** Deterministic world placement specification for an interactive environmental hazard. */
+export interface HazardPlacement {
+  type: HazardType;
+  position: Vec3;
+  radius: number;
 }
 
 const OUTSIDE_AIR_VALUE = 2.0;
@@ -256,8 +263,9 @@ function evaluateThemeSdf(
   const organicNoise = n1 * 0.38 + n2 * 0.14;
 
   if (theme === "emerald_spire") {
-    // Sunlit Archipelago: 4 sweeping grassy peninsulas around a turquoise lagoon,
-    // linked by 2 wide curved stone arch bridges and a scenic central spire island.
+    // Sunlit Archipelago Obstacle Course: 4 tiered plateau forts separated by deep water
+    // channels & ravines, linked by 2 narrow high choke bridges, a towering central pinnacle
+    // with a pass-through tunnel at its base, and blocking sculpted rock battlements.
     const nwPeninsula = sdTaperedPlateau(
       x,
       y,
@@ -307,13 +315,15 @@ function evaluateThemeSdf(
       1.35,
     );
 
-    // Stepped terraced cliffs & sandy coves near the waterline (y ~ 2.0-3.2)
-    const nwCove = sdTaperedPlateau(x, y, z, 19.2, 20.0, 1.6, 3.0, 4.0, 5.4, 0.85);
-    const seCove = sdTaperedPlateau(x, y, z, 40.8, 40.0, 1.6, 3.0, 4.0, 5.4, 0.85);
-    const neTerrace = sdTaperedPlateau(x, y, z, 40.5, 20.5, 1.8, 6.8, 3.8, 5.3, 1.0);
-    const swTerrace = sdTaperedPlateau(x, y, z, 19.5, 39.5, 1.8, 6.6, 3.8, 5.3, 1.0);
+    // Multi-tier stepped ledges & coastal sandy coves near the waterline (y ~ 2.4-7.6)
+    const nwCove = sdTaperedPlateau(x, y, z, 20.5, 20.8, 1.6, 3.1, 3.8, 5.2, 0.85);
+    const seCove = sdTaperedPlateau(x, y, z, 39.5, 39.2, 1.6, 3.1, 3.8, 5.2, 0.85);
+    const neTerrace = sdTaperedPlateau(x, y, z, 39.8, 20.5, 1.8, 7.2, 3.8, 5.2, 1.0);
+    const swTerrace = sdTaperedPlateau(x, y, z, 20.2, 39.5, 1.8, 7.0, 3.8, 5.2, 1.0);
+    const nwMidLedge = sdTaperedPlateau(x, y, z, 11.2, 26.8, 1.9, 6.4, 3.0, 4.2, 0.9);
+    const seMidLedge = sdTaperedPlateau(x, y, z, 48.8, 33.2, 1.9, 6.6, 3.0, 4.2, 0.9);
 
-    // Scenic central spire island (prime Evo Pod high-ground) + sandy shoreline ring
+    // Towering central pinnacle island + low beach apron
     const centralSpire = sdTaperedPlateau(
       x,
       y,
@@ -321,9 +331,9 @@ function evaluateThemeSdf(
       30.0,
       30.0,
       1.8,
-      15.2 + j.archBoost,
-      3.8,
-      5.7,
+      16.0 + j.archBoost,
+      4.8,
+      6.0,
       1.25,
     );
     const spireBeach = sdTaperedPlateau(
@@ -333,51 +343,68 @@ function evaluateThemeSdf(
       30.0,
       30.0,
       1.6,
-      2.9,
-      5.5,
-      6.8,
+      3.1,
+      6.0,
+      7.4,
       0.8,
     );
+
+    // Organic sculpted rock battlements flanking the inner fort edges (tactical LoS cover)
+    const nwBattlement = sdEllipsoid(x, y, z, 20.2, 13.0, 14.2, 1.35, 2.35, 2.45);
+    const neBattlement = sdEllipsoid(x, y, z, 39.8, 13.4, 14.2, 1.35, 2.35, 2.45);
+    const swBattlement = sdEllipsoid(x, y, z, 20.2, 13.2, 45.8, 1.35, 2.35, 2.45);
+    const seBattlement = sdEllipsoid(x, y, z, 39.8, 13.5, 45.8, 1.35, 2.35, 2.45);
 
     let d = smin(nwPeninsula, nePeninsula, 2.0);
     d = smin(d, swPeninsula, 2.0);
     d = smin(d, sePeninsula, 2.0);
-    d = smin(d, nwCove, 1.4);
-    d = smin(d, seCove, 1.4);
-    d = smin(d, neTerrace, 1.5);
-    d = smin(d, swTerrace, 1.5);
-    d = smin(d, centralSpire, 1.6);
+    d = smin(d, nwCove, 1.35);
+    d = smin(d, seCove, 1.35);
+    d = smin(d, neTerrace, 1.45);
+    d = smin(d, swTerrace, 1.45);
+    d = smin(d, nwMidLedge, 1.25);
+    d = smin(d, seMidLedge, 1.25);
+    d = smin(d, centralSpire, 1.5);
     d = smin(d, spireBeach, 1.1);
+    d = smin(d, nwBattlement, 0.9);
+    d = smin(d, neBattlement, 0.9);
+    d = smin(d, swBattlement, 0.9);
+    d = smin(d, seBattlement, 0.9);
 
-    // Two wide sweeping curved natural stone arch bridges crossing the lagoon via the spire
+    // Carved pass-through tunnel straight through the central pinnacle's base
+    const spireTunnel =
+      distToSegment(x, y, z, 21.5, 5.4, 30.0, 38.5, 5.4, 30.0) - 2.3;
+    d = smax(d, -spireTunnel, 0.7);
+
+    // Two narrow dramatic curved stone choke bridges crossing the lagoon via the spire
     const diagArchA = sdStoneArch(
       x,
       y,
       z,
-      15.5 + j.northShift * 0.5,
-      16.0,
-      44.5 - j.northShift * 0.5,
-      44.0,
-      10.6,
-      15.5 + j.archBoost,
-      2.55,
-      1.45,
+      16.0 + j.northShift * 0.5,
+      16.5,
+      44.0 - j.northShift * 0.5,
+      43.5,
+      10.8,
+      16.1 + j.archBoost,
+      2.15,
+      1.35,
     );
     const diagArchB = sdStoneArch(
       x,
       y,
       z,
-      15.5 - j.southShift * 0.5,
-      44.0,
-      44.5 + j.southShift * 0.5,
-      16.0,
-      10.6,
-      15.3 - j.archBoost * 0.5,
-      2.55,
-      1.45,
+      16.0 - j.southShift * 0.5,
+      43.5,
+      44.0 + j.southShift * 0.5,
+      16.5,
+      10.8,
+      15.9 - j.archBoost * 0.5,
+      2.15,
+      1.35,
     );
-    d = smin(d, diagArchA, 1.1);
-    d = smin(d, diagArchB, 1.1);
+    d = smin(d, diagArchA, 1.0);
+    d = smin(d, diagArchB, 1.0);
 
     // Subtle floating-island skirt taper near outer archipelago rim
     const radial = Math.hypot(x - WORLD_CENTER_X, z - WORLD_CENTER_Z);
@@ -387,9 +414,8 @@ function evaluateThemeSdf(
   }
 
   if (theme === "canyon_arch") {
-    // Grand Mesa Canyon: Wide horseshoe rim with multi-level terraced mesas,
-    // a massive sweeping natural rock arch spanning the gorge, a carved valley pass,
-    // and sheltered inner ridge bunkers.
+    // Grand Mesa Canyon: Multi-tier terraced mesas framing a dramatic gorge spanned by
+    // a massive curved natural arch, a lower cave bypass tunnel, and rocky switchbacks.
     const northRim = sdTaperedPlateau(
       x,
       y,
@@ -397,7 +423,7 @@ function evaluateThemeSdf(
       30.0 + j.northShift,
       13.5,
       1.9,
-      14.4 + j.westHeight * 0.7,
+      14.8 + j.westHeight * 0.7,
       8.0,
       13.2,
       1.4,
@@ -474,7 +500,7 @@ function evaluateThemeSdf(
       9.6,
       1.3,
     );
-    // Low sandy canyon valley floor cove inside the gorge
+    // Low sandy canyon valley floor cove & rocky switchback ledges inside the gorge
     const valleyFloor = sdTaperedPlateau(
       x,
       y,
@@ -482,11 +508,15 @@ function evaluateThemeSdf(
       30.0,
       27.0,
       1.6,
-      2.9,
+      3.1,
       6.4,
-      8.0,
+      8.2,
       0.85,
     );
+    const swSwitchback = sdTaperedPlateau(x, y, z, 21.8, 35.8, 1.8, 6.4, 3.0, 4.4, 0.9);
+    const seSwitchback = sdTaperedPlateau(x, y, z, 38.2, 35.8, 1.8, 6.6, 3.0, 4.4, 0.9);
+    const westSpire = sdEllipsoid(x, y, z, 20.6, 13.0, 40.5, 1.5, 2.8, 1.8);
+    const eastSpire = sdEllipsoid(x, y, z, 39.4, 13.2, 40.5, 1.5, 2.8, 1.8);
 
     let d = smin(northRim, nwMesa, 2.0);
     d = smin(d, neMesa, 2.0);
@@ -495,13 +525,22 @@ function evaluateThemeSdf(
     d = smin(d, swMesa, 1.9);
     d = smin(d, seMesa, 1.9);
     d = smin(d, valleyFloor, 1.2);
+    d = smin(d, swSwitchback, 1.25);
+    d = smin(d, seSwitchback, 1.25);
+    d = smin(d, westSpire, 0.95);
+    d = smin(d, eastSpire, 0.95);
 
     // Carve dramatic central gorge opening southward
     const gorgeCore =
-      distToSegment(x, y, z, 30.0, 10.6, 24.0, 30.0, 9.6, 56.0) - 7.6;
-    const gorgeUpper = sdEllipsoid(x, y, z, 30.0, 14.5, 34.0, 9.2, 7.2, 14.0);
+      distToSegment(x, y, z, 30.0, 10.6, 24.0, 30.0, 9.6, 56.0) - 7.4;
+    const gorgeUpper = sdEllipsoid(x, y, z, 30.0, 14.5, 34.0, 9.0, 7.2, 13.8);
     const gorgeCut = smin(gorgeCore, gorgeUpper, 1.6);
     d = smax(d, -gorgeCut, 1.2);
+
+    // Lower cave bypass tunnel running beneath the north mesa rim
+    const northCaveTunnel =
+      distToSegment(x, y, z, 18.0, 6.0, 16.2, 42.0, 6.0, 16.2) - 2.25;
+    d = smax(d, -northCaveTunnel, 0.75);
 
     // Sheltered carved ridge bunkers along inner west & east canyon walls
     const westBunker = sdEllipsoid(x, y, z, 20.5, 8.2, 29.0, 3.6, 2.4, 4.2);
@@ -518,18 +557,18 @@ function evaluateThemeSdf(
       41.5,
       44.5,
       41.5,
-      10.6,
-      16.8 + j.archBoost,
-      3.0,
-      1.65,
+      10.8,
+      17.2 + j.archBoost,
+      2.65,
+      1.55,
     );
     d = smin(d, grandArch, 1.15);
 
     return d + organicNoise;
   }
 
-  // 'twin_pillars' (Sky Twin Atolls): Four sculpted rocky atoll plateaus arranged
-  // around two tall twin mesas with sweeping natural land bridges and coastal ledges.
+  // 'twin_pillars' (Sky Twin Atolls): Steep twin cliff fortresses with elevated stone
+  // overpasses, base tunnels, coastal sea-stacks, and canyon pinch points.
   const nwAtoll = sdTaperedPlateau(
     x,
     y,
@@ -579,7 +618,7 @@ function evaluateThemeSdf(
     1.3,
   );
 
-  // Two towering central twin mesas
+  // Two towering central twin cliff fortresses
   const westPillar = sdTaperedPlateau(
     x,
     y,
@@ -587,9 +626,9 @@ function evaluateThemeSdf(
     23.5,
     28.5,
     1.9,
-    16.4 + j.westHeight,
-    4.2,
-    6.2,
+    16.8 + j.westHeight,
+    4.6,
+    6.4,
     1.2,
   );
   const eastPillar = sdTaperedPlateau(
@@ -599,19 +638,25 @@ function evaluateThemeSdf(
     36.5,
     31.5,
     1.9,
-    16.8 + j.eastHeight,
-    4.2,
-    6.2,
+    17.2 + j.eastHeight,
+    4.6,
+    6.4,
     1.2,
   );
 
+  // Sculpted coastal sea-stacks rising from outer turquoise channels
+  const northStack = sdTaperedPlateau(x, y, z, 30.0, 10.2, 1.7, 9.2, 2.2, 3.0, 0.85);
+  const southStack = sdTaperedPlateau(x, y, z, 30.0, 49.8, 1.7, 8.8, 2.2, 3.0, 0.85);
+  const westStack = sdTaperedPlateau(x, y, z, 9.8, 30.0, 1.7, 8.5, 2.1, 2.9, 0.85);
+  const eastStack = sdTaperedPlateau(x, y, z, 50.2, 30.0, 1.7, 8.7, 2.1, 2.9, 0.85);
+
   // Sandy coastal coves & scenic overhanging cliff ledges
-  const nwBeach = sdTaperedPlateau(x, y, z, 18.8, 19.8, 1.6, 2.9, 3.6, 5.0, 0.8);
-  const seBeach = sdTaperedPlateau(x, y, z, 41.2, 40.2, 1.6, 2.9, 3.6, 5.0, 0.8);
+  const nwBeach = sdTaperedPlateau(x, y, z, 18.8, 19.8, 1.6, 3.0, 3.8, 5.2, 0.8);
+  const seBeach = sdTaperedPlateau(x, y, z, 41.2, 40.2, 1.6, 3.0, 3.8, 5.2, 0.8);
   const neLedge = sdEllipsoid(x, y, z, 41.5, 9.2, 19.5, 4.4, 1.5, 4.0);
   const swLedge = sdEllipsoid(x, y, z, 18.5, 9.0, 40.5, 4.4, 1.5, 4.0);
 
-  // Sweeping natural land bridges linking the twin pillars and the 4 outer atolls
+  // Narrow elevated stone overpasses linking the twin pillars and the 4 outer atolls
   const pillarBridge = sdStoneArch(
     x,
     y,
@@ -620,10 +665,10 @@ function evaluateThemeSdf(
     28.5,
     36.5,
     31.5,
-    14.6,
-    16.2 + j.archBoost * 0.6,
-    2.45,
-    1.4,
+    14.8,
+    16.8 + j.archBoost * 0.6,
+    2.15,
+    1.35,
   );
   const nwBridge = sdStoneArch(
     x,
@@ -634,9 +679,9 @@ function evaluateThemeSdf(
     23.5,
     28.0,
     9.8,
-    14.2,
-    2.25,
-    1.3,
+    14.4,
+    2.05,
+    1.25,
   );
   const swBridge = sdStoneArch(
     x,
@@ -647,9 +692,9 @@ function evaluateThemeSdf(
     23.5,
     29.5,
     9.8,
-    14.0,
-    2.25,
-    1.3,
+    14.2,
+    2.05,
+    1.25,
   );
   const neBridge = sdStoneArch(
     x,
@@ -660,9 +705,9 @@ function evaluateThemeSdf(
     36.5,
     30.5,
     10.0,
-    14.4,
-    2.25,
-    1.3,
+    14.6,
+    2.05,
+    1.25,
   );
   const seBridge = sdStoneArch(
     x,
@@ -673,25 +718,43 @@ function evaluateThemeSdf(
     36.5,
     32.0,
     10.0,
-    14.4,
-    2.25,
-    1.3,
+    14.6,
+    2.05,
+    1.25,
   );
+
+  // Blocking ridge cover outcrops on inner bridge approaches
+  const westPinchWall = sdEllipsoid(x, y, z, 19.5, 11.4, 21.8, 1.4, 2.2, 1.7);
+  const eastPinchWall = sdEllipsoid(x, y, z, 40.5, 11.6, 38.2, 1.4, 2.2, 1.7);
 
   let d = smin(nwAtoll, neAtoll, 1.8);
   d = smin(d, swAtoll, 1.8);
   d = smin(d, seAtoll, 1.8);
   d = smin(d, westPillar, 1.6);
   d = smin(d, eastPillar, 1.6);
+  d = smin(d, northStack, 1.0);
+  d = smin(d, southStack, 1.0);
+  d = smin(d, westStack, 1.0);
+  d = smin(d, eastStack, 1.0);
   d = smin(d, nwBeach, 1.2);
   d = smin(d, seBeach, 1.2);
   d = smin(d, neLedge, 1.1);
   d = smin(d, swLedge, 1.1);
-  d = smin(d, pillarBridge, 1.1);
-  d = smin(d, nwBridge, 1.0);
-  d = smin(d, swBridge, 1.0);
-  d = smin(d, neBridge, 1.0);
-  d = smin(d, seBridge, 1.0);
+  d = smin(d, pillarBridge, 1.05);
+  d = smin(d, nwBridge, 0.95);
+  d = smin(d, swBridge, 0.95);
+  d = smin(d, neBridge, 0.95);
+  d = smin(d, seBridge, 0.95);
+  d = smin(d, westPinchWall, 0.85);
+  d = smin(d, eastPinchWall, 0.85);
+
+  // Carved sea-cave bypass tunnels through the bases of the twin cliff fortresses
+  const westPillarTunnel =
+    distToSegment(x, y, z, 17.5, 5.6, 28.5, 29.5, 5.6, 28.5) - 2.15;
+  const eastPillarTunnel =
+    distToSegment(x, y, z, 30.5, 5.6, 31.5, 42.5, 5.6, 31.5) - 2.15;
+  d = smax(d, -westPillarTunnel, 0.7);
+  d = smax(d, -eastPillarTunnel, 0.7);
 
   // Carve dramatic underside hollows beneath the overhanging coastal ledges
   const underNE = sdEllipsoid(x, y, z, 41.8, 6.2, 19.2, 3.6, 2.0, 3.4);
@@ -1047,9 +1110,11 @@ export class SdfWorld {
     const selected: Vec3[] = [];
     const usedQuadrants = new Set<number>();
 
-    // First pass: pick up to 4 spawns across 4 distinct outer-archipelago quadrants (>= 22m apart)
+    // First pass: pick up to 4 spawns across 4 distinct outer-archipelago quadrants (>= 22m apart, inside Turn 6 crumble ring)
     const primaryTarget = Math.min(targetCount, 4);
-    const outerPreferred = candidates.filter((c) => c.radial >= 14.0);
+    const outerPreferred = candidates.filter(
+      (c) => c.radial >= 14.0 && c.radial <= 25.2,
+    );
     const firstPool = outerPreferred.length > 0 ? outerPreferred : candidates;
     const first = firstPool[0];
     if (first) {
@@ -1082,11 +1147,13 @@ export class SdfWorld {
           continue;
         }
         const meetsSeparation = minDist >= 22.0 ? 50.0 : 0.0;
-        const outerBonus = cand.radial >= 14.0 ? 10.0 : 0.0;
+        const safeInnerRing = cand.radial <= 25.2 ? 24.0 : 0.0;
+        const outerBonus = cand.radial >= 14.0 && cand.radial <= 25.2 ? 10.0 : 0.0;
         const metric =
           meetsSeparation +
+          safeInnerRing +
           outerBonus +
-          Math.min(minDist, 36.0) +
+          Math.min(minDist, 32.0) +
           cand.score * 0.35;
         if (metric > bestMetric) {
           bestMetric = metric;
@@ -1135,6 +1202,205 @@ export class SdfWorld {
     }
 
     return selected;
+  }
+
+  /**
+   * Deterministically place 6-10 interactive environmental hazards across tactical
+   * choke points, cliff corners, lower valleys, and canyon shortcuts, clear of spawns.
+   */
+  public findHazardPoints(spawnPoints: readonly Vec3[]): HazardPlacement[] {
+    const rng = createSeededRng(this.seed ^ 0x7c3e91);
+    const worldMaxX = SDF_DIMS.nx * SDF_DIMS.voxelSize;
+    const worldMaxZ = SDF_DIMS.nz * SDF_DIMS.voxelSize;
+
+    interface HazardCandidate {
+      pos: Vec3;
+      radial: number;
+      isCliffChoke: boolean;
+      isValleyLaunch: boolean;
+      isShortcut: boolean;
+      jitter: number;
+    }
+
+    const candidates: HazardCandidate[] = [];
+
+    for (let x = 6.0; x <= worldMaxX - 6.0; x += 1.5) {
+      for (let z = 6.0; z <= worldMaxZ - 6.0; z += 1.5) {
+        const surfaceY = this.getSurfaceY(x, z);
+        if (surfaceY === null || surfaceY < 2.25) {
+          continue;
+        }
+        const normal = this.sampleNormal(x, surfaceY, z);
+        if (normal.y < 0.65) {
+          continue;
+        }
+        if (
+          this.sample(x, surfaceY + 1.0, z) <= 0.1 ||
+          this.sample(x, surfaceY + 2.0, z) <= 0.1 ||
+          !this.isSolid(x, surfaceY - 1.0, z)
+        ) {
+          continue;
+        }
+
+        // Keep every hazard safely clear (>= 4.2m) of critter spawns
+        let tooCloseToSpawn = false;
+        for (const sp of spawnPoints) {
+          if (Math.hypot(x - sp.x, surfaceY - sp.y, z - sp.z) < 4.2) {
+            tooCloseToSpawn = true;
+            break;
+          }
+        }
+        if (tooCloseToSpawn) {
+          continue;
+        }
+
+        const radial = Math.hypot(x - WORLD_CENTER_X, z - WORLD_CENTER_Z);
+        if (radial > 25.5) {
+          continue;
+        }
+
+        // Check nearby elevation drop/rise for tactical positioning
+        let hasNearbyDrop = false;
+        let hasNearbyHighCliff = false;
+        const probes: ReadonlyArray<readonly [number, number]> = [
+          [2.4, 0],
+          [-2.4, 0],
+          [0, 2.4],
+          [0, -2.4],
+        ];
+        for (const [dx, dz] of probes) {
+          const ny = this.getSurfaceY(x + dx, z + dz);
+          if (ny === null || ny <= surfaceY - 2.2) {
+            hasNearbyDrop = true;
+          }
+          if (ny !== null && ny >= surfaceY + 2.6) {
+            hasNearbyHighCliff = true;
+          }
+        }
+
+        // Verify clear sky overhead for thermal geyser launchpads
+        let clearSky = true;
+        for (let h = 2.5; h <= 9.0; h += 1.6) {
+          if (this.isSolid(x, surfaceY + h, z)) {
+            clearSky = false;
+            break;
+          }
+        }
+
+        const isCliffChoke =
+          surfaceY >= 4.0 && (hasNearbyDrop || radial <= 20.0);
+        const isValleyLaunch =
+          clearSky &&
+          surfaceY >= 2.25 &&
+          surfaceY <= 11.2 &&
+          (hasNearbyHighCliff || surfaceY <= 8.5);
+        const isShortcut =
+          surfaceY >= 3.0 && radial >= 5.5 && radial <= 23.5;
+
+        candidates.push({
+          pos: { x, y: surfaceY, z },
+          radial,
+          isCliffChoke,
+          isValleyLaunch,
+          isShortcut,
+          jitter: rng(),
+        });
+      }
+    }
+
+    if (candidates.length === 0) {
+      return [];
+    }
+
+    const placed: HazardPlacement[] = [];
+
+    const farEnough = (pos: Vec3, minDist: number): boolean => {
+      for (const h of placed) {
+        const d = Math.hypot(
+          pos.x - h.position.x,
+          pos.y - h.position.y,
+          pos.z - h.position.z,
+        );
+        if (d < minDist) {
+          return false;
+        }
+      }
+      return true;
+    };
+
+    const pickFromPool = (
+      pool: HazardCandidate[],
+      type: HazardType,
+      radius: number,
+      count: number,
+      minSpacing: number,
+    ): void => {
+      const sorted = [...pool].sort((a, b) => b.jitter - a.jitter);
+      let added = 0;
+      for (const cand of sorted) {
+        if (added >= count) break;
+        if (!farEnough(cand.pos, minSpacing)) continue;
+        placed.push({ type, position: { ...cand.pos }, radius });
+        added += 1;
+      }
+      if (added < count) {
+        const fallback = [...candidates].sort((a, b) => b.jitter - a.jitter);
+        for (const cand of fallback) {
+          if (added >= count) break;
+          if (!farEnough(cand.pos, Math.max(3.6, minSpacing * 0.65))) continue;
+          placed.push({ type, position: { ...cand.pos }, radius });
+          added += 1;
+        }
+      }
+    };
+
+    // 1. Place 3 primary Blast Barrels (radius 1.4) at cliff corners & bridge chokes
+    const barrelPool = candidates.filter((c) => c.isCliffChoke);
+    pickFromPool(barrelPool, "blast_barrel", 1.4, 3, 7.5);
+
+    // Try placing 1 chain-reaction partner Blast Barrel within 3.2..4.2m of barrel #0
+    const anchorBarrel = placed.find((h) => h.type === "blast_barrel");
+    if (anchorBarrel) {
+      const partner = candidates.find((c) => {
+        const dAnchor = Math.hypot(
+          c.pos.x - anchorBarrel.position.x,
+          c.pos.y - anchorBarrel.position.y,
+          c.pos.z - anchorBarrel.position.z,
+        );
+        if (dAnchor < 3.1 || dAnchor > 4.2) return false;
+        return placed.every((other) => {
+          if (other === anchorBarrel) return true;
+          return (
+            Math.hypot(
+              c.pos.x - other.position.x,
+              c.pos.y - other.position.y,
+              c.pos.z - other.position.z,
+            ) >= 4.5
+          );
+        });
+      });
+      if (partner) {
+        placed.push({
+          type: "blast_barrel",
+          position: { ...partner.pos },
+          radius: 1.4,
+        });
+      } else {
+        pickFromPool(barrelPool, "blast_barrel", 1.4, 1, 6.0);
+      }
+    }
+
+    // 2. Place 3 Thermal Steam Geysers (radius 1.7) in lower valleys & beside tall cliffs
+    const geyserPool = candidates
+      .filter((c) => c.isValleyLaunch)
+      .sort((a, b) => a.pos.y - b.pos.y + (b.jitter - a.jitter) * 3.0);
+    pickFromPool(geyserPool, "steam_geyser", 1.7, 3, 6.5);
+
+    // 3. Place 2 Bramble Thorn Patches (radius 1.9) in canyon shortcuts & passes
+    const thornPool = candidates.filter((c) => c.isShortcut);
+    pickFromPool(thornPool, "thorn_patch", 1.9, 2, 6.0);
+
+    return placed.slice(0, 10);
   }
 
   /** Return a shallow copy of all applied carve operations. */

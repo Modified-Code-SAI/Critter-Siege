@@ -159,7 +159,12 @@ describe("CritterRig & TerrainRenderer", () => {
       expect(mesh.geometry.getAttribute("position")).toBeDefined();
       expect(mesh.geometry.getAttribute("normal")).toBeDefined();
       expect(mesh.geometry.getAttribute("color")).toBeDefined();
+      expect(mesh.geometry.getAttribute("uv")).toBeDefined();
       expect(mesh.geometry.getAttribute("position").count).toBeGreaterThan(0);
+      if (mesh.material instanceof THREE.MeshStandardMaterial) {
+        expect(mesh.material.bumpMap).not.toBeNull();
+        expect(mesh.material.roughnessMap).not.toBeNull();
+      }
       meshByKey.set(mesh.name, mesh);
       geometryByKey.set(mesh.name, mesh.geometry);
     }
@@ -214,10 +219,14 @@ describe("CritterRig & TerrainRenderer", () => {
     const vfx = new VfxSystem();
 
     vfx.spawnExplosion({ x: 10, y: 6, z: 12 }, 2.2, false);
+    vfx.spawnBarrelExplosion({ x: 24, y: 10, z: 26 }, 2.8);
+    vfx.spawnGeyserBurst({ x: 18, y: 4, z: 22 });
     vfx.spawnSplash({ x: 4, y: 2, z: 12 });
     vfx.updateWindRibbons({ x: 2.5, y: 0, z: -1.0 }, 0.05);
     vfx.setProjectileVisual({ x: 11, y: 8, z: 12 }, 0xff9933);
     vfx.setDronePing({ x: 14, y: 6, z: 10 });
+
+    expect(vfx.group.getObjectByName("vfx_pollen_motes")).toBeDefined();
 
     const meshes = collectMeshes(vfx.group);
     expect(meshes.length).toBeGreaterThan(20);

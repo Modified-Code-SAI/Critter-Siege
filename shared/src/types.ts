@@ -231,6 +231,18 @@ export interface CritterState {
   color: string;
 }
 
+/** Interactive environmental hazard types scattered across sculpted islands. */
+export type HazardType = "blast_barrel" | "steam_geyser" | "thorn_patch";
+
+/** Authoritative runtime state for one interactive environmental hazard. */
+export interface HazardState {
+  id: string;
+  type: HazardType;
+  position: Vec3;
+  radius: number;
+  active: boolean;
+}
+
 /** Parachuting or landed Evolution Pod pickup state. */
 export interface EvoPodState {
   id: string;
@@ -326,6 +338,7 @@ export interface MatchState {
   wind: Vec3;
   critters: CritterState[];
   evoPods: EvoPodState[];
+  hazards?: HazardState[];
   pendingDrafts: PendingDraftState[];
   carveLog: CarveOp[];
   scores: Record<string, number>;
@@ -352,6 +365,13 @@ export type EngineEvent =
       type: "TERRAIN_CARVED";
       op: CarveOp;
       dirtyChunks: string[];
+    }
+  | {
+      type: "HAZARD_TRIGGERED";
+      hazardId: string;
+      hazardType: HazardType;
+      position: Vec3;
+      affectedCritterIds: string[];
     }
   | {
       type: "EVO_POD_SPAWNED";

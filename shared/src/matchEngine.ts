@@ -8,6 +8,7 @@ import {
   computeCritterStats,
   createDefaultGadgetCharges,
 } from "./catalog.js";
+import * as Hazards from "./hazards.js";
 import { safeNormalizeVec3, simulateShot, type ShotParams } from "./physics.js";
 import { createSeededRng } from "./rng.js";
 import { SDF_DIMS, SdfWorld } from "./sdf.js";
@@ -20,6 +21,7 @@ import type {
   GadgetId,
   GameMode,
   HardpointSlot,
+  HazardState,
   MatchConfig,
   MatchPlayerSeed,
   MatchState,
@@ -144,6 +146,8 @@ export class MatchEngine {
   private wind: Vec3 = { x: 0, y: 0, z: 0 };
   private critters: CritterState[] = [];
   private evoPods: EvoPodState[] = [];
+  private hazards: HazardState[] = [];
+  private readonly thornTriggeredThisTurn = new Set<string>();
   private pendingDrafts: PendingDraftState[] = [];
   private teamScores: Record<TeamId, number> = { A: 0, B: 0 };
   private winnerId: string | null = null;
@@ -232,9 +236,18 @@ export class MatchEngine {
 
     const events: EngineEvent[] = [];
     events.push(...this.collectPodsInRange(critter));
+    events.push(
+      ...Hazards.applyGroundHazardsForCritter(
+        this._world,
+        this.hazards,
+        critter,
+        this.thornTriggeredThisTurn,
+        this.waterLevel,
+      ),
+    );
 
-    // Check water drowning
-    if (critter.position.y <= this.waterLevel) {
+    // Check water drowning or thorn KO
+    if (!critter.alive || critter.position.y <= this.waterLevel) {
       critter.alive = false;
       critter.hp = 0;
       if (this.checkRoundEnded()) {
@@ -346,7 +359,16 @@ export class MatchEngine {
       if (destination) {
         critter.position = destination;
         events.push(...this.collectPodsInRange(critter));
-        if (critter.position.y <= this.waterLevel) {
+        events.push(
+          ...Hazards.applyGroundHazardsForCritter(
+            this._world,
+            this.hazards,
+            critter,
+            this.thornTriggeredThisTurn,
+            this.waterLevel,
+          ),
+        );
+        if (!critter.alive || critter.position.y <= this.waterLevel) {
           critter.alive = false;
           critter.hp = 0;
           if (this.checkRoundEnded()) {
@@ -774,6 +796,7 @@ export class MatchEngine {
       wind: { ...this.wind },
       critters: this.critters.map(cloneCritter),
       evoPods: this.evoPods.map(clonePod),
+      hazards: this.hazards.map(Hazards.cloneHazard),
       pendingDrafts: this.pendingDrafts.map(cloneDraft),
       carveLog: this._world.getCarveLog(),
       scores,
@@ -825,6 +848,8 @@ export class MatchEngine {
         color: p.color ?? DEFAULT_COLORS[idx % DEFAULT_COLORS.length] ?? "#e67e22",
       };
     });
+    this.hazards = Hazards.createRoundHazards(this._world, this.round, spawns);
+    this.thornTriggeredThisTurn.clear();
   }
 
   private findCritter(id: string): CritterState | undefined {
@@ -1024,6 +1049,48 @@ export class MatchEngine {
       simulation,
     });
 
+    // Trigger Blast Barrel chain detonations from projectile/melee impacts
+    const awardEnemyKo = (attacker: CritterState): void => {
+      attacker.kills += 1;
+      attacker.score += 1;
+      if (this.config.mode === "2v2" && attacker.team) {
+        this.teamScores[attacker.team] += 1;
+      }
+      attacker.evoCharge = Math.min(100, attacker.evoCharge + 50);
+      if (attacker.evoCharge >= 100) {
+        attacker.pendingEvoDraft = true;
+      }
+    };
+
+    events.push(
+      ...Hazards.resolveBarrelChainDetonations({
+        world: this._world,
+        hazards: this.hazards,
+        critters: this.critters,
+        shooter,
+        initialImpacts: simulation.impacts,
+        waterLevel: this.waterLevel,
+        areTeammates: (a, b) => this.areTeammates(a, b),
+        onEnemyKo: awardEnemyKo,
+      }),
+    );
+
+    // Check if any knocked-back surviving critter landed on a Thermal Geyser or Thorn Patch
+    for (const hit of simulation.hits) {
+      const target = this.findCritter(hit.critterId);
+      if (target && target.alive) {
+        events.push(
+          ...Hazards.applyGroundHazardsForCritter(
+            this._world,
+            this.hazards,
+            target,
+            this.thornTriggeredThisTurn,
+            this.waterLevel,
+          ),
+        );
+      }
+    }
+
     return events;
   }
 
@@ -1053,6 +1120,7 @@ export class MatchEngine {
   private advanceToNextTurn(): EngineEvent[] {
     const events: EngineEvent[] = [];
     this.turnNumber += 1;
+    this.thornTriggeredThisTurn.clear();
 
     for (const c of this.critters) {
       c.droneNudgeUsedThisTurn = false;
@@ -1077,6 +1145,7 @@ export class MatchEngine {
       this.waterLevel = Number((this.waterLevel + 0.65).toFixed(2));
       const crumbleRadius = Math.max(10.0, 27.5 - (this.turnNumber - 6) * 1.3);
       this._world.crumbleOuterRing(crumbleRadius);
+      Hazards.pruneSubmergedHazards(this._world, this.hazards, this.waterLevel);
       events.push({ type: "WATER_ROSE", waterLevel: this.waterLevel });
 
       // Drown any critter submerged by rising water or left over open ocean after cliff crumble
@@ -1412,6 +1481,9 @@ export class MatchEngine {
       c.skyBomberDropUsedThisTurn = false;
       c.pendingEvoDraft = c.evoCharge >= 100;
     }
+
+    this.hazards = Hazards.createRoundHazards(this._world, this.round, spawns);
+    this.thornTriggeredThisTurn.clear();
 
     this.rollWind();
     this.activePlayerId = this.selectInitialActiveCritter();

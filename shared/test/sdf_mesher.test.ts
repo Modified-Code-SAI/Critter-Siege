@@ -340,4 +340,47 @@ describe("SdfWorld & Surface Nets smooth terrain mesher", () => {
     expect(dirty.length).toBeGreaterThanOrEqual(1);
     expect(elapsedMs).toBeLessThan(25);
   });
+
+  it("places 6-10 deterministic interactive hazards clear of spawns and sculpts a pass-through tunnel beneath emerald_spire pinnacle", () => {
+    for (const theme of ALL_THEMES) {
+      const worldA = new SdfWorld(7331, theme);
+      const worldB = new SdfWorld(7331, theme);
+      const spawnsA = worldA.findSpawnPoints(4);
+      const spawnsB = worldB.findSpawnPoints(4);
+
+      const hazardsA = worldA.findHazardPoints(spawnsA);
+      const hazardsB = worldB.findHazardPoints(spawnsB);
+
+      expect(hazardsA).toEqual(hazardsB);
+      expect(hazardsA.length).toBeGreaterThanOrEqual(6);
+      expect(hazardsA.length).toBeLessThanOrEqual(10);
+
+      const typesPresent = new Set(hazardsA.map((h) => h.type));
+      expect(typesPresent.has("blast_barrel")).toBe(true);
+      expect(typesPresent.has("steam_geyser")).toBe(true);
+      expect(typesPresent.has("thorn_patch")).toBe(true);
+
+      for (const h of hazardsA) {
+        expect(h.position.y).toBeGreaterThanOrEqual(2.2);
+        expect(worldA.sample(h.position.x, h.position.y + 1.0, h.position.z)).toBeGreaterThan(0);
+        if (h.type === "blast_barrel") expect(h.radius).toBe(1.4);
+        if (h.type === "steam_geyser") expect(h.radius).toBe(1.7);
+        if (h.type === "thorn_patch") expect(h.radius).toBe(1.9);
+
+        for (const sp of spawnsA) {
+          const dist = Math.hypot(
+            h.position.x - sp.x,
+            h.position.y - sp.y,
+            h.position.z - sp.z,
+          );
+          expect(dist).toBeGreaterThanOrEqual(4.0);
+        }
+      }
+    }
+
+    // Verify intricate vertical obstacle feature: pass-through tunnel at base of emerald_spire pinnacle
+    const spireWorld = new SdfWorld(4242, "emerald_spire");
+    expect(spireWorld.sample(30.0, 5.4, 30.0)).toBeGreaterThan(0);
+    expect(spireWorld.sample(30.0, 11.0, 30.0)).toBeLessThan(0);
+  });
 });

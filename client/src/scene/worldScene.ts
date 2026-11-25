@@ -10,10 +10,18 @@ const ISLAND_CENTER = new THREE.Vector3(
   WORLD_SPAN_Z * 0.5,
 );
 const DEFAULT_WATER_LEVEL = 2.0;
+const FOG_COLOR_HEX = 0xdbeeff;
+const FOG_DENSITY = 0.0023;
 
 interface CloudCluster {
   group: THREE.Group;
   speed: number;
+  baseY: number;
+  bobPhase: number;
+}
+
+interface DistantIslet {
+  group: THREE.Group;
   baseY: number;
   bobPhase: number;
 }
@@ -41,8 +49,8 @@ void main() {
 
   vec3 col;
   if (h >= 0.0) {
-    float lowMix = smoothstep(0.0, 0.22, h);
-    float highMix = smoothstep(0.18, 0.85, h);
+    float lowMix = smoothstep(0.0, 0.24, h);
+    float highMix = smoothstep(0.2, 0.85, h);
     col = mix(uHorizonColor, uMidSkyColor, lowMix);
     col = mix(col, uZenithColor, highMix);
   } else {
@@ -51,13 +59,140 @@ void main() {
   }
 
   float sunDot = max(dot(dir, normalize(uSunDir)), 0.0);
-  float sunHalo = pow(sunDot, 12.0) * 0.28;
-  float sunCore = smoothstep(0.996, 0.9992, sunDot) * 0.9;
-  col += vec3(1.0, 0.95, 0.82) * (sunHalo + sunCore);
+  float warmGlow = pow(sunDot, 5.0) * 0.16;
+  float sunHalo = pow(sunDot, 18.0) * 0.36;
+  float sunCore = smoothstep(0.9965, 0.9993, sunDot) * 1.1;
+  col += vec3(1.0, 0.89, 0.68) * warmGlow;
+  col += vec3(1.0, 0.96, 0.84) * (sunHalo + sunCore);
 
   gl_FragColor = vec4(col, 1.0);
 }
 `;
+
+/** Custom GLSL vertex shader for Critter Siege's animated stylized ocean waves. */
+export const OCEAN_VERTEX_SHADER = `
+uniform float uTime;
+varying vec3 vWorldPos;
+varying vec3 vWaveNormal;
+varying float vWaveCrest;
+
+void main() {
+  vec4 worldPos = modelMatrix * vec4(position, 1.0);
+  float wx = worldPos.x;
+  float wz = worldPos.z;
+
+  float w1 = sin(wx * 0.18 + uTime * 1.45) * 0.13;
+  float w2 = cos(wz * 0.15 - uTime * 1.18) * 0.11;
+  float w3 = sin((wx * 0.12 + wz * 0.11) + uTime * 0.92) * 0.08;
+  float w4 = cos((wx * 0.27 - wz * 0.23) - uTime * 1.85) * 0.04;
+  float disp = w1 + w2 + w3 + w4;
+  worldPos.y += disp;
+
+  float dHx =
+    cos(wx * 0.18 + uTime * 1.45) * 0.13 * 0.18 +
+    cos((wx * 0.12 + wz * 0.11) + uTime * 0.92) * 0.08 * 0.12 -
+    sin((wx * 0.27 - wz * 0.23) - uTime * 1.85) * 0.04 * 0.27;
+  float dHz =
+    -sin(wz * 0.15 - uTime * 1.18) * 0.11 * 0.15 +
+    cos((wx * 0.12 + wz * 0.11) + uTime * 0.92) * 0.08 * 0.11 +
+    sin((wx * 0.27 - wz * 0.23) - uTime * 1.85) * 0.04 * 0.23;
+
+  vWaveNormal = normalize(vec3(-dHx * 2.2, 1.0, -dHz * 2.2));
+  vWorldPos = worldPos.xyz;
+  vWaveCrest = clamp(disp * 2.2 + 0.5, 0.0, 1.0);
+
+  gl_Position = projectionMatrix * viewMatrix * worldPos;
+}
+`;
+
+/** Custom GLSL fragment shader for turquoise-to-cobalt gradient, sunlit shimmer, and surf foam. */
+export const OCEAN_FRAGMENT_SHADER = `
+uniform float uTime;
+uniform vec3 uSunDir;
+uniform vec2 uIslandCenter;
+uniform vec3 uShallowColor;
+uniform vec3 uMidColor;
+uniform vec3 uDeepColor;
+uniform vec3 uFoamColor;
+uniform vec3 uFogColor;
+uniform float uFogDensity;
+
+varying vec3 vWorldPos;
+varying vec3 vWaveNormal;
+varying float vWaveCrest;
+
+void main() {
+  vec3 N = normalize(vWaveNormal);
+  vec3 V = normalize(cameraPosition - vWorldPos);
+  vec3 L = normalize(uSunDir);
+
+  // Radial turquoise lagoon -> rich cerulean -> deep cobalt ocean gradient
+  float distFromCenter = length(vWorldPos.xz - uIslandCenter);
+  float shallowToMid = smoothstep(14.0, 42.0, distFromCenter);
+  float midToDeep = smoothstep(38.0, 115.0, distFromCenter);
+  vec3 waterCol = mix(uShallowColor, uMidColor, shallowToMid);
+  waterCol = mix(waterCol, uDeepColor, midToDeep);
+
+  // Stylized animated caustic shimmer in shallow archipelago channels
+  float causticA = sin(vWorldPos.x * 0.55 + uTime * 1.6 + sin(vWorldPos.z * 0.42));
+  float causticB = cos(vWorldPos.z * 0.52 - uTime * 1.35 + cos(vWorldPos.x * 0.37));
+  float caustic = smoothstep(0.45, 0.98, (causticA * causticB) * 0.5 + 0.5);
+  waterCol += vec3(0.16, 0.32, 0.30) * caustic * (1.0 - shallowToMid * 0.72);
+
+  // Subtle wave-crest turquoise brightening
+  waterCol += vec3(0.05, 0.14, 0.14) * smoothstep(0.55, 1.0, vWaveCrest);
+
+  // Sky reflection Fresnel + golden sunlit specular sparkle
+  float fresnel = pow(1.0 - max(dot(N, V), 0.0), 3.4);
+  waterCol = mix(waterCol, vec3(0.68, 0.90, 1.0), fresnel * 0.34);
+
+  vec3 H = normalize(L + V);
+  float specBroad = pow(max(dot(N, H), 0.0), 42.0) * 0.45;
+  float specGlint = pow(max(dot(N, H), 0.0), 190.0) * 1.15;
+  waterCol += vec3(1.0, 0.95, 0.80) * (specBroad + specGlint);
+
+  // Animated coastal surf foam rings & lagoon shoreline froth
+  float shoreWave = sin(distFromCenter * 0.75 - uTime * 2.2 + causticA * 1.4);
+  float innerLagoonFoam = smoothstep(0.74, 0.96, shoreWave) *
+    (1.0 - smoothstep(16.0, 36.0, distFromCenter)) * 0.38;
+  float outerSurfBand = exp(-pow((distFromCenter - 26.5) / 5.5, 2.0)) *
+    smoothstep(0.25, 0.9, sin(distFromCenter * 1.1 - uTime * 2.6 + causticB * 1.8) * 0.5 + 0.5);
+  float crestFroth = smoothstep(0.84, 1.0, vWaveCrest) * 0.22;
+  float foamMask = clamp(innerLagoonFoam + outerSurfBand * 0.52 + crestFroth, 0.0, 0.88);
+  waterCol = mix(waterCol, uFoamColor, foamMask);
+
+  // Exponential golden-hour distance fog matching scene.fog
+  float camDist = length(cameraPosition - vWorldPos);
+  float fogFactor = 1.0 - exp(-pow(camDist * uFogDensity, 2.0));
+  waterCol = mix(waterCol, uFogColor, clamp(fogFactor, 0.0, 1.0));
+
+  float alpha = mix(0.88, 0.98, clamp(shallowToMid + foamMask * 0.4, 0.0, 1.0));
+  gl_FragColor = vec4(waterCol, alpha);
+}
+`;
+
+/** Construct the custom GLSL stylized ocean ShaderMaterial. */
+export function createOceanShaderMaterial(
+  sunDir: THREE.Vector3,
+): THREE.ShaderMaterial {
+  return new THREE.ShaderMaterial({
+    vertexShader: OCEAN_VERTEX_SHADER,
+    fragmentShader: OCEAN_FRAGMENT_SHADER,
+    transparent: true,
+    depthWrite: true,
+    uniforms: {
+      uTime: { value: 0 },
+      uSunDir: { value: sunDir.clone().normalize() },
+      uIslandCenter: { value: new THREE.Vector2(ISLAND_CENTER.x, ISLAND_CENTER.z) },
+      uShallowColor: { value: new THREE.Color(0x1cd6d2) },
+      uMidColor: { value: new THREE.Color(0x0c88ba) },
+      uDeepColor: { value: new THREE.Color(0x0a3d80) },
+      uFoamColor: { value: new THREE.Color(0xefffff) },
+      uFogColor: { value: new THREE.Color(FOG_COLOR_HEX) },
+      uFogDensity: { value: FOG_DENSITY },
+    },
+  });
+}
 
 function disposeMaterial(material: THREE.Material | THREE.Material[]): void {
   if (Array.isArray(material)) {
@@ -69,9 +204,19 @@ function disposeMaterial(material: THREE.Material | THREE.Material[]): void {
   material.dispose();
 }
 
+function disposeObjectTree(root: THREE.Object3D): void {
+  root.traverse((obj) => {
+    if (obj instanceof THREE.Mesh) {
+      obj.geometry.dispose();
+      disposeMaterial(obj.material);
+    }
+  });
+}
+
 /**
- * Sunlit floating sky-island Three.js scene, lighting rig, sky-gradient dome,
- * drifting low-poly sculpted cloud clusters, and animated turquoise ocean + foam ring.
+ * Sunlit floating sky-island Three.js scene, golden-hour lighting rig (2048x2048 shadows),
+ * sky-gradient dome with glowing sun orb, distant silhouette floating islets, drifting
+ * sculpted cloud clusters, and custom GLSL animated stylized ocean with coastal surf foam.
  */
 export class WorldScene {
   public readonly scene: THREE.Scene;
@@ -81,12 +226,14 @@ export class WorldScene {
   private readonly hemiLight: THREE.HemisphereLight;
   private readonly fillLight: THREE.DirectionalLight;
   private readonly skyDome: THREE.Mesh;
+  private readonly sunOrbGroup: THREE.Group;
   private readonly cloudsRoot: THREE.Group;
   private readonly clouds: CloudCluster[] = [];
+  private readonly distantIsletsRoot: THREE.Group;
+  private readonly distantIslets: DistantIslet[] = [];
   private readonly waterGroup: THREE.Group;
   private readonly oceanMesh: THREE.Mesh;
-  private readonly oceanBaseX: Float32Array;
-  private readonly oceanBaseY: Float32Array;
+  private readonly oceanMat: THREE.ShaderMaterial;
   private readonly innerFoamRing: THREE.Mesh;
   private readonly outerFoamRing: THREE.Mesh;
   private readonly appendedToContainer: boolean;
@@ -95,7 +242,7 @@ export class WorldScene {
 
   public constructor(container: HTMLElement) {
     this.scene = new THREE.Scene();
-    this.scene.fog = new THREE.FogExp2(0xbfe8ff, 0.0026);
+    this.scene.fog = new THREE.FogExp2(FOG_COLOR_HEX, FOG_DENSITY);
 
     const isCanvas =
       typeof HTMLCanvasElement !== "undefined" &&
@@ -108,7 +255,7 @@ export class WorldScene {
     });
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 1.08;
+    this.renderer.toneMappingExposure = 1.1;
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     this.renderer.setPixelRatio(
@@ -129,32 +276,32 @@ export class WorldScene {
       this.appendedToContainer = false;
     }
 
-    // Daylight hemisphere + warm sun directional light casting soft shadows across the full archipelago
-    this.hemiLight = new THREE.HemisphereLight(0x9be2ff, 0x6f7c4a, 0.95);
+    // Golden-hour daylight hemisphere + warm sun directional light casting 2048x2048 soft shadows across 60m archipelago
+    this.hemiLight = new THREE.HemisphereLight(0xa8e6ff, 0x7a7b4c, 0.98);
     this.scene.add(this.hemiLight);
 
-    const shadowHalf = Math.max(22, WORLD_HALF + 10);
-    this.sunLight = new THREE.DirectionalLight(0xfff1d4, 2.05);
+    const shadowHalf = Math.max(36, WORLD_HALF + 10);
+    this.sunLight = new THREE.DirectionalLight(0xffebd0, 2.2);
     this.sunLight.position.set(
-      ISLAND_CENTER.x + WORLD_HALF * 1.2,
-      Math.max(34, WORLD_HALF * 1.75),
+      ISLAND_CENTER.x + WORLD_HALF * 1.25,
+      Math.max(36, WORLD_HALF * 1.65),
       ISLAND_CENTER.z + WORLD_HALF * 0.95,
     );
     this.sunLight.target.position.copy(ISLAND_CENTER);
     this.sunLight.castShadow = true;
     this.sunLight.shadow.mapSize.set(2048, 2048);
     this.sunLight.shadow.camera.near = 4;
-    this.sunLight.shadow.camera.far = Math.max(100, WORLD_HALF * 5.5);
+    this.sunLight.shadow.camera.far = Math.max(120, WORLD_HALF * 5.8);
     this.sunLight.shadow.camera.left = -shadowHalf;
     this.sunLight.shadow.camera.right = shadowHalf;
     this.sunLight.shadow.camera.top = shadowHalf;
     this.sunLight.shadow.camera.bottom = -shadowHalf;
-    this.sunLight.shadow.bias = -0.0005;
+    this.sunLight.shadow.bias = -0.00045;
     this.sunLight.shadow.normalBias = 0.04;
     this.scene.add(this.sunLight);
     this.scene.add(this.sunLight.target);
 
-    this.fillLight = new THREE.DirectionalLight(0x88d4ff, 0.48);
+    this.fillLight = new THREE.DirectionalLight(0x88d4ff, 0.52);
     this.fillLight.position.set(
       ISLAND_CENTER.x - WORLD_HALF * 1.1,
       Math.max(20, WORLD_HALF * 0.9),
@@ -162,21 +309,23 @@ export class WorldScene {
     );
     this.scene.add(this.fillLight);
 
-    // Stylized sky-gradient dome centered on the archipelago
+    // Stylized golden-hour sky-gradient dome + glowing sun orb
     const sunDir = new THREE.Vector3()
       .subVectors(this.sunLight.position, ISLAND_CENTER)
       .normalize();
-    const skyGeo = new THREE.SphereGeometry(Math.max(180, WORLD_HALF * 8.5), 28, 20);
+    const skyRadius = Math.max(210, WORLD_HALF * 8.5);
+    const skyGeo = new THREE.SphereGeometry(skyRadius, 28, 20);
     const skyMat = new THREE.ShaderMaterial({
       vertexShader: SKY_VERTEX_SHADER,
       fragmentShader: SKY_FRAGMENT_SHADER,
       side: THREE.BackSide,
       depthWrite: false,
+      fog: false,
       uniforms: {
-        uZenithColor: { value: new THREE.Color(0x1f7fd8) },
-        uMidSkyColor: { value: new THREE.Color(0x6ec6f7) },
-        uHorizonColor: { value: new THREE.Color(0xfff1cb) },
-        uOceanBounceColor: { value: new THREE.Color(0x229eb3) },
+        uZenithColor: { value: new THREE.Color(0x1e76cf) },
+        uMidSkyColor: { value: new THREE.Color(0x74c8f8) },
+        uHorizonColor: { value: new THREE.Color(0xffe8c2) },
+        uOceanBounceColor: { value: new THREE.Color(0x1b92b5) },
         uSunDir: { value: sunDir },
       },
     });
@@ -185,76 +334,92 @@ export class WorldScene {
     this.skyDome.position.copy(ISLAND_CENTER);
     this.scene.add(this.skyDome);
 
+    this.sunOrbGroup = new THREE.Group();
+    this.sunOrbGroup.name = "sun_orb_group";
+    const sunOrbDist = skyRadius * 0.84;
+    this.sunOrbGroup.position.copy(ISLAND_CENTER).addScaledVector(sunDir, sunOrbDist);
+
+    const sunCoreMesh = new THREE.Mesh(
+      new THREE.SphereGeometry(8.5, 16, 12),
+      new THREE.MeshBasicMaterial({
+        color: 0xfff8de,
+        fog: false,
+      }),
+    );
+    const sunHaloMesh = new THREE.Mesh(
+      new THREE.SphereGeometry(15.5, 16, 12),
+      new THREE.MeshBasicMaterial({
+        color: 0xffd27a,
+        transparent: true,
+        opacity: 0.26,
+        depthWrite: false,
+        fog: false,
+      }),
+    );
+    this.sunOrbGroup.add(sunCoreMesh, sunHaloMesh);
+    this.scene.add(this.sunOrbGroup);
+
+    // Distant silhouette floating islets framing the archipelago horizon
+    this.distantIsletsRoot = new THREE.Group();
+    this.distantIsletsRoot.name = "distant_floating_islets";
+    this.buildDistantIslets();
+    this.scene.add(this.distantIsletsRoot);
+
     // Drifting puffy sculpted low-poly cloud clusters
     this.cloudsRoot = new THREE.Group();
     this.cloudsRoot.name = "cloud_clusters";
     this.buildClouds();
     this.scene.add(this.cloudsRoot);
 
-    // Animated turquoise ocean plane + translucent coastal foam rings
+    // Custom GLSL animated stylized ocean + translucent coastal surf foam rings
     this.waterGroup = new THREE.Group();
     this.waterGroup.name = "ocean_group";
     this.waterGroup.position.set(ISLAND_CENTER.x, this.waterLevel, ISLAND_CENTER.z);
 
-    const oceanSpan = Math.max(240, WORLD_HALF * 12);
-    const oceanGeo = new THREE.PlaneGeometry(oceanSpan, oceanSpan, 52, 52);
-    const posAttr = oceanGeo.getAttribute("position");
-    this.oceanBaseX = new Float32Array(posAttr.count);
-    this.oceanBaseY = new Float32Array(posAttr.count);
-    for (let i = 0; i < posAttr.count; i++) {
-      this.oceanBaseX[i] = posAttr.getX(i);
-      this.oceanBaseY[i] = posAttr.getY(i);
-    }
-
-    const oceanMat = new THREE.MeshStandardMaterial({
-      color: 0x16b8c4,
-      roughness: 0.24,
-      metalness: 0.12,
-      transparent: true,
-      opacity: 0.88,
-    });
-    this.oceanMesh = new THREE.Mesh(oceanGeo, oceanMat);
-    this.oceanMesh.name = "turquoise_ocean";
+    const oceanSpan = Math.max(360, WORLD_HALF * 14);
+    const oceanGeo = new THREE.PlaneGeometry(oceanSpan, oceanSpan, 96, 96);
+    this.oceanMat = createOceanShaderMaterial(sunDir);
+    this.oceanMesh = new THREE.Mesh(oceanGeo, this.oceanMat);
+    this.oceanMesh.name = "turquoise_shader_ocean";
     this.oceanMesh.rotation.x = -Math.PI * 0.5;
-    this.oceanMesh.receiveShadow = true;
     this.waterGroup.add(this.oceanMesh);
 
     const innerFoamGeo = new THREE.RingGeometry(
-      WORLD_HALF * 0.58,
+      WORLD_HALF * 0.62,
       WORLD_HALF * 0.84,
       64,
       2,
     );
     const innerFoamMat = new THREE.MeshBasicMaterial({
-      color: 0xe6ffff,
+      color: 0xeaffff,
       transparent: true,
-      opacity: 0.34,
+      opacity: 0.26,
       depthWrite: false,
       side: THREE.DoubleSide,
     });
     this.innerFoamRing = new THREE.Mesh(innerFoamGeo, innerFoamMat);
     this.innerFoamRing.name = "coastal_foam_inner";
     this.innerFoamRing.rotation.x = -Math.PI * 0.5;
-    this.innerFoamRing.position.y = 0.04;
+    this.innerFoamRing.position.y = 0.08;
     this.waterGroup.add(this.innerFoamRing);
 
     const outerFoamGeo = new THREE.RingGeometry(
-      WORLD_HALF * 0.86,
-      WORLD_HALF * 1.02,
+      WORLD_HALF * 0.88,
+      WORLD_HALF * 1.04,
       64,
       1,
     );
     const outerFoamMat = new THREE.MeshBasicMaterial({
-      color: 0xc9f9ff,
+      color: 0xd0fbff,
       transparent: true,
-      opacity: 0.19,
+      opacity: 0.16,
       depthWrite: false,
       side: THREE.DoubleSide,
     });
     this.outerFoamRing = new THREE.Mesh(outerFoamGeo, outerFoamMat);
     this.outerFoamRing.name = "coastal_foam_outer";
     this.outerFoamRing.rotation.x = -Math.PI * 0.5;
-    this.outerFoamRing.position.y = 0.03;
+    this.outerFoamRing.position.y = 0.06;
     this.waterGroup.add(this.outerFoamRing);
 
     this.scene.add(this.waterGroup);
@@ -276,38 +441,34 @@ export class WorldScene {
     this.renderer.setSize(safeW, safeH, true);
   }
 
-  /** Animate ocean wave undulation, coastal foam pulse, and drifting cloud clusters. */
+  /** Animate GLSL ocean waves, coastal surf foam, distant islets, and drifting clouds. */
   public update(dtSec: number, elapsedSec: number): void {
     const safeDt = Number.isFinite(dtSec) ? Math.max(0, Math.min(dtSec, 0.1)) : 0;
     const t = Number.isFinite(elapsedSec) ? elapsedSec : 0;
 
-    // Gentle ocean surface undulation
-    const posAttr = this.oceanMesh.geometry.getAttribute("position");
-    if (posAttr instanceof THREE.BufferAttribute) {
-      for (let i = 0; i < posAttr.count; i++) {
-        const bx = this.oceanBaseX[i] ?? 0;
-        const by = this.oceanBaseY[i] ?? 0;
-        const wave =
-          Math.sin(bx * 0.14 + t * 1.45) * 0.11 +
-          Math.cos(by * 0.12 - t * 1.15) * 0.1 +
-          Math.sin((bx + by) * 0.08 + t * 0.8) * 0.05;
-        posAttr.setZ(i, wave);
-      }
-      posAttr.needsUpdate = true;
-      this.oceanMesh.geometry.computeVertexNormals();
+    // Advance GPU ocean wave shader clock
+    const timeUniform = this.oceanMat.uniforms.uTime;
+    if (timeUniform) {
+      timeUniform.value = t;
     }
 
     // Coastal foam ring gentle breathing pulse
-    const innerScale = 1.0 + Math.sin(t * 1.35) * 0.035;
+    const innerScale = 1.0 + Math.sin(t * 1.35) * 0.032;
     this.innerFoamRing.scale.set(innerScale, innerScale, 1);
     if (this.innerFoamRing.material instanceof THREE.MeshBasicMaterial) {
-      this.innerFoamRing.material.opacity = 0.3 + Math.sin(t * 1.35) * 0.08;
+      this.innerFoamRing.material.opacity = 0.22 + Math.sin(t * 1.35) * 0.07;
     }
 
-    const outerScale = 1.0 + Math.cos(t * 1.05 + 1.1) * 0.045;
+    const outerScale = 1.0 + Math.cos(t * 1.05 + 1.1) * 0.04;
     this.outerFoamRing.scale.set(outerScale, outerScale, 1);
     if (this.outerFoamRing.material instanceof THREE.MeshBasicMaterial) {
-      this.outerFoamRing.material.opacity = 0.17 + Math.cos(t * 1.05 + 1.1) * 0.06;
+      this.outerFoamRing.material.opacity = 0.14 + Math.cos(t * 1.05 + 1.1) * 0.05;
+    }
+
+    // Gentle vertical hover on distant silhouette floating islets
+    for (const islet of this.distantIslets) {
+      islet.group.position.y =
+        islet.baseY + Math.sin(t * 0.35 + islet.bobPhase) * 0.45;
     }
 
     // Drifting clouds spanning the archipelago sky
@@ -334,17 +495,19 @@ export class WorldScene {
     disposeMaterial(this.skyDome.material);
     this.scene.remove(this.skyDome);
 
-    this.cloudsRoot.traverse((obj) => {
-      if (obj instanceof THREE.Mesh) {
-        obj.geometry.dispose();
-        disposeMaterial(obj.material);
-      }
-    });
+    disposeObjectTree(this.sunOrbGroup);
+    this.scene.remove(this.sunOrbGroup);
+
+    disposeObjectTree(this.distantIsletsRoot);
+    this.scene.remove(this.distantIsletsRoot);
+    this.distantIslets.length = 0;
+
+    disposeObjectTree(this.cloudsRoot);
     this.scene.remove(this.cloudsRoot);
     this.clouds.length = 0;
 
     this.oceanMesh.geometry.dispose();
-    disposeMaterial(this.oceanMesh.material);
+    this.oceanMat.dispose();
     this.innerFoamRing.geometry.dispose();
     disposeMaterial(this.innerFoamRing.material);
     this.outerFoamRing.geometry.dispose();
@@ -362,6 +525,75 @@ export class WorldScene {
       this.renderer.domElement.parentElement.removeChild(
         this.renderer.domElement,
       );
+    }
+  }
+
+  private buildDistantIslets(): void {
+    const specs: ReadonlyArray<{
+      angle: number;
+      dist: number;
+      y: number;
+      scale: number;
+      phase: number;
+    }> = [
+      { angle: 0.35, dist: 92, y: 12, scale: 1.3, phase: 0.4 },
+      { angle: 1.25, dist: 112, y: 18, scale: 1.65, phase: 1.7 },
+      { angle: 2.15, dist: 96, y: 10, scale: 1.15, phase: 2.8 },
+      { angle: 3.1, dist: 124, y: 21, scale: 1.85, phase: 3.9 },
+      { angle: 4.05, dist: 104, y: 14, scale: 1.4, phase: 4.6 },
+      { angle: 5.05, dist: 88, y: 9, scale: 1.1, phase: 5.5 },
+      { angle: 5.75, dist: 118, y: 16, scale: 1.55, phase: 1.1 },
+    ];
+
+    for (const sp of specs) {
+      const group = new THREE.Group();
+      const rockMat = new THREE.MeshStandardMaterial({
+        color: 0x8b7e78,
+        roughness: 0.94,
+        metalness: 0.02,
+        flatShading: true,
+      });
+      const grassMat = new THREE.MeshStandardMaterial({
+        color: 0x5c9c64,
+        roughness: 0.92,
+        metalness: 0.0,
+        flatShading: true,
+      });
+
+      // Tapered floating rock underside (inverted cone) + rounded meadow crown
+      const underRock = new THREE.Mesh(
+        new THREE.ConeGeometry(5.6, 11.0, 8),
+        rockMat,
+      );
+      underRock.rotation.x = Math.PI;
+      underRock.position.y = -4.8;
+
+      const crown = new THREE.Mesh(
+        new THREE.IcosahedronGeometry(5.8, 1),
+        grassMat,
+      );
+      crown.scale.set(1.05, 0.36, 1.0);
+      crown.position.y = 0.7;
+
+      const spireTree = new THREE.Mesh(
+        new THREE.ConeGeometry(1.4, 3.8, 6),
+        new THREE.MeshStandardMaterial({
+          color: 0x3b7652,
+          roughness: 0.9,
+          flatShading: true,
+        }),
+      );
+      spireTree.position.set(1.2, 3.4, -0.6);
+
+      group.add(underRock, crown, spireTree);
+      group.position.set(
+        ISLAND_CENTER.x + Math.cos(sp.angle) * sp.dist,
+        sp.y,
+        ISLAND_CENTER.z + Math.sin(sp.angle) * sp.dist,
+      );
+      group.scale.setScalar(sp.scale);
+      this.distantIsletsRoot.add(group);
+      this.distantIslets.push({ group, baseY: sp.y, bobPhase: sp.phase });
     }
   }
 
@@ -396,7 +628,7 @@ export class WorldScene {
     for (const spec of cloudSpecs) {
       const cluster = new THREE.Group();
       const cloudMat = new THREE.MeshStandardMaterial({
-        color: 0xffffff,
+        color: 0xfffdf8,
         roughness: 0.94,
         metalness: 0.0,
       });

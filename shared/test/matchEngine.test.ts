@@ -944,4 +944,125 @@ describe("Authoritative MatchEngine turn state machine & review edge cases", () 
     const afterPlunge = engine.getSnapshot();
     expect(afterPlunge.critters.find((c) => c.id === activeId)?.alive).toBe(false);
   });
+
+  it("spawns 6-10 interactive hazards and triggers blast_barrel chain detonation, steam_geyser launch, and thorn_patch cooldown", () => {
+    const engine = new MatchEngine(
+      makeBaseConfig({
+        seed: 2027,
+        theme: "emerald_spire",
+      }),
+    );
+
+    const init = engine.getSnapshot();
+    const hazards = init.hazards ?? [];
+    expect(hazards.length).toBeGreaterThanOrEqual(6);
+    expect(hazards.length).toBeLessThanOrEqual(10);
+    expect(hazards.every((h) => h.active)).toBe(true);
+
+    const barrel = hazards.find((h) => h.type === "blast_barrel");
+    const geyser = hazards.find((h) => h.type === "steam_geyser");
+    const thorn = hazards.find((h) => h.type === "thorn_patch");
+    expect(barrel).toBeDefined();
+    expect(geyser).toBeDefined();
+    expect(thorn).toBeDefined();
+    if (!barrel || !geyser || !thorn) return;
+
+    // 1. Stepping onto a Thermal Steam Geyser catapults critter skyward and emits HAZARD_TRIGGERED
+    const geyserEvents = engine.applyMove("p1", { ...geyser.position }, 0, 0);
+    const geyserEv = geyserEvents.find(
+      (e) => e.type === "HAZARD_TRIGGERED" && e.hazardType === "steam_geyser",
+    );
+    expect(geyserEv).toBeDefined();
+    if (geyserEv && geyserEv.type === "HAZARD_TRIGGERED") {
+      expect(geyserEv.hazardId).toBe(geyser.id);
+      expect(geyserEv.affectedCritterIds).toContain("p1");
+    }
+    const p1AfterGeyser = engine.getSnapshot().critters.find((c) => c.id === "p1");
+    expect(p1AfterGeyser).toBeDefined();
+    if (p1AfterGeyser) {
+      expect(p1AfterGeyser.position.y).toBeGreaterThanOrEqual(geyser.position.y + 5.0);
+    }
+
+    // 2. Stepping into a Bramble Thorn Patch deals 12 damage + nudge, with 1-per-turn cooldown
+    const hpBeforeThorn = p1AfterGeyser?.hp ?? 100;
+    const thornEvents1 = engine.applyMove("p1", { ...thorn.position }, 0, 0);
+    const thornEv1 = thornEvents1.find(
+      (e) => e.type === "HAZARD_TRIGGERED" && e.hazardType === "thorn_patch",
+    );
+    expect(thornEv1).toBeDefined();
+    const p1AfterThorn1 = engine.getSnapshot().critters.find((c) => c.id === "p1");
+    expect(p1AfterThorn1?.hp).toBe(hpBeforeThorn - 12);
+    if (p1AfterThorn1) {
+      const nudgeDist = Math.hypot(
+        p1AfterThorn1.position.x - thorn.position.x,
+        p1AfterThorn1.position.z - thorn.position.z,
+      );
+      expect(nudgeDist).toBeGreaterThan(0.2);
+    }
+
+    // Second step onto thorn patch on same turn must NOT re-trigger
+    const thornEvents2 = engine.applyMove("p1", { ...thorn.position }, 0, 0);
+    expect(
+      thornEvents2.some(
+        (e) => e.type === "HAZARD_TRIGGERED" && e.hazardType === "thorn_patch",
+      ),
+    ).toBe(false);
+    expect(engine.getSnapshot().critters.find((c) => c.id === "p1")?.hp).toBe(
+      hpBeforeThorn - 12,
+    );
+
+    // 3. Firing near a Blast Barrel detonates it (carving 2.8m crater, dealing 28+ dmg, chain-detonating neighbor barrels!)
+    // Move p1 safely beside the barrel (~2.2m away) and shoot straight into the barrel
+    const barrelPartner = hazards.find(
+      (h) =>
+        h.type === "blast_barrel" &&
+        h.id !== barrel.id &&
+        Math.hypot(
+          h.position.x - barrel.position.x,
+          h.position.y - barrel.position.y,
+          h.position.z - barrel.position.z,
+        ) <= 4.6,
+    );
+
+    const shooterPos = {
+      x: barrel.position.x + 2.0,
+      y: barrel.position.y + 0.2,
+      z: barrel.position.z,
+    };
+    engine.applyMove("p1", shooterPos, 0, 0);
+    const hpBeforeBarrel =
+      engine.getSnapshot().critters.find((c) => c.id === "p1")?.hp ?? 100;
+
+    const fireEvents = engine.applyFire("p1", {
+      gadgetId: "gale_mortar",
+      direction: { x: -1, y: -0.25, z: 0 },
+      power: 0.2,
+    });
+
+    const barrelTriggers = fireEvents.filter(
+      (e) => e.type === "HAZARD_TRIGGERED" && e.hazardType === "blast_barrel",
+    );
+    expect(barrelTriggers.length).toBeGreaterThanOrEqual(barrelPartner ? 2 : 1);
+
+    const barrelCarve = fireEvents.find(
+      (e) => e.type === "TERRAIN_CARVED" && Math.abs(e.op.radius - 2.8) < 0.01,
+    );
+    expect(barrelCarve).toBeDefined();
+
+    const afterSnap = engine.getSnapshot();
+    const updatedBarrel = afterSnap.hazards?.find((h) => h.id === barrel.id);
+    expect(updatedBarrel?.active).toBe(false);
+    if (barrelPartner) {
+      const updatedPartner = afterSnap.hazards?.find(
+        (h) => h.id === barrelPartner.id,
+      );
+      expect(updatedPartner?.active).toBe(false);
+    }
+
+    const p1AfterBarrel = afterSnap.critters.find((c) => c.id === "p1");
+    expect(p1AfterBarrel).toBeDefined();
+    if (p1AfterBarrel) {
+      expect(p1AfterBarrel.hp).toBeLessThanOrEqual(hpBeforeBarrel - 28);
+    }
+  });
 });

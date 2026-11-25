@@ -9,6 +9,7 @@ import {
   type EngineEvent,
   type GadgetId,
   type GameMode,
+  type HazardState,
   type ImpactEvent,
   type MatchState,
   type SpeciesId,
@@ -22,6 +23,7 @@ import { TrajectoryPreview } from "./game/trajectoryPreview.js";
 import { GameClient, type LobbyViewState } from "./net/gameClient.js";
 import { ProgressionStore } from "./profile/progression.js";
 import { CritterRig } from "./scene/critterMesh.js";
+import { EnvironmentProps } from "./scene/environmentProps.js";
 import { TerrainRenderer } from "./scene/terrainRenderer.js";
 import { VfxSystem } from "./scene/vfx.js";
 import { WorldScene } from "./scene/worldScene.js";
@@ -190,6 +192,8 @@ class CritterSiegeApp {
 
   private activeWorld: SdfWorld;
   private terrainRenderer: TerrainRenderer;
+  private readonly environmentProps: EnvironmentProps;
+  private previewHazards: HazardState[] = [];
   private activeWorldKey = "";
   private appliedCarveCount = 0;
   private appliedCrumbleTurn = 0;
@@ -259,10 +263,31 @@ class CritterSiegeApp {
       Math.max(1, window.innerWidth) / Math.max(1, window.innerHeight);
     this.cameraRig = new CameraRig(aspect);
 
-    // Build initial live Lobby sculpted sky-island + sample species critters
+    // Build initial live Lobby sculpted sky-island + lush scenery + sample critters & hazards
     this.activeWorld = new SdfWorld(4242, this.lobbySelection.theme);
     this.terrainRenderer = new TerrainRenderer(this.activeWorld);
     this.worldScene.scene.add(this.terrainRenderer.group);
+
+    const previewSpawns = this.activeWorld.findSpawnPoints(
+      LOBBY_SHOWCASE_SPECIES.length,
+    );
+    this.previewHazards = this.activeWorld
+      .findHazardPoints(previewSpawns)
+      .map((p, idx) => ({
+        id: `preview-haz-${idx + 1}`,
+        type: p.type,
+        position: { ...p.position },
+        radius: p.radius,
+        active: true,
+      }));
+    this.environmentProps = new EnvironmentProps(
+      this.activeWorld,
+      1.8,
+      [...previewSpawns, ...this.previewHazards.map((h) => h.position)],
+    );
+    this.environmentProps.syncHazards(this.previewHazards, 0);
+    this.worldScene.scene.add(this.environmentProps.group);
+
     this.spawnLobbyShowcaseCritters();
 
     // GameClient (Sandbox + WebSocket Online)
@@ -585,6 +610,20 @@ class CritterSiegeApp {
       this.terrainRenderer.rebuildAll(this.activeWorld);
       this.input.setRaycastTargets([this.terrainRenderer.group]);
 
+      const avoidPoints: Vec3[] = [
+        ...state.critters.map((c) => c.position),
+        ...(state.hazards ?? []).map((h) => h.position),
+      ];
+      this.environmentProps.rebuild(
+        this.activeWorld,
+        state.waterLevel,
+        avoidPoints,
+      );
+      if (state.carveLog.length > 0 || state.turnNumber >= 6) {
+        this.environmentProps.pruneAfterCarve(this.activeWorld, state.waterLevel);
+      }
+      this.environmentProps.syncHazards(state.hazards ?? [], this.elapsedSec);
+
       this.dronePing = null;
       this.vfx.setDronePing(null);
       this.shotPlayback = null;
@@ -650,6 +689,7 @@ class CritterSiegeApp {
   }
 
   private handleEngineEvents(events: EngineEvent[]): void {
+    const localId = this.gameClient.getPlayerId();
     for (const ev of events) {
       switch (ev.type) {
         case "SHOT_RESOLVED": {
@@ -670,6 +710,26 @@ class CritterSiegeApp {
             splashesDone: false,
           };
           this.cameraRig.setShotCamActive(true);
+          break;
+        }
+        case "HAZARD_TRIGGERED": {
+          if (ev.hazardType === "blast_barrel") {
+            this.vfx.spawnBarrelExplosion(ev.position, 2.8);
+            this.audio.playExplosion(2.8);
+            this.hud.showToast("BOOM! Blast Barrel chain detonation!", "error");
+          } else if (ev.hazardType === "steam_geyser") {
+            this.vfx.spawnGeyserBurst(ev.position);
+            this.audio.playLaunch("vine_grapple");
+            if (localId && ev.affectedCritterIds.includes(localId)) {
+              this.localGrounded = false;
+              this.localVel.y = 10.5;
+            }
+            this.hud.showToast("WHOOSH! Thermal Geyser launch!", "info");
+          } else if (ev.hazardType === "thorn_patch") {
+            this.vfx.spawnExplosion(ev.position, 0.85, false);
+            this.audio.playLaunch("quake_club");
+            this.hud.showToast("OUCH! Bramble Thorn snag (-12 HP)!", "error");
+          }
           break;
         }
         case "EVO_POD_SPAWNED": {
@@ -734,6 +794,7 @@ class CritterSiegeApp {
     this.appliedCarveCount = state.carveLog.length;
     if (dirty.size > 0) {
       this.terrainRenderer.rebuildChunks(this.activeWorld, Array.from(dirty));
+      this.environmentProps.pruneAfterCarve(this.activeWorld, state.waterLevel);
     }
   }
 
@@ -758,6 +819,7 @@ class CritterSiegeApp {
     this.appliedCrumbleTurn = state.turnNumber;
     if (rebuildNow && dirty.size > 0) {
       this.terrainRenderer.rebuildChunks(this.activeWorld, Array.from(dirty));
+      this.environmentProps.pruneAfterCarve(this.activeWorld, state.waterLevel);
     }
   }
 
@@ -896,6 +958,7 @@ class CritterSiegeApp {
 
   private updateLobbyBackdrop(dtSec: number): void {
     this.vfx.updateWindRibbons({ x: 2.4, y: 0, z: 1.1 }, dtSec);
+    this.environmentProps.syncHazards(this.previewHazards, this.elapsedSec);
 
     const orbitAngle = this.elapsedSec * 0.14;
     const dist = Math.max(24, WORLD_SPAN_X * 0.85);
@@ -973,9 +1036,10 @@ class CritterSiegeApp {
       );
     }
 
-    // Sync VFX wind ribbons & Evo Pods
+    // Sync VFX wind ribbons, Evo Pods, and animated interactive hazards
     this.vfx.updateWindRibbons(state.wind, dtSec);
     this.vfx.syncEvoPods(state.evoPods, this.elapsedSec);
+    this.environmentProps.syncHazards(state.hazards ?? [], this.elapsedSec);
 
     // Update Camera Rig first so first_person visibility is 100% in sync this frame
     const focusCritter =
@@ -1392,6 +1456,26 @@ class CritterSiegeApp {
     this.activeWorld = new SdfWorld(4242, theme);
     this.terrainRenderer.rebuildAll(this.activeWorld);
     this.worldScene.setWaterLevel(1.8);
+
+    const previewSpawns = this.activeWorld.findSpawnPoints(
+      LOBBY_SHOWCASE_SPECIES.length,
+    );
+    this.previewHazards = this.activeWorld
+      .findHazardPoints(previewSpawns)
+      .map((p, idx) => ({
+        id: `preview-haz-${idx + 1}`,
+        type: p.type,
+        position: { ...p.position },
+        radius: p.radius,
+        active: true,
+      }));
+    this.environmentProps.rebuild(
+      this.activeWorld,
+      1.8,
+      [...previewSpawns, ...this.previewHazards.map((h) => h.position)],
+    );
+    this.environmentProps.syncHazards(this.previewHazards, this.elapsedSec);
+
     this.spawnLobbyShowcaseCritters();
   }
 
@@ -1477,6 +1561,7 @@ class CritterSiegeApp {
     this.input.dispose();
     this.hud.dispose();
     this.clearCritterRigs();
+    this.environmentProps.dispose();
     this.terrainRenderer.dispose();
     this.trajectoryPreview.dispose();
     this.vfx.dispose();

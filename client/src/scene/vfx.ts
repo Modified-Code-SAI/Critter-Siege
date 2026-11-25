@@ -4,6 +4,8 @@ import { SDF_DIMS, type EvoPodState, type Vec3 } from "@critter/shared";
 const WORLD_SPAN_X = SDF_DIMS.nx * SDF_DIMS.voxelSize;
 const WORLD_SPAN_Y = SDF_DIMS.ny * SDF_DIMS.voxelSize;
 const WORLD_SPAN_Z = SDF_DIMS.nz * SDF_DIMS.voxelSize;
+const POLLEN_MOTE_COUNT = 110;
+const WIND_RIBBON_COUNT = 22;
 
 interface DynamicParticle {
   mesh: THREE.Mesh;
@@ -77,8 +79,9 @@ function wrapCoord(v: number, min: number, max: number): number {
 }
 
 /**
- * Stylized 3D VFX system for Critter Siege: jagged rock-shard blasts, ocean splashes,
- * parachuting glowing cyan Evo Pods, sunlit wind-stream ribbons, projectile trails, and drone pings.
+ * Stylized 3D VFX system for Critter Siege: jagged rock-shard blasts, Blast Barrel
+ * chain-explosions, Thermal Geyser steam bursts, ocean splashes, drifting golden
+ * sunlit pollen motes, parachuting Evo Pods, scaled wind ribbons, and drone pings.
  */
 export class VfxSystem {
   public readonly group: THREE.Group;
@@ -86,6 +89,10 @@ export class VfxSystem {
   private readonly particleGroup: THREE.Group;
   private readonly evoPodGroup: THREE.Group;
   private readonly windGroup: THREE.Group;
+  private readonly pollenPoints: THREE.Points;
+  private readonly pollenPhases: Float32Array;
+  private readonly pollenSpeeds: Float32Array;
+  private lastWind: Vec3 = { x: 1.0, y: 0, z: 0.4 };
 
   private readonly sharedGeos: {
     shardDodeca: THREE.DodecahedronGeometry;
@@ -129,7 +136,7 @@ export class VfxSystem {
     this.windGroup.name = "vfx_wind_ribbons";
     this.group.add(this.windGroup);
 
-    const ribbonGeo = new THREE.CylinderGeometry(0.018, 0.056, 3.8, 6, 1, true);
+    const ribbonGeo = new THREE.CylinderGeometry(0.02, 0.062, 4.6, 6, 1, true);
     ribbonGeo.rotateX(Math.PI * 0.5);
 
     this.sharedGeos = {
@@ -143,8 +150,8 @@ export class VfxSystem {
       ribbon: ribbonGeo,
     };
 
-    // Build translucent sunlit wind-stream ribbons spanning the sculpted archipelago sky
-    for (let i = 0; i < 16; i++) {
+    // Build translucent sunlit wind-stream ribbons spanning the 60m archipelago sky
+    for (let i = 0; i < WIND_RIBBON_COUNT; i++) {
       const mat = new THREE.MeshBasicMaterial({
         color: 0xffffff,
         transparent: true,
@@ -155,7 +162,7 @@ export class VfxSystem {
       const mesh = new THREE.Mesh(this.sharedGeos.ribbon, mat);
       mesh.position.set(
         2 + this.nextRand() * (WORLD_SPAN_X - 4),
-        Math.max(5.5, WORLD_SPAN_Y * 0.28) + this.nextRand() * (WORLD_SPAN_Y * 0.52),
+        Math.max(5.5, WORLD_SPAN_Y * 0.26) + this.nextRand() * (WORLD_SPAN_Y * 0.56),
         2 + this.nextRand() * (WORLD_SPAN_Z - 4),
       );
       this.windGroup.add(mesh);
@@ -166,6 +173,41 @@ export class VfxSystem {
         phase: this.nextRand() * Math.PI * 2,
       });
     }
+
+    // Drifting golden sunlit ambient pollen motes floating lazily above the archipelago
+    const pollenPositions = new Float32Array(POLLEN_MOTE_COUNT * 3);
+    const pollenColors = new Float32Array(POLLEN_MOTE_COUNT * 3);
+    this.pollenPhases = new Float32Array(POLLEN_MOTE_COUNT);
+    this.pollenSpeeds = new Float32Array(POLLEN_MOTE_COUNT);
+
+    for (let i = 0; i < POLLEN_MOTE_COUNT; i++) {
+      pollenPositions[i * 3] = 4 + this.nextRand() * (WORLD_SPAN_X - 8);
+      pollenPositions[i * 3 + 1] = 3.2 + this.nextRand() * (WORLD_SPAN_Y * 0.65);
+      pollenPositions[i * 3 + 2] = 4 + this.nextRand() * (WORLD_SPAN_Z - 8);
+
+      const warmMix = this.nextRand();
+      pollenColors[i * 3] = 1.0;
+      pollenColors[i * 3 + 1] = 0.88 + warmMix * 0.1;
+      pollenColors[i * 3 + 2] = 0.48 + warmMix * 0.34;
+
+      this.pollenPhases[i] = this.nextRand() * Math.PI * 2;
+      this.pollenSpeeds[i] = 0.35 + this.nextRand() * 0.55;
+    }
+
+    const pollenGeo = new THREE.BufferGeometry();
+    pollenGeo.setAttribute("position", new THREE.BufferAttribute(pollenPositions, 3));
+    pollenGeo.setAttribute("color", new THREE.BufferAttribute(pollenColors, 3));
+    const pollenMat = new THREE.PointsMaterial({
+      size: 0.26,
+      vertexColors: true,
+      transparent: true,
+      opacity: 0.72,
+      depthWrite: false,
+      sizeAttenuation: true,
+    });
+    this.pollenPoints = new THREE.Points(pollenGeo, pollenMat);
+    this.pollenPoints.name = "vfx_pollen_motes";
+    this.group.add(this.pollenPoints);
 
     // Glowing projectile energy shell
     this.projectileGroup = new THREE.Group();
@@ -412,6 +454,167 @@ export class VfxSystem {
     }
   }
 
+  /** Spawn a fiery crimson-amber Blast Barrel chain-explosion with double shockwave & ember shower. */
+  public spawnBarrelExplosion(position: Vec3, radius = 2.8): void {
+    const safeRadius = Number.isFinite(radius) ? Math.max(1.4, radius) : 2.8;
+    this.spawnExplosion(position, safeRadius, false);
+
+    // Secondary fiery crimson shockwave ring
+    const crimsonRingMat = new THREE.MeshBasicMaterial({
+      color: 0xff3d1f,
+      transparent: true,
+      opacity: 0.95,
+      depthWrite: false,
+    });
+    const crimsonRing = new THREE.Mesh(this.sharedGeos.shockRing, crimsonRingMat);
+    crimsonRing.position.set(position.x, position.y + 0.22, position.z);
+    crimsonRing.rotation.x = Math.PI * 0.5;
+    this.particleGroup.add(crimsonRing);
+    this.particles.push({
+      mesh: crimsonRing,
+      material: crimsonRingMat,
+      velocity: new THREE.Vector3(0, 0.55, 0),
+      spin: new THREE.Vector3(0, 0, 0),
+      gravity: 0,
+      age: 0,
+      maxAge: 0.56,
+      startScale: 0.5,
+      endScale: safeRadius * 2.8,
+      baseScaleVec: new THREE.Vector3(1, 1, 1),
+      baseOpacity: 0.95,
+      kind: "shockwave",
+    });
+
+    // Fiery ember octahedron sparks flying in high arcs
+    for (let i = 0; i < 16; i++) {
+      const emberMat = new THREE.MeshBasicMaterial({
+        color: i % 2 === 0 ? 0xffb82e : 0xff4b1f,
+        transparent: true,
+        opacity: 0.95,
+        depthWrite: false,
+      });
+      const emberMesh = new THREE.Mesh(this.sharedGeos.spark, emberMat);
+      const angle = (i / 16) * Math.PI * 2 + this.nextRand() * 0.4;
+      const spd = 4.2 + this.nextRand() * 5.8;
+      emberMesh.position.set(position.x, position.y + 0.4, position.z);
+      this.particleGroup.add(emberMesh);
+      this.particles.push({
+        mesh: emberMesh,
+        material: emberMat,
+        velocity: new THREE.Vector3(
+          Math.cos(angle) * spd,
+          4.5 + this.nextRand() * 5.5,
+          Math.sin(angle) * spd,
+        ),
+        spin: new THREE.Vector3(8, 10, 7),
+        gravity: 12.5,
+        age: 0,
+        maxAge: 0.65 + this.nextRand() * 0.45,
+        startScale: 1.5,
+        endScale: 0.15,
+        baseScaleVec: new THREE.Vector3(1, 1, 1),
+        baseOpacity: 0.95,
+        kind: "spark",
+      });
+    }
+  }
+
+  /** Spawn a pressurized vertical Thermal Steam Geyser eruption plume & sky-cyan launch ring. */
+  public spawnGeyserBurst(position: Vec3): void {
+    const ringMat = new THREE.MeshBasicMaterial({
+      color: 0x7ef9ff,
+      transparent: true,
+      opacity: 0.9,
+      depthWrite: false,
+    });
+    const ringMesh = new THREE.Mesh(this.sharedGeos.shockRing, ringMat);
+    ringMesh.position.set(position.x, position.y + 0.15, position.z);
+    ringMesh.rotation.x = Math.PI * 0.5;
+    this.particleGroup.add(ringMesh);
+    this.particles.push({
+      mesh: ringMesh,
+      material: ringMat,
+      velocity: new THREE.Vector3(0, 4.5, 0),
+      spin: new THREE.Vector3(0, 0, 0),
+      gravity: 0,
+      age: 0,
+      maxAge: 0.52,
+      startScale: 0.55,
+      endScale: 2.6,
+      baseScaleVec: new THREE.Vector3(1, 1, 1),
+      baseOpacity: 0.9,
+      kind: "shockwave",
+    });
+
+    // Billowing pressurized steam column
+    for (let i = 0; i < 12; i++) {
+      const a = (i / 12) * Math.PI * 2 + this.nextRand() * 0.35;
+      const steamMat = new THREE.MeshBasicMaterial({
+        color: i % 3 === 0 ? 0xbefaff : 0xf2ffff,
+        transparent: true,
+        opacity: 0.78,
+        depthWrite: false,
+      });
+      const steamMesh = new THREE.Mesh(this.sharedGeos.smoke, steamMat);
+      steamMesh.position.set(
+        position.x + Math.cos(a) * 0.25,
+        position.y + 0.25 + i * 0.12,
+        position.z + Math.sin(a) * 0.25,
+      );
+      this.particleGroup.add(steamMesh);
+      this.particles.push({
+        mesh: steamMesh,
+        material: steamMat,
+        velocity: new THREE.Vector3(
+          Math.cos(a) * (0.4 + this.nextRand() * 0.9),
+          7.5 + this.nextRand() * 5.5,
+          Math.sin(a) * (0.4 + this.nextRand() * 0.9),
+        ),
+        spin: new THREE.Vector3(0.5, 1.2, 0.5),
+        gravity: 2.5,
+        age: 0,
+        maxAge: 0.72 + this.nextRand() * 0.4,
+        startScale: 0.65,
+        endScale: 2.35,
+        baseScaleVec: new THREE.Vector3(1, 1.15, 1),
+        baseOpacity: 0.78,
+        kind: "smoke",
+      });
+    }
+
+    // Sparkling geothermal spray droplets
+    for (let i = 0; i < 10; i++) {
+      const a = this.nextRand() * Math.PI * 2;
+      const dropMat = new THREE.MeshBasicMaterial({
+        color: 0x76f7ff,
+        transparent: true,
+        opacity: 0.9,
+        depthWrite: false,
+      });
+      const dropMesh = new THREE.Mesh(this.sharedGeos.droplet, dropMat);
+      dropMesh.position.set(position.x, position.y + 0.3, position.z);
+      this.particleGroup.add(dropMesh);
+      this.particles.push({
+        mesh: dropMesh,
+        material: dropMat,
+        velocity: new THREE.Vector3(
+          Math.cos(a) * (1.2 + this.nextRand() * 1.8),
+          9.5 + this.nextRand() * 5.0,
+          Math.sin(a) * (1.2 + this.nextRand() * 1.8),
+        ),
+        spin: new THREE.Vector3(0, 0, 0),
+        gravity: 15.0,
+        age: 0,
+        maxAge: 0.75 + this.nextRand() * 0.35,
+        startScale: 1.0,
+        endScale: 0.2,
+        baseScaleVec: new THREE.Vector3(1, 1.4, 1),
+        baseOpacity: 0.9,
+        kind: "droplet",
+      });
+    }
+  }
+
   /** Spawn a turquoise ocean splash spray and surface foam ripple. */
   public spawnSplash(position: Vec3): void {
     const ringMat = new THREE.MeshBasicMaterial({
@@ -524,6 +727,7 @@ export class VfxSystem {
   /** Animate sunlit white wind ribbons streaming in the exact 3D wind direction and speed. */
   public updateWindRibbons(wind: Vec3, dtSec: number): void {
     const safeDt = Number.isFinite(dtSec) ? Math.max(0, Math.min(dtSec, 0.1)) : 0;
+    this.lastWind = { x: wind.x, y: wind.y, z: wind.z };
     const speed = Math.hypot(wind.x, wind.y, wind.z);
     const hasWind = Number.isFinite(speed) && speed > 0.08;
 
@@ -531,8 +735,8 @@ export class VfxSystem {
       ? new THREE.Vector3(wind.x / speed, wind.y / speed, wind.z / speed)
       : new THREE.Vector3(1, 0, 0);
     const quat = new THREE.Quaternion().setFromUnitVectors(FORWARD_Z, dir);
-    const driftSpeed = hasWind ? Math.max(1.8, speed * 1.35) : 0.4;
-    const targetOpacity = hasWind ? Math.min(0.45, 0.12 + speed * 0.045) : 0.06;
+    const driftSpeed = hasWind ? Math.max(2.0, speed * 1.45) : 0.45;
+    const targetOpacity = hasWind ? Math.min(0.46, 0.13 + speed * 0.045) : 0.06;
 
     for (const ribbon of this.windRibbons) {
       ribbon.mesh.quaternion.copy(quat);
@@ -543,12 +747,12 @@ export class VfxSystem {
       ribbon.mesh.position.x = wrapCoord(ribbon.mesh.position.x, -3, WORLD_SPAN_X + 3);
       ribbon.mesh.position.y = wrapCoord(
         ribbon.mesh.position.y,
-        Math.max(4.5, WORLD_SPAN_Y * 0.25),
-        WORLD_SPAN_Y * 0.85,
+        Math.max(4.5, WORLD_SPAN_Y * 0.24),
+        WORLD_SPAN_Y * 0.88,
       );
       ribbon.mesh.position.z = wrapCoord(ribbon.mesh.position.z, -3, WORLD_SPAN_Z + 3);
       ribbon.material.opacity = targetOpacity;
-      const stretch = hasWind ? Math.min(1.8, 0.75 + speed * 0.14) : 0.55;
+      const stretch = hasWind ? Math.min(2.1, 0.8 + speed * 0.16) : 0.6;
       ribbon.mesh.scale.set(1, 1, stretch);
     }
   }
@@ -591,10 +795,30 @@ export class VfxSystem {
     this.dronePingGroup.position.set(position.x, position.y, position.z);
   }
 
-  /** Advance active VFX particle lifetimes, spins, fades, and clean up expired effects. */
+  /** Advance active VFX particle lifetimes, sunlit pollen drift, spins, fades, and cleanup. */
   public update(dtSec: number, elapsedSec: number): void {
     const safeDt = Number.isFinite(dtSec) ? Math.max(0, Math.min(dtSec, 0.1)) : 0;
     const t = Number.isFinite(elapsedSec) ? elapsedSec : 0;
+
+    // Gentle sunlit golden pollen motes drifting in the island breeze
+    const pollenPos = this.pollenPoints.geometry.getAttribute("position");
+    if (pollenPos instanceof THREE.BufferAttribute) {
+      const wx = this.lastWind.x * 0.22;
+      const wz = this.lastWind.z * 0.22;
+      for (let i = 0; i < POLLEN_MOTE_COUNT; i++) {
+        const phase = this.pollenPhases[i] ?? 0;
+        const spd = this.pollenSpeeds[i] ?? 0.5;
+        let x = pollenPos.getX(i) + (wx + Math.sin(t * 0.7 + phase) * 0.35) * spd * safeDt;
+        let y = pollenPos.getY(i) + Math.cos(t * 0.9 + phase * 1.3) * 0.28 * safeDt;
+        let z = pollenPos.getZ(i) + (wz + Math.cos(t * 0.65 + phase) * 0.35) * spd * safeDt;
+
+        x = wrapCoord(x, 3, WORLD_SPAN_X - 3);
+        y = wrapCoord(y, 2.8, WORLD_SPAN_Y * 0.78);
+        z = wrapCoord(z, 3, WORLD_SPAN_Z - 3);
+        pollenPos.setXYZ(i, x, y, z);
+      }
+      pollenPos.needsUpdate = true;
+    }
 
     for (let i = this.particles.length - 1; i >= 0; i--) {
       const p = this.particles[i];
@@ -644,7 +868,7 @@ export class VfxSystem {
     }
   }
 
-  /** Dispose all active particles, Evo Pods, wind ribbons, markers, and shared geometries. */
+  /** Dispose all active particles, pollen motes, Evo Pods, wind ribbons, markers, and shared geometries. */
   public dispose(): void {
     for (const p of this.particles) {
       this.particleGroup.remove(p.mesh);
@@ -663,6 +887,10 @@ export class VfxSystem {
       ribbon.material.dispose();
     }
     this.windRibbons.length = 0;
+
+    this.pollenPoints.geometry.dispose();
+    disposeMaterial(this.pollenPoints.material);
+    this.group.remove(this.pollenPoints);
 
     disposeObjectTree(this.projectileGroup);
     disposeObjectTree(this.dronePingGroup);
