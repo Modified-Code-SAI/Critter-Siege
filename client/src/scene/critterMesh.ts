@@ -1190,6 +1190,8 @@ export class CritterRig {
   private hpSprite: THREE.Sprite | null = null;
   private currentHp = 100;
   private currentMaxHp = 100;
+  private lastHp = 100;
+  private lastMaxHp = 100;
   private animTime = 0;
 
   public constructor(species: SpeciesId, teamColor: string, label: string) {
@@ -1292,10 +1294,16 @@ export class CritterRig {
 
   /** Update displayed HP bar ratio and alive visibility state. */
   public setHp(hp: number, maxHp: number, alive: boolean): void {
-    this.currentHp = Math.max(0, hp);
-    this.currentMaxHp = Math.max(1, maxHp);
+    const nextHp = Math.max(0, hp);
+    const nextMaxHp = Math.max(1, maxHp);
     this.root.visible = alive;
-    this.redrawHpBar();
+    if (nextHp !== this.lastHp || nextMaxHp !== this.lastMaxHp) {
+      this.currentHp = nextHp;
+      this.currentMaxHp = nextMaxHp;
+      this.lastHp = nextHp;
+      this.lastMaxHp = nextMaxHp;
+      this.redrawHpBar();
+    }
   }
 
   /** Advance subtle idle bob, hop tilt, apex halo spin, and active selection ring pulse. */

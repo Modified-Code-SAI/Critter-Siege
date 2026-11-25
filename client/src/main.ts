@@ -186,6 +186,10 @@ class CritterSiegeApp {
   private terrainRenderer: TerrainRenderer;
   private activeWorldKey = "";
   private appliedCarveCount = 0;
+  private appliedCrumbleTurn = 0;
+
+  private readonly onWindowResizeBound: () => void;
+  private readonly onWindowKeyDownBound: (e: KeyboardEvent) => void;
 
   private onlineLobby: LobbyViewState | null = null;
   private matchState: MatchState | null = null;
@@ -444,8 +448,8 @@ class CritterSiegeApp {
     );
     this.input.setRaycastTargets([this.terrainRenderer.group]);
 
-    window.addEventListener("resize", () => this.handleResize());
-    window.addEventListener("keydown", (e) => {
+    this.onWindowResizeBound = () => this.handleResize();
+    this.onWindowKeyDownBound = (e: KeyboardEvent) => {
       if (isEditableElement(e.target) || e.repeat) {
         return;
       }
@@ -455,7 +459,10 @@ class CritterSiegeApp {
       } else if (e.code === "Digit7") {
         this.selectGadgetByIndex(6);
       }
-    });
+    };
+
+    window.addEventListener("resize", this.onWindowResizeBound);
+    window.addEventListener("keydown", this.onWindowKeyDownBound);
 
     this.refreshLobbyHud();
 
@@ -523,6 +530,7 @@ class CritterSiegeApp {
 
     this.activeWorldKey = "";
     this.appliedCarveCount = 0;
+    this.appliedCrumbleTurn = 0;
     this.rebuildLobbyPreview(this.lobbySelection.theme);
     this.refreshLobbyHud();
   }
@@ -562,10 +570,12 @@ class CritterSiegeApp {
       this.activeWorldKey = worldKey;
       this.activeWorld = new SdfWorld(state.seed + state.round * 101, state.theme);
       this.appliedCarveCount = 0;
+      this.appliedCrumbleTurn = 0;
       for (const op of state.carveLog) {
         this.activeWorld.applyCarve(op);
         this.appliedCarveCount += 1;
       }
+      this.syncSuddenDeathCrumble(state, false);
       this.terrainRenderer.rebuildAll(this.activeWorld);
       this.input.setRaycastTargets([this.terrainRenderer.group]);
 
@@ -575,8 +585,11 @@ class CritterSiegeApp {
       this.cameraRig.setShotCamActive(false);
       this.localTurnKey = "";
       this.lastCountdownSec = -1;
-    } else if (!this.shotPlayback && state.carveLog.length > this.appliedCarveCount) {
-      this.flushPendingCarves(state);
+    } else {
+      if (!this.shotPlayback && state.carveLog.length > this.appliedCarveCount) {
+        this.flushPendingCarves(state);
+      }
+      this.syncSuddenDeathCrumble(state, true);
     }
 
     this.worldScene.setWaterLevel(state.waterLevel);
@@ -714,6 +727,30 @@ class CritterSiegeApp {
     }
     this.appliedCarveCount = state.carveLog.length;
     if (dirty.size > 0) {
+      this.terrainRenderer.rebuildChunks(this.activeWorld, Array.from(dirty));
+    }
+  }
+
+  private syncSuddenDeathCrumble(
+    state: MatchState,
+    rebuildNow: boolean,
+  ): void {
+    if (state.turnNumber < 4 || state.turnNumber <= this.appliedCrumbleTurn) {
+      return;
+    }
+    const dirty = new Set<string>();
+    for (
+      let t = Math.max(4, this.appliedCrumbleTurn + 1);
+      t <= state.turnNumber;
+      t++
+    ) {
+      const crumbleRadius = Math.max(4.5, 11.5 - (t - 4) * 0.6);
+      for (const key of this.activeWorld.crumbleOuterRing(crumbleRadius)) {
+        dirty.add(key);
+      }
+    }
+    this.appliedCrumbleTurn = state.turnNumber;
+    if (rebuildNow && dirty.size > 0) {
       this.terrainRenderer.rebuildChunks(this.activeWorld, Array.from(dirty));
     }
   }
@@ -934,7 +971,33 @@ class CritterSiegeApp {
     this.vfx.updateWindRibbons(state.wind, dtSec);
     this.vfx.syncEvoPods(state.evoPods, this.elapsedSec);
 
-    // Update all critter rigs
+    // Update Camera Rig first so first_person visibility is 100% in sync this frame
+    const focusCritter =
+      isMyTurn && localCritter
+        ? localCritter
+        : activeCritter ?? localCritter;
+    const focusPos: Vec3 =
+      canMove && localCritter
+        ? { x: this.localPos.x, y: this.localPos.y, z: this.localPos.z }
+        : focusCritter
+          ? focusCritter.position
+          : { x: 12, y: 6, z: 12 };
+
+    this.cameraRig.update({
+      targetPos: focusPos,
+      yaw: canMove ? moveInput.yaw : focusCritter?.yaw ?? 0,
+      pitch: canMove ? moveInput.pitch : 0.15,
+      phase: state.phase,
+      localAlive,
+      shotPos,
+      world: this.activeWorld,
+      dtSec,
+    });
+
+    const effectiveCamMode = this.cameraRig.getMode();
+    const trackedCritterId = focusCritter?.id ?? localId;
+
+    // Update all critter rigs (hiding tracked critter cleanly in First-Person Optic Visor)
     for (const c of state.critters) {
       const rig = this.critterRigs.get(c.id);
       if (!rig) continue;
@@ -962,35 +1025,17 @@ class CritterSiegeApp {
       }
 
       rig.setHp(c.hp, c.maxHp, c.alive);
-      if (c.id === localId && camMode === "first_person") {
+      if (
+        effectiveCamMode === "first_person" &&
+        (c.id === trackedCritterId || c.id === localId)
+      ) {
         rig.root.visible = false;
+      } else {
+        rig.root.visible = c.alive;
       }
       rig.applyMutations(c.equipped, c.apex);
       rig.updateAnimation(dtSec, moving, vy, c.id === state.activePlayerId);
     }
-
-    // Update Camera Rig
-    const focusCritter =
-      isMyTurn && localCritter
-        ? localCritter
-        : activeCritter ?? localCritter;
-    const focusPos: Vec3 =
-      canMove && localCritter
-        ? { x: this.localPos.x, y: this.localPos.y, z: this.localPos.z }
-        : focusCritter
-          ? focusCritter.position
-          : { x: 12, y: 6, z: 12 };
-
-    this.cameraRig.update({
-      targetPos: focusPos,
-      yaw: canMove ? moveInput.yaw : focusCritter?.yaw ?? 0,
-      pitch: canMove ? moveInput.pitch : 0.15,
-      phase: state.phase,
-      localAlive,
-      shotPos,
-      world: this.activeWorld,
-      dtSec,
-    });
 
     // Update live 3D Trajectory Preview during local aiming
     const gadgetDef = GADGET_CATALOG[this.selectedGadget];
@@ -1404,6 +1449,8 @@ class CritterSiegeApp {
 
   public dispose(): void {
     cancelAnimationFrame(this.rafId);
+    window.removeEventListener("resize", this.onWindowResizeBound);
+    window.removeEventListener("keydown", this.onWindowKeyDownBound);
     this.gameClient.disconnect();
     this.input.dispose();
     this.hud.dispose();
