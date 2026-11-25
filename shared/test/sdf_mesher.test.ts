@@ -31,15 +31,18 @@ describe("Deterministic PRNG (createSeededRng)", () => {
 });
 
 describe("SdfWorld & Surface Nets smooth terrain mesher", () => {
-  it("generates deterministic islands and 4 valid separated spawn points for all 3 themes", () => {
+  it("generates deterministic 60m islands and 4 quadrant-separated (>= 22m) spawn points for all 3 themes", () => {
     expect(SDF_DIMS).toEqual({
-      nx: 48,
-      ny: 28,
-      nz: 48,
-      voxelSize: 0.5,
+      nx: 80,
+      ny: 36,
+      nz: 80,
+      voxelSize: 0.75,
       chunkSize: 16,
     });
     expect(chunkKey(1, 0, 2)).toBe("1,0,2");
+
+    const centerX = SDF_DIMS.nx * SDF_DIMS.voxelSize * 0.5;
+    const centerZ = SDF_DIMS.nz * SDF_DIMS.voxelSize * 0.5;
 
     for (const theme of ALL_THEMES) {
       const worldA = new SdfWorld(9001, theme);
@@ -47,12 +50,12 @@ describe("SdfWorld & Surface Nets smooth terrain mesher", () => {
 
       expect(worldA.seed).toBe(9001);
       expect(worldA.theme).toBe(theme);
-      expect(worldA.getAllChunkCoords()).toHaveLength(18);
+      expect(worldA.getAllChunkCoords()).toHaveLength(75);
 
       // Deterministic identical sampling across representative grid points
-      for (let x = 2; x <= 22; x += 4) {
-        for (let y = 2; y <= 12; y += 2.5) {
-          for (let z = 2; z <= 22; z += 4) {
+      for (let x = 6; x <= 54; x += 12) {
+        for (let y = 3; y <= 21; y += 6) {
+          for (let z = 6; z <= 54; z += 12) {
             expect(worldA.sample(x, y, z)).toBeCloseTo(
               worldB.sample(x, y, z),
               6,
@@ -61,29 +64,34 @@ describe("SdfWorld & Surface Nets smooth terrain mesher", () => {
         }
       }
 
-      // Outer 2-voxel boundary margin is strictly positive air
-      expect(worldA.getValue(0, 10, 10)).toBeGreaterThan(0);
-      expect(worldA.getValue(SDF_DIMS.nx - 1, 10, 10)).toBeGreaterThan(0);
-      expect(worldA.getValue(10, 0, 10)).toBeGreaterThan(0);
-      expect(worldA.getValue(10, SDF_DIMS.ny - 1, 10)).toBeGreaterThan(0);
-      expect(worldA.getValue(10, 10, 0)).toBeGreaterThan(0);
-      expect(worldA.getValue(10, 10, SDF_DIMS.nz - 1)).toBeGreaterThan(0);
+      // Outer 2-voxel boundary margin is strictly positive air on all 6 faces
+      expect(worldA.getValue(0, 12, 12)).toBeGreaterThan(0);
+      expect(worldA.getValue(1, 12, 12)).toBeGreaterThan(0);
+      expect(worldA.getValue(SDF_DIMS.nx - 1, 12, 12)).toBeGreaterThan(0);
+      expect(worldA.getValue(SDF_DIMS.nx - 2, 12, 12)).toBeGreaterThan(0);
+      expect(worldA.getValue(20, 0, 20)).toBeGreaterThan(0);
+      expect(worldA.getValue(20, SDF_DIMS.ny - 1, 20)).toBeGreaterThan(0);
+      expect(worldA.getValue(20, 12, 0)).toBeGreaterThan(0);
+      expect(worldA.getValue(20, 12, SDF_DIMS.nz - 1)).toBeGreaterThan(0);
       expect(worldA.getValue(-5, 10, 10)).toBe(2.0);
       expect(worldA.sample(-2, 5, 5)).toBe(2.0);
 
-      // 4 valid walkable spawn points (y > 2.0, separated by > 3m)
+      // 4 valid walkable high-ground spawn points in 4 distinct quadrants separated by >= 22m
       const spawnsA = worldA.findSpawnPoints(4);
       const spawnsB = worldB.findSpawnPoints(4);
       expect(spawnsA).toEqual(spawnsB);
       expect(spawnsA).toHaveLength(4);
 
+      const quadrants = new Set<string>();
       for (const sp of spawnsA) {
-        expect(sp.y).toBeGreaterThan(2.0);
-        expect(sp.y).toBeGreaterThanOrEqual(3.0);
+        expect(sp.y).toBeGreaterThanOrEqual(4.0);
         const normal = worldA.sampleNormal(sp.x, sp.y, sp.z);
         expect(normal.y).toBeGreaterThanOrEqual(0.65);
-        expect(worldA.sample(sp.x, sp.y + 0.8, sp.z)).toBeGreaterThan(0);
+        expect(worldA.sample(sp.x, sp.y + 1.0, sp.z)).toBeGreaterThan(0);
+        const q = `${sp.x < centerX ? "W" : "E"}${sp.z < centerZ ? "N" : "S"}`;
+        quadrants.add(q);
       }
+      expect(quadrants.size).toBe(4);
 
       for (let i = 0; i < spawnsA.length; i++) {
         for (let j = i + 1; j < spawnsA.length; j++) {
@@ -93,7 +101,7 @@ describe("SdfWorld & Surface Nets smooth terrain mesher", () => {
           expect(b).toBeDefined();
           if (a && b) {
             const dist = Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
-            expect(dist).toBeGreaterThan(3.0);
+            expect(dist).toBeGreaterThanOrEqual(22.0);
           }
         }
       }
@@ -102,16 +110,16 @@ describe("SdfWorld & Surface Nets smooth terrain mesher", () => {
 
   it("carves a sphere blast turning solid center to air, logs the op, and returns 1..8 dirty chunks", () => {
     const world = new SdfWorld(2026, "emerald_spire");
+    const sp = world.findSpawnPoints(1)[0];
+    expect(sp).toBeDefined();
+    if (!sp) return;
 
-    // Locate a solid interior point under the west plateau
-    const surfaceY = world.getSurfaceY(7.2, 12.0);
-    expect(surfaceY).not.toBeNull();
-    const targetY = (surfaceY ?? 8.0) - 1.5;
-    expect(world.isSolid(7.2, targetY, 12.0)).toBe(true);
+    const targetY = sp.y - 2.0;
+    expect(world.isSolid(sp.x, targetY, sp.z)).toBe(true);
 
     const blast: CarveOp = {
-      center: { x: 7.2, y: targetY, z: 12.0 },
-      radius: 2.0,
+      center: { x: sp.x, y: targetY, z: sp.z },
+      radius: 3.0,
       shape: "sphere",
     };
 
@@ -120,8 +128,8 @@ describe("SdfWorld & Surface Nets smooth terrain mesher", () => {
     expect(dirtyChunks.length).toBeLessThanOrEqual(8);
     expect(new Set(dirtyChunks).size).toBe(dirtyChunks.length);
 
-    expect(world.sample(7.2, targetY, 12.0)).toBeGreaterThan(0);
-    expect(world.isSolid(7.2, targetY, 12.0)).toBe(false);
+    expect(world.sample(sp.x, targetY, sp.z)).toBeGreaterThan(0);
+    expect(world.isSolid(sp.x, targetY, sp.z)).toBe(false);
 
     const log = world.getCarveLog();
     expect(log).toHaveLength(1);
@@ -132,22 +140,22 @@ describe("SdfWorld & Surface Nets smooth terrain mesher", () => {
     expect(world.getCarveLog()).toHaveLength(1);
   });
 
-  it("carves a capsule tunnel through solid cliff while leaving solid rock overhead (y + 2.5m < 0)", () => {
+  it("carves a capsule tunnel through solid cliff while leaving solid rock overhead (y + 3.0m < 0)", () => {
     const world = new SdfWorld(777, "emerald_spire");
+    const sp = world.findSpawnPoints(1)[0];
+    expect(sp).toBeDefined();
+    if (!sp) return;
 
-    // Pick a solid plateau column with deep vertical rock
-    const topY = world.getSurfaceY(7.2, 12.0);
-    expect(topY).not.toBeNull();
-    const tunnelY = (topY ?? 8.0) - 3.6;
+    const tunnelY = sp.y - 4.8;
 
-    // Verify cliff is solid at tunnel center and 2.5m overhead before carving
-    expect(world.sample(7.2, tunnelY, 12.0)).toBeLessThan(0);
-    expect(world.sample(7.2, tunnelY + 2.5, 12.0)).toBeLessThan(0);
+    // Verify cliff is solid at tunnel center and 3.0m overhead before carving
+    expect(world.sample(sp.x, tunnelY, sp.z)).toBeLessThan(0);
+    expect(world.sample(sp.x, tunnelY + 3.0, sp.z)).toBeLessThan(0);
 
     const tunnelOp: CarveOp = {
-      center: { x: 5.5, y: tunnelY, z: 12.0 },
-      end: { x: 9.0, y: tunnelY, z: 12.0 },
-      radius: 1.2,
+      center: { x: sp.x - 2.2, y: tunnelY, z: sp.z },
+      end: { x: sp.x + 2.2, y: tunnelY, z: sp.z },
+      radius: 1.4,
       shape: "capsule",
     };
 
@@ -155,21 +163,21 @@ describe("SdfWorld & Surface Nets smooth terrain mesher", () => {
     expect(dirty.length).toBeGreaterThanOrEqual(1);
 
     // Passable air along the capsule tunnel centerline
-    expect(world.sample(6.2, tunnelY, 12.0)).toBeGreaterThan(0);
-    expect(world.sample(7.2, tunnelY, 12.0)).toBeGreaterThan(0);
-    expect(world.sample(8.2, tunnelY, 12.0)).toBeGreaterThan(0);
+    expect(world.sample(sp.x - 1.2, tunnelY, sp.z)).toBeGreaterThan(0);
+    expect(world.sample(sp.x, tunnelY, sp.z)).toBeGreaterThan(0);
+    expect(world.sample(sp.x + 1.2, tunnelY, sp.z)).toBeGreaterThan(0);
 
     // Solid rock overhead remains intact (< 0)
-    expect(world.sample(7.2, tunnelY + 2.5, 12.0)).toBeLessThan(0);
+    expect(world.sample(sp.x, tunnelY + 3.0, sp.z)).toBeLessThan(0);
   });
 
-  it("Review Focus #1: boundary carves clamp cleanly with zero NaN/Infinity and unit normals across all 18 chunks", () => {
+  it("Review Focus #1: boundary carves clamp cleanly with zero NaN/Infinity and unit normals across all 75 chunks", () => {
     const world = new SdfWorld(555, "canyon_arch");
 
     const boundaryCarves: CarveOp[] = [
-      { center: { x: 0, y: 0, z: 0 }, radius: 3.0, shape: "sphere" },
-      { center: { x: 24, y: 14, z: 24 }, radius: 3.0, shape: "sphere" },
-      { center: { x: -1, y: 5, z: 25 }, radius: 3.5, shape: "sphere" },
+      { center: { x: 0, y: 0, z: 0 }, radius: 4.0, shape: "sphere" },
+      { center: { x: 60, y: 27, z: 60 }, radius: 4.0, shape: "sphere" },
+      { center: { x: -1, y: 8, z: 61 }, radius: 4.5, shape: "sphere" },
     ];
 
     for (const op of boundaryCarves) {
@@ -177,7 +185,7 @@ describe("SdfWorld & Surface Nets smooth terrain mesher", () => {
     }
 
     const chunks = world.getAllChunkCoords();
-    expect(chunks).toHaveLength(18);
+    expect(chunks).toHaveLength(75);
 
     let totalVertices = 0;
     let totalTriangles = 0;
@@ -229,8 +237,8 @@ describe("SdfWorld & Surface Nets smooth terrain mesher", () => {
     expect(outOfRangeColors).toBe(0);
     expect(badUnitNormals).toBe(0);
     expect(outOfBoundsIndices).toBe(0);
-    expect(totalVertices).toBeGreaterThan(500);
-    expect(totalTriangles).toBeGreaterThan(500);
+    expect(totalVertices).toBeGreaterThan(2000);
+    expect(totalTriangles).toBeGreaterThan(2000);
   });
 
   it("emits outward-facing Surface Nets triangles across all 3 themes with zero inside-out faces", () => {
@@ -289,32 +297,34 @@ describe("SdfWorld & Surface Nets smooth terrain mesher", () => {
         }
       }
 
-      expect(checkedTriangles).toBeGreaterThan(500);
+      expect(checkedTriangles).toBeGreaterThan(2000);
       expect(outwardTriangles / checkedTriangles).toBeGreaterThan(0.99);
     }
   });
 
-  it("crumbleOuterRing erodes outer terrain beyond radiusFromCenter cleanly", () => {
+  it("crumbleOuterRing erodes outer terrain beyond radiusFromCenter around (30, 30) cleanly", () => {
     const world = new SdfWorld(888, "twin_pillars");
-    const dirty = world.crumbleOuterRing(6.0);
+    const dirty = world.crumbleOuterRing(16.0);
     expect(dirty.length).toBeGreaterThan(0);
 
-    // Points well outside radius 6.0 from island center (12, 12) must now be air
-    expect(world.sample(19.5, 6.0, 12.0)).toBeGreaterThan(0);
-    expect(world.sample(4.5, 6.0, 12.0)).toBeGreaterThan(0);
+    // Points well outside radius 16.0 from island center (30, 30) must now be air
+    expect(world.sample(50.0, 8.0, 30.0)).toBeGreaterThan(0);
+    expect(world.sample(10.0, 8.0, 30.0)).toBeGreaterThan(0);
   });
 
   it("carves and re-meshes dirty chunks in under 25ms", () => {
     const world = new SdfWorld(4096, "emerald_spire");
-    const topY = world.getSurfaceY(16.8, 12.0) ?? 8.0;
+    const sp = world.findSpawnPoints(1)[0];
+    expect(sp).toBeDefined();
+    if (!sp) return;
 
     // Warm up JIT once on a tiny untouched mesh call
-    meshChunkSurfaceNets(world, 1, 0, 1);
+    meshChunkSurfaceNets(world, 2, 0, 2);
 
     const start = performance.now();
     const dirty = world.applyCarve({
-      center: { x: 16.8, y: topY - 1.0, z: 12.0 },
-      radius: 2.4,
+      center: { x: sp.x, y: sp.y - 1.0, z: sp.z },
+      radius: 3.2,
       shape: "sphere",
     });
 

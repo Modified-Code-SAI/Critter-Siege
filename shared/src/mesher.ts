@@ -37,25 +37,73 @@ const CUBE_EDGES: ReadonlyArray<readonly [number, number]> = [
   [3, 7],
 ];
 
-const COLOR_GRASS: readonly [number, number, number] = [0.34, 0.74, 0.24];
-const COLOR_CLIFF: readonly [number, number, number] = [0.78, 0.48, 0.28];
-const COLOR_SLATE: readonly [number, number, number] = [0.46, 0.48, 0.52];
-const COLOR_SAND: readonly [number, number, number] = [0.86, 0.78, 0.56];
+function clamp01(v: number): number {
+  return v < 0 ? 0 : v > 1 ? 1 : v;
+}
 
 function pickTerrainColor(
+  worldX: number,
   worldY: number,
+  worldZ: number,
   normalY: number,
 ): readonly [number, number, number] {
-  if (normalY < 0.2) {
-    return COLOR_SLATE;
+  // Deterministic world-space organic color variation for sculpted natural biomes
+  const patch =
+    Math.sin(worldX * 0.17 + Math.cos(worldZ * 0.15) * 1.4) *
+    Math.cos(worldZ * 0.19 - worldX * 0.07);
+  const micro = Math.sin(worldX * 0.43 - worldZ * 0.39 + worldY * 0.31);
+
+  // Deep cool slate rock on arch undersides and cave roofs
+  if (normalY < 0.18) {
+    const shade = patch * 0.035 + micro * 0.02;
+    return [
+      clamp01(0.35 + shade),
+      clamp01(0.39 + shade),
+      clamp01(0.45 + shade * 1.15),
+    ];
   }
-  if (worldY <= 2.2) {
-    return COLOR_SAND;
+
+  // Warm golden sandy cove shoreline near the waterline
+  if (worldY <= 3.0 && normalY > 0.45) {
+    const ripple = patch * 0.035 + micro * 0.02;
+    return [
+      clamp01(0.89 + ripple),
+      clamp01(0.79 + ripple * 0.9),
+      clamp01(0.54 + ripple * 0.65),
+    ];
   }
-  if (normalY > 0.62) {
-    return COLOR_GRASS;
+
+  // Sunlit lush emerald meadow grass on flat tops with subtle warm/cool patches
+  if (normalY > 0.66 && worldY > 3.0) {
+    const altGlow = Math.min(0.06, Math.max(0, (worldY - 6.0) * 0.005));
+    const warmCool = patch * 0.055 + micro * 0.022;
+    return [
+      clamp01(0.28 + warmCool * 1.1 + altGlow * 0.6),
+      clamp01(0.72 + warmCool * 0.45 + altGlow),
+      clamp01(0.22 - warmCool * 0.55 + altGlow * 0.3),
+    ];
   }
-  return COLOR_CLIFF;
+
+  // Crisp mossy transition rim between meadow tops and steep cliffs
+  if (normalY > 0.48 && normalY <= 0.66) {
+    const mossMix = patch * 0.04 + micro * 0.02;
+    return [
+      clamp01(0.42 + mossMix),
+      clamp01(0.62 + mossMix * 0.5),
+      clamp01(0.26 - mossMix * 0.3),
+    ];
+  }
+
+  // Warm stratified terracotta/sandstone cliff bands with sedimentary modulation
+  const strata =
+    Math.sin(worldY * 1.4 + patch * 0.35) * 0.065 +
+    Math.sin(worldY * 3.1 + micro * 0.25) * 0.025;
+  const cliffTone = patch * 0.035;
+  return [
+    clamp01(0.77 + strata + cliffTone),
+    clamp01(0.48 + strata * 0.78 + cliffTone * 0.6),
+    clamp01(0.29 + strata * 0.52 + cliffTone * 0.35),
+  ];
 }
 
 function emitQuad(
@@ -228,7 +276,7 @@ export function meshChunkSurfaceNets(
         }
 
         const normal = world.sampleNormal(wx, wy, wz);
-        const rgb = pickTerrainColor(wy, normal.y);
+        const rgb = pickTerrainColor(wx, wy, wz, normal.y);
 
         const vertIdx = positions.length / 3;
         positions.push(wx, wy, wz);

@@ -1,5 +1,5 @@
 import { GADGET_CATALOG, computeCritterStats } from "./catalog.js";
-import type { SdfWorld } from "./sdf.js";
+import { SDF_DIMS, type SdfWorld } from "./sdf.js";
 import type {
   ApexId,
   CarveOp,
@@ -19,13 +19,14 @@ export type { CritterHitResult, ImpactEvent, ShotSimulationResult };
 /** World gravitational acceleration in m/s^2. */
 export const GRAVITY = 18.0;
 
-const MIN_LAUNCH_SPEED = 6.0;
-const MAX_LAUNCH_SPEED = 22.0;
+const MIN_LAUNCH_SPEED = 9.0;
+const MAX_LAUNCH_SPEED = 27.5;
 const SIM_DT = 0.025;
-const MAX_FLIGHT_SEC = 4.0;
-const WORLD_MIN_XZ = -4.0;
-const WORLD_MAX_XZ = 28.0;
-const WORLD_MIN_Y = -4.0;
+const MAX_FLIGHT_SEC = 5.5;
+const WORLD_MIN_XZ = -6.0;
+const WORLD_MAX_X = SDF_DIMS.nx * SDF_DIMS.voxelSize + 6.0;
+const WORLD_MAX_Z = SDF_DIMS.nz * SDF_DIMS.voxelSize + 6.0;
+const WORLD_MIN_Y = -6.0;
 const CRITTER_RADIUS = 0.55;
 const CRITTER_HEIGHT_CENTER = 0.5;
 
@@ -69,10 +70,10 @@ function clampPower(power: number): number {
 export function computeLaunchSpeed(gadgetId: GadgetId, power: number): number {
   const p = clampPower(power);
   if (gadgetId === "burrow_bore") {
-    return 12.0 + p * 12.0;
+    return 15.0 + p * 14.0;
   }
   if (gadgetId === "seeker_firefly") {
-    return 16.0;
+    return 22.0;
   }
   return MIN_LAUNCH_SPEED + p * (MAX_LAUNCH_SPEED - MIN_LAUNCH_SPEED);
 }
@@ -80,9 +81,9 @@ export function computeLaunchSpeed(gadgetId: GadgetId, power: number): number {
 function isOutOfBounds(p: Vec3): boolean {
   return (
     p.x < WORLD_MIN_XZ ||
-    p.x > WORLD_MAX_XZ ||
+    p.x > WORLD_MAX_X ||
     p.z < WORLD_MIN_XZ ||
-    p.z > WORLD_MAX_XZ ||
+    p.z > WORLD_MAX_Z ||
     p.y < WORLD_MIN_Y
   );
 }
@@ -163,7 +164,7 @@ function resolveSeekerTarget(
   if (droneTarget && isFiniteVec3(droneTarget)) {
     return { ...droneTarget };
   }
-  for (let dist = 1.0; dist <= 16.0; dist += 0.5) {
+  for (let dist = 1.0; dist <= 36.0; dist += 0.75) {
     const px = origin.x + dir.x * dist;
     const py = origin.y + dir.y * dist;
     const pz = origin.z + dir.z * dist;
@@ -172,9 +173,9 @@ function resolveSeekerTarget(
     }
   }
   return {
-    x: origin.x + dir.x * 12.0,
-    y: origin.y + dir.y * 12.0,
-    z: origin.z + dir.z * 12.0,
+    x: origin.x + dir.x * 26.0,
+    y: origin.y + dir.y * 26.0,
+    z: origin.z + dir.z * 26.0,
   };
 }
 
@@ -218,7 +219,7 @@ export function sampleAimArc(
   const gadget = GADGET_CATALOG[params.gadgetId];
   const safeWind = isFiniteVec3(wind) ? wind : { x: 0, y: 0, z: 0 };
   const speed = computeLaunchSpeed(params.gadgetId, params.power);
-  const dt = 0.05;
+  const dt = 0.065;
 
   const pos: Vec3 = { ...params.origin };
   const vel: Vec3 = { x: dir.x * speed, y: dir.y * speed, z: dir.z * speed };
@@ -229,9 +230,14 @@ export function sampleAimArc(
 
   for (let step = 1; step < maxPoints; step++) {
     if (params.gadgetId === "seeker_firefly" && seekerTarget) {
+      const horizDist = Math.hypot(
+        seekerTarget.x - pos.x,
+        seekerTarget.z - pos.z,
+      );
+      const arcLift = Math.min(9.0, Math.max(0, horizDist - 4.0) * 0.35);
       const toTarget: Vec3 = {
         x: seekerTarget.x - pos.x,
-        y: seekerTarget.y - pos.y,
+        y: seekerTarget.y + arcLift - pos.y,
         z: seekerTarget.z - pos.z,
       };
       const desired = safeNormalizeVec3(toTarget);
@@ -273,7 +279,7 @@ export function sampleAimArc(
         pos.x - seekerTarget.x,
         pos.y - seekerTarget.y,
         pos.z - seekerTarget.z,
-      ) <= 0.65
+      ) <= 0.75
     ) {
       break;
     }
@@ -309,7 +315,7 @@ function settleCritterPosition(
   }
 
   const dt = 0.04;
-  const maxSteps = 60; // 2.4s max flight/fall
+  const maxSteps = 80; // 3.2s max flight/fall from elevated 60m archipelago mesas
 
   for (let i = 0; i < maxSteps; i++) {
     vel.y -= GRAVITY * dt;
@@ -546,9 +552,14 @@ export function simulateShot(
     durationSec = Number(t.toFixed(4));
 
     if (params.gadgetId === "seeker_firefly" && seekerTarget) {
+      const horizDist = Math.hypot(
+        seekerTarget.x - pos.x,
+        seekerTarget.z - pos.z,
+      );
+      const arcLift = Math.min(9.0, Math.max(0, horizDist - 4.0) * 0.35);
       const desired = safeNormalizeVec3({
         x: seekerTarget.x - pos.x,
-        y: seekerTarget.y - pos.y,
+        y: seekerTarget.y + arcLift - pos.y,
         z: seekerTarget.z - pos.z,
       });
       if (desired) {
@@ -596,7 +607,7 @@ export function simulateShot(
         pos.x - seekerTarget.x,
         pos.y - seekerTarget.y,
         pos.z - seekerTarget.z,
-      ) <= 0.6;
+      ) <= 0.75;
 
     if (params.gadgetId === "spore_burst" && hitSolid && !hitCritter && !bounced) {
       bounced = true;
@@ -638,7 +649,7 @@ export function simulateShot(
   // --- 3. Build weapon-specific impacts & carve ops ---
   if (params.gadgetId === "burrow_bore") {
     const tunnelDuration = gadget.tunnelDurationSec ?? 0.6;
-    const tunnelSpeed = 4.5;
+    const tunnelSpeed = 6.0;
     const entryPos: Vec3 = { ...impactPos };
     const endPos: Vec3 = hitTerrainForBore
       ? {
@@ -664,7 +675,7 @@ export function simulateShot(
         shape: "capsule",
         center: entryPos,
         end: endPos,
-        radius: Number((0.95 * carveMult).toFixed(4)),
+        radius: Number((1.25 * carveMult).toFixed(4)),
       };
       carveOps.push(capsuleOp);
     }
@@ -685,14 +696,14 @@ export function simulateShot(
     });
   } else if (params.gadgetId === "spore_burst") {
     const count = gadget.subSporeCount ?? 5;
-    const spreadRadius = 1.65;
+    const spreadRadius = 2.4;
     for (let i = 0; i < count; i++) {
       const angle = (i * Math.PI * 2) / count;
       const sx = impactPos.x + Math.cos(angle) * spreadRadius;
       const sz = impactPos.z + Math.sin(angle) * spreadRadius;
       const surfY = world.getSurfaceY(sx, sz);
       const sy =
-        surfY !== null && Math.abs(surfY - impactPos.y) <= 2.5
+        surfY !== null && Math.abs(surfY - impactPos.y) <= 3.0
           ? surfY + 0.1
           : impactPos.y;
       const subPos: Vec3 = { x: sx, y: sy, z: sz };
@@ -706,7 +717,7 @@ export function simulateShot(
         time: Number((durationSec + 0.18).toFixed(4)),
         position: subPos,
         carveOp: subCarve,
-        damageRadius: 2.35,
+        damageRadius: 2.9,
         baseDamage: gadget.baseDamage,
         knockback: gadget.knockback,
         isSubSpore: true,
@@ -727,7 +738,7 @@ export function simulateShot(
       ? Math.max(4.5, carveRadius * 2.2)
       : params.gadgetId === "shock_magnet"
         ? Math.max(3.8, carveRadius * 2.2)
-        : Math.max(3.2, carveRadius * 1.45);
+        : Math.max(3.5, carveRadius * 1.45);
 
     impacts.push({
       time: durationSec,
@@ -757,14 +768,14 @@ export function simulateShot(
         const miniCarve: CarveOp = {
           shape: "sphere",
           center: { ...firstImpact.position },
-          radius: Number((0.85 * carveMult).toFixed(4)),
+          radius: Number((1.0 * carveMult).toFixed(4)),
         };
         carveOps.push(miniCarve);
         impacts.push({
           time: Number((durationSec + 0.08).toFixed(4)),
           position: { ...firstImpact.position },
           carveOp: miniCarve,
-          damageRadius: 1.8,
+          damageRadius: 2.0,
           baseDamage: 10,
           knockback: 3,
         });

@@ -227,7 +227,7 @@ export class HudController {
       <div class="cs-glass cs-turn-pill">
         <span class="cs-round-badge" data-ref="round">R1/3</span>
         <span class="cs-phase-badge" data-ref="phase">ACTIVE</span>
-        <span class="cs-timer-readout" data-ref="timer">15s</span>
+        <span class="cs-timer-readout" data-ref="timer">22s</span>
         <span class="cs-divider"></span>
         <span class="cs-active-player" data-ref="active">Critter</span>
         <span class="cs-divider"></span>

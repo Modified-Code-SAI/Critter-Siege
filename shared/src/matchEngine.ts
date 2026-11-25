@@ -10,7 +10,7 @@ import {
 } from "./catalog.js";
 import { safeNormalizeVec3, simulateShot, type ShotParams } from "./physics.js";
 import { createSeededRng } from "./rng.js";
-import { SdfWorld } from "./sdf.js";
+import { SDF_DIMS, SdfWorld } from "./sdf.js";
 import type {
   CarveOp,
   CritterState,
@@ -32,8 +32,8 @@ import type {
 
 export type { EngineEvent, MatchConfig, MatchPlayerSeed };
 
-const DEFAULT_TURN_DURATION_SEC = 15.0;
-const DEFAULT_RETREAT_DURATION_SEC = 5.0;
+const DEFAULT_TURN_DURATION_SEC = 22.0;
+const DEFAULT_RETREAT_DURATION_SEC = 6.0;
 const DEFAULT_DRAFT_DURATION_SEC = 18.0;
 const INITIAL_WATER_LEVEL = 1.5;
 const MAX_WIND_SPEED = 6.0;
@@ -282,7 +282,7 @@ export class MatchEngine {
         critter.gadgetCharges.vine_grapple = charges - 1;
       }
 
-      const reach = 10.0 * SPECIES_CATALOG[critter.species].grappleReachBonus;
+      const reach = 18.0 * SPECIES_CATALOG[critter.species].grappleReachBonus;
 
       // Check if an uncollected Evo Pod is near the grapple target or ray -> yank it!
       let pulledPod: EvoPodState | null = null;
@@ -558,23 +558,23 @@ export class MatchEngine {
       z: critter.position.z,
     };
     const end: Vec3 = {
-      x: start.x + normDir.x * 2.2,
-      y: start.y + normDir.y * 2.2,
-      z: start.z + normDir.z * 2.2,
+      x: start.x + normDir.x * 2.8,
+      y: start.y + normDir.y * 2.8,
+      z: start.z + normDir.z * 2.8,
     };
     const op: CarveOp = {
       shape: "capsule",
       center: start,
       end,
-      radius: Number((1.0 * stats.carveMultiplier).toFixed(4)),
+      radius: Number((1.25 * stats.carveMultiplier).toFixed(4)),
     };
     const dirtyChunks = this._world.applyCarve(op);
 
     // Tuck critter slightly inside the newly carved burrow if above water
     const tuckPos: Vec3 = {
-      x: start.x + normDir.x * 1.1,
-      y: Math.max(this.waterLevel + 0.5, start.y + normDir.y * 1.1),
-      z: start.z + normDir.z * 1.1,
+      x: start.x + normDir.x * 1.4,
+      y: Math.max(this.waterLevel + 0.5, start.y + normDir.y * 1.4),
+      z: start.z + normDir.z * 1.4,
     };
     critter.position = tuckPos;
 
@@ -787,7 +787,9 @@ export class MatchEngine {
   private initializeCritters(): void {
     const spawns = this._world.findSpawnPoints(this.config.players.length);
     this.critters = this.config.players.map((p, idx) => {
-      const spawn = spawns[idx] ?? { x: 12 + idx, y: 7.0, z: 12 };
+      const centerX = SDF_DIMS.nx * SDF_DIMS.voxelSize * 0.5;
+      const centerZ = SDF_DIMS.nz * SDF_DIMS.voxelSize * 0.5;
+      const spawn = spawns[idx] ?? { x: centerX + idx, y: 10.0, z: centerZ };
       const team = normalizeTeam(this.config.mode, p.team, idx);
       const stats = computeCritterStats(p.species, {});
       const bonus = this.playerBonusMap.get(p.id) ?? null;
@@ -1070,10 +1072,10 @@ export class MatchEngine {
 
     this.shiftWindSlightly();
 
-    // Turn 4+: Raise water +0.5m/turn and crumble outer island ring
-    if (this.turnNumber >= 4) {
-      this.waterLevel = Number((this.waterLevel + 0.5).toFixed(2));
-      const crumbleRadius = Math.max(4.5, 11.5 - (this.turnNumber - 4) * 0.6);
+    // Turn 6+: Raise water +0.65m/turn and crumble outer archipelago ring
+    if (this.turnNumber >= 6) {
+      this.waterLevel = Number((this.waterLevel + 0.65).toFixed(2));
+      const crumbleRadius = Math.max(10.0, 27.5 - (this.turnNumber - 6) * 1.3);
       this._world.crumbleOuterRing(crumbleRadius);
       events.push({ type: "WATER_ROSE", waterLevel: this.waterLevel });
 
@@ -1393,7 +1395,9 @@ export class MatchEngine {
     for (let i = 0; i < this.critters.length; i++) {
       const c = this.critters[i];
       if (!c) continue;
-      const spawn = spawns[i] ?? { x: 12 + i, y: 7.0, z: 12 };
+      const centerX = SDF_DIMS.nx * SDF_DIMS.voxelSize * 0.5;
+      const centerZ = SDF_DIMS.nz * SDF_DIMS.voxelSize * 0.5;
+      const spawn = spawns[i] ?? { x: centerX + i, y: 10.0, z: centerZ };
       const stats = computeCritterStats(c.species, c.equipped);
       const bonus = this.playerBonusMap.get(c.id) ?? null;
       c.position = { ...spawn };

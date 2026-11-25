@@ -1,6 +1,7 @@
 import * as THREE from "three";
 import {
   GADGET_CATALOG,
+  SDF_DIMS,
   SPECIES_CATALOG,
   SdfWorld,
   computeCritterStats,
@@ -70,6 +71,11 @@ const LOBBY_SHOWCASE_SPECIES: readonly {
 
 const GRAVITY = 18.0;
 const MOVE_SYNC_INTERVAL_MS = 66;
+const WORLD_SPAN_X = SDF_DIMS.nx * SDF_DIMS.voxelSize;
+const WORLD_SPAN_Y = SDF_DIMS.ny * SDF_DIMS.voxelSize;
+const WORLD_SPAN_Z = SDF_DIMS.nz * SDF_DIMS.voxelSize;
+const WORLD_CENTER_X = WORLD_SPAN_X * 0.5;
+const WORLD_CENTER_Z = WORLD_SPAN_Z * 0.5;
 
 interface ScheduledImpact extends ImpactEvent {
   triggered: boolean;
@@ -116,9 +122,9 @@ function findLocalGroundY(
   z: number,
   refY: number,
 ): number | null {
-  const startY = Math.min(13.2, refY + 0.95);
-  const endY = Math.max(0.5, refY - 1.35);
-  const step = 0.16;
+  const startY = Math.min(WORLD_SPAN_Y - 1.5, refY + 1.2);
+  const endY = Math.max(0.5, refY - 1.6);
+  const step = 0.2;
 
   let prevY = startY;
   let prevVal = world.sample(x, prevY, z);
@@ -143,7 +149,7 @@ function findLocalGroundY(
   }
 
   const topY = world.getSurfaceY(x, z);
-  if (topY !== null && topY <= refY + 0.85) {
+  if (topY !== null && topY <= refY + 1.0) {
     return topY;
   }
   return null;
@@ -201,12 +207,12 @@ class CritterSiegeApp {
   private dronePing: Vec3 | null = null;
 
   // Local critter movement kinematics
-  private readonly localPos = new THREE.Vector3(12, 7, 12);
+  private readonly localPos = new THREE.Vector3(WORLD_CENTER_X, 10, WORLD_CENTER_Z);
   private readonly localVel = new THREE.Vector3(0, 0, 0);
   private localGrounded = true;
   private localTurnKey = "";
   private lastMoveSyncMs = 0;
-  private lastSyncedPos = new THREE.Vector3(12, 7, 12);
+  private lastSyncedPos = new THREE.Vector3(WORLD_CENTER_X, 10, WORLD_CENTER_Z);
   private lastSyncedYaw = 0;
 
   // Shot Cam animation & audio feedback state
@@ -514,7 +520,7 @@ class CritterSiegeApp {
       this.activeWorld,
       {
         gadgetId: "gale_mortar",
-        origin: { x: 12, y: 7, z: 12 },
+        origin: { x: WORLD_CENTER_X, y: 10, z: WORLD_CENTER_Z },
         direction: { x: 0, y: 1, z: 0 },
         power: 0.5,
       },
@@ -655,7 +661,7 @@ class CritterSiegeApp {
 
           this.shotPlayback = {
             gadgetId: ev.gadgetId,
-            path: sim.path.length > 0 ? sim.path : [{ x: 12, y: 7, z: 12 }],
+            path: sim.path.length > 0 ? sim.path : [{ x: WORLD_CENTER_X, y: 10, z: WORLD_CENTER_Z }],
             durationSec: Math.max(0.24, sim.durationSec),
             elapsedSec: 0,
             holdAfterSec: 0.45,
@@ -735,16 +741,16 @@ class CritterSiegeApp {
     state: MatchState,
     rebuildNow: boolean,
   ): void {
-    if (state.turnNumber < 4 || state.turnNumber <= this.appliedCrumbleTurn) {
+    if (state.turnNumber < 6 || state.turnNumber <= this.appliedCrumbleTurn) {
       return;
     }
     const dirty = new Set<string>();
     for (
-      let t = Math.max(4, this.appliedCrumbleTurn + 1);
+      let t = Math.max(6, this.appliedCrumbleTurn + 1);
       t <= state.turnNumber;
       t++
     ) {
-      const crumbleRadius = Math.max(4.5, 11.5 - (t - 4) * 0.6);
+      const crumbleRadius = Math.max(10.0, 27.5 - (t - 6) * 1.3);
       for (const key of this.activeWorld.crumbleOuterRing(crumbleRadius)) {
         dirty.add(key);
       }
@@ -891,13 +897,13 @@ class CritterSiegeApp {
   private updateLobbyBackdrop(dtSec: number): void {
     this.vfx.updateWindRibbons({ x: 2.4, y: 0, z: 1.1 }, dtSec);
 
-    const orbitAngle = this.elapsedSec * 0.16;
-    const dist = 23.5;
-    const camX = 12 + Math.sin(orbitAngle) * dist;
-    const camZ = 12 + Math.cos(orbitAngle) * dist;
-    const camY = 12.6 + Math.sin(this.elapsedSec * 0.35) * 0.9;
+    const orbitAngle = this.elapsedSec * 0.14;
+    const dist = Math.max(24, WORLD_SPAN_X * 0.85);
+    const camX = WORLD_CENTER_X + Math.sin(orbitAngle) * dist;
+    const camZ = WORLD_CENTER_Z + Math.cos(orbitAngle) * dist;
+    const camY = 23.5 + Math.sin(this.elapsedSec * 0.35) * 1.4;
     this.cameraRig.camera.position.set(camX, camY, camZ);
-    this.cameraRig.camera.lookAt(12, 5.2, 12);
+    this.cameraRig.camera.lookAt(WORLD_CENTER_X, 9.0, WORLD_CENTER_Z);
 
     for (const rig of this.critterRigs.values()) {
       rig.updateAnimation(dtSec, false, 0, false);
@@ -981,7 +987,7 @@ class CritterSiegeApp {
         ? { x: this.localPos.x, y: this.localPos.y, z: this.localPos.z }
         : focusCritter
           ? focusCritter.position
-          : { x: 12, y: 6, z: 12 };
+          : { x: WORLD_CENTER_X, y: 9, z: WORLD_CENTER_Z };
 
     this.cameraRig.update({
       targetPos: focusPos,
@@ -1108,7 +1114,7 @@ class CritterSiegeApp {
     const i0 = Math.floor(idxFloat);
     const i1 = Math.min(pb.path.length - 1, i0 + 1);
     const frac = idxFloat - i0;
-    const p0 = pb.path[i0] ?? { x: 12, y: 7, z: 12 };
+    const p0 = pb.path[i0] ?? { x: WORLD_CENTER_X, y: 10, z: WORLD_CENTER_Z };
     const p1 = pb.path[i1] ?? p0;
 
     const currentPos: Vec3 = {
@@ -1200,8 +1206,14 @@ class CritterSiegeApp {
     }
 
     if (moveX !== 0 || moveZ !== 0) {
-      const nextX = Math.max(1.2, Math.min(22.8, this.localPos.x + moveX * dtSec));
-      const nextZ = Math.max(1.2, Math.min(22.8, this.localPos.z + moveZ * dtSec));
+      const nextX = Math.max(
+        1.8,
+        Math.min(WORLD_SPAN_X - 1.8, this.localPos.x + moveX * dtSec),
+      );
+      const nextZ = Math.max(
+        1.8,
+        Math.min(WORLD_SPAN_Z - 1.8, this.localPos.z + moveZ * dtSec),
+      );
 
       if (this.localGrounded) {
         const groundY = findLocalGroundY(
@@ -1217,7 +1229,7 @@ class CritterSiegeApp {
           const hasHeadroom =
             this.activeWorld.sample(nextX, groundY + 0.65, nextZ) > -0.05;
 
-          if (stepUp <= 0.75 && normal.y >= minWalkNormal && hasHeadroom) {
+          if (stepUp <= 0.95 && normal.y >= minWalkNormal && hasHeadroom) {
             this.localPos.set(nextX, groundY, nextZ);
           }
         } else {
@@ -1337,7 +1349,10 @@ class CritterSiegeApp {
         bestEnemy.position.z - localCritter.position.z,
       );
     }
-    return Math.atan2(12 - localCritter.position.x, 12 - localCritter.position.z);
+    return Math.atan2(
+      WORLD_CENTER_X - localCritter.position.x,
+      WORLD_CENTER_Z - localCritter.position.z,
+    );
   }
 
   private awardEndOfMatchEssence(
@@ -1386,10 +1401,17 @@ class CritterSiegeApp {
     for (let i = 0; i < LOBBY_SHOWCASE_SPECIES.length; i++) {
       const spec = LOBBY_SHOWCASE_SPECIES[i];
       if (!spec) continue;
-      const pos = spawns[i] ?? { x: 9 + i * 2, y: 7, z: 12 };
+      const pos = spawns[i] ?? {
+        x: WORLD_CENTER_X - 6 + i * 4,
+        y: 10,
+        z: WORLD_CENTER_Z,
+      };
       const rig = new CritterRig(spec.species, spec.color, spec.label);
       rig.root.position.set(pos.x, pos.y, pos.z);
-      rig.root.rotation.y = Math.atan2(12 - pos.x, 12 - pos.z);
+      rig.root.rotation.y = Math.atan2(
+        WORLD_CENTER_X - pos.x,
+        WORLD_CENTER_Z - pos.z,
+      );
       this.critterRoot.add(rig.root);
       this.critterRigs.set(`preview-${i}`, rig);
     }

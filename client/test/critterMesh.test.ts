@@ -164,12 +164,13 @@ describe("CritterRig & TerrainRenderer", () => {
       geometryByKey.set(mesh.name, mesh.geometry);
     }
 
-    // Carve a crater on the west plateau
-    const surfaceY = world.getSurfaceY(7.2, 12.0);
-    expect(surfaceY).not.toBeNull();
+    // Carve a crater on a solid peninsula plateau
+    const sp = world.findSpawnPoints(1)[0];
+    expect(sp).toBeDefined();
+    const carveCenter = sp ?? { x: 14.0, y: 11.5, z: 14.5 };
     const dirtyChunks = world.applyCarve({
-      center: { x: 7.2, y: surfaceY ?? 7.5, z: 12.0 },
-      radius: 2.2,
+      center: { x: carveCenter.x, y: carveCenter.y, z: carveCenter.z },
+      radius: 3.2,
       shape: "sphere",
     });
     expect(dirtyChunks.length).toBeGreaterThan(0);

@@ -24,7 +24,7 @@ export interface CameraUpdateContext {
 const DEFAULT_FOV = 64;
 const FIRST_PERSON_FOV = 52;
 const CAMERA_NEAR = 0.1;
-const CAMERA_FAR = 260;
+const CAMERA_FAR = 420;
 
 const OVER_SHOULDER_BACK = 4.6;
 const OVER_SHOULDER_RIGHT = 1.15;
@@ -32,9 +32,9 @@ const OVER_SHOULDER_UP = 2.1;
 const OVER_SHOULDER_PIVOT_Y = 1.1;
 const FIRST_PERSON_EYE_Y = 0.85;
 
-const DRONE_MIN_DIST = 14.0;
-const DRONE_MAX_DIST = 32.0;
-const DRONE_DEFAULT_DIST = 22.0;
+const DRONE_MIN_DIST = 20.0;
+const DRONE_MAX_DIST = 68.0;
+const DRONE_DEFAULT_DIST = 46.0;
 const DRONE_MIN_PITCH = 0.25;
 const DRONE_MAX_PITCH = 1.38;
 const DRONE_DEFAULT_PITCH = Math.PI * 0.25;
@@ -46,7 +46,7 @@ const MIN_CAMERA_ARM = 0.65;
 
 const ISLAND_CENTER = new THREE.Vector3(
   SDF_DIMS.nx * SDF_DIMS.voxelSize * 0.5,
-  5.0,
+  8.0,
   SDF_DIMS.nz * SDF_DIMS.voxelSize * 0.5,
 );
 
@@ -78,11 +78,15 @@ export class CameraRig {
   private dronePitch = DRONE_DEFAULT_PITCH;
   private droneDistance = DRONE_DEFAULT_DIST;
 
-  private readonly currentPos = new THREE.Vector3(12, 14, 24);
-  private readonly currentLookAt = new THREE.Vector3(12, 5, 12);
+  private readonly currentPos = new THREE.Vector3(
+    ISLAND_CENTER.x,
+    22,
+    ISLAND_CENTER.z + 32,
+  );
+  private readonly currentLookAt = ISLAND_CENTER.clone();
   private readonly desiredPos = new THREE.Vector3();
   private readonly desiredLookAt = new THREE.Vector3();
-  private readonly lastShotPos = new THREE.Vector3(12, 8, 12);
+  private readonly lastShotPos = ISLAND_CENTER.clone();
   private readonly shotTravelDir = new THREE.Vector3(0, 0, 1);
   private hasLastShotPos = false;
   private currentFov = DEFAULT_FOV;

@@ -259,7 +259,7 @@ describe("authoritative WebSocket room server", () => {
     inactiveClient.send({
       type: "FIRE_ACTION",
       gadgetId: "gale_mortar",
-      origin: { x: 12, y: 8, z: 12 },
+      origin: { x: 30, y: 10, z: 30 },
       direction: { x: 1, y: 0.2, z: 0 },
       power: 0.5,
     });
@@ -333,7 +333,7 @@ describe("authoritative WebSocket room server", () => {
       host.send({
         type: "FIRE_ACTION",
         gadgetId: "gale_mortar",
-        origin: p1?.position ?? { x: 12, y: 8, z: 12 },
+        origin: p1?.position ?? { x: 30, y: 10, z: 30 },
         direction: { x: 0, y: -1, z: 0 },
         power: 0.15,
       });

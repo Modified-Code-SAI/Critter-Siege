@@ -1,6 +1,7 @@
 import {
   MatchEngine,
   MUTATION_CATALOG,
+  SDF_DIMS,
   planBotTurn,
   type ClientMessage,
   type EngineEvent,
@@ -628,7 +629,11 @@ export class GameClient {
       (c) => c.id === this.playerId,
     );
     if (!localCritter) {
-      return { x: 12, y: 7, z: 12 };
+      return {
+        x: SDF_DIMS.nx * SDF_DIMS.voxelSize * 0.5,
+        y: 8,
+        z: SDF_DIMS.nz * SDF_DIMS.voxelSize * 0.5,
+      };
     }
     return {
       x: localCritter.position.x,
@@ -946,11 +951,13 @@ export class GameClient {
     }
 
     // Nudge slightly toward island center for safety during retreat
-    const dx = 12 - bot.position.x;
-    const dz = 12 - bot.position.z;
+    const centerX = SDF_DIMS.nx * SDF_DIMS.voxelSize * 0.5;
+    const centerZ = SDF_DIMS.nz * SDF_DIMS.voxelSize * 0.5;
+    const dx = centerX - bot.position.x;
+    const dz = centerZ - bot.position.z;
     const dist = Math.hypot(dx, dz);
     if (dist > 0.5) {
-      const step = Math.min(1.4, dist);
+      const step = Math.min(2.2, dist);
       const nx = bot.position.x + (dx / dist) * step;
       const nz = bot.position.z + (dz / dist) * step;
       const sy = this.sandboxEngine.world.getSurfaceY(nx, nz);

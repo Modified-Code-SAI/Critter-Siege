@@ -1,6 +1,14 @@
 import * as THREE from "three";
+import { SDF_DIMS } from "@critter/shared";
 
-const ISLAND_CENTER = new THREE.Vector3(12, 5, 12);
+const WORLD_SPAN_X = SDF_DIMS.nx * SDF_DIMS.voxelSize;
+const WORLD_SPAN_Z = SDF_DIMS.nz * SDF_DIMS.voxelSize;
+const WORLD_HALF = Math.max(WORLD_SPAN_X, WORLD_SPAN_Z) * 0.5;
+const ISLAND_CENTER = new THREE.Vector3(
+  WORLD_SPAN_X * 0.5,
+  8.0,
+  WORLD_SPAN_Z * 0.5,
+);
 const DEFAULT_WATER_LEVEL = 2.0;
 
 interface CloudCluster {
@@ -87,7 +95,7 @@ export class WorldScene {
 
   public constructor(container: HTMLElement) {
     this.scene = new THREE.Scene();
-    this.scene.fog = new THREE.FogExp2(0xbfe8ff, 0.0052);
+    this.scene.fog = new THREE.FogExp2(0xbfe8ff, 0.0026);
 
     const isCanvas =
       typeof HTMLCanvasElement !== "undefined" &&
@@ -121,33 +129,44 @@ export class WorldScene {
       this.appendedToContainer = false;
     }
 
-    // Daylight hemisphere + warm sun directional light casting soft shadows across 24x14x24 island
+    // Daylight hemisphere + warm sun directional light casting soft shadows across the full archipelago
     this.hemiLight = new THREE.HemisphereLight(0x9be2ff, 0x6f7c4a, 0.95);
     this.scene.add(this.hemiLight);
 
+    const shadowHalf = Math.max(22, WORLD_HALF + 10);
     this.sunLight = new THREE.DirectionalLight(0xfff1d4, 2.05);
-    this.sunLight.position.set(28, 30, 24);
+    this.sunLight.position.set(
+      ISLAND_CENTER.x + WORLD_HALF * 1.2,
+      Math.max(34, WORLD_HALF * 1.75),
+      ISLAND_CENTER.z + WORLD_HALF * 0.95,
+    );
     this.sunLight.target.position.copy(ISLAND_CENTER);
     this.sunLight.castShadow = true;
     this.sunLight.shadow.mapSize.set(2048, 2048);
-    this.sunLight.shadow.camera.near = 2;
-    this.sunLight.shadow.camera.far = 84;
-    this.sunLight.shadow.camera.left = -18;
-    this.sunLight.shadow.camera.right = 18;
-    this.sunLight.shadow.camera.top = 18;
-    this.sunLight.shadow.camera.bottom = -18;
+    this.sunLight.shadow.camera.near = 4;
+    this.sunLight.shadow.camera.far = Math.max(100, WORLD_HALF * 5.5);
+    this.sunLight.shadow.camera.left = -shadowHalf;
+    this.sunLight.shadow.camera.right = shadowHalf;
+    this.sunLight.shadow.camera.top = shadowHalf;
+    this.sunLight.shadow.camera.bottom = -shadowHalf;
     this.sunLight.shadow.bias = -0.0005;
-    this.sunLight.shadow.normalBias = 0.03;
+    this.sunLight.shadow.normalBias = 0.04;
     this.scene.add(this.sunLight);
     this.scene.add(this.sunLight.target);
 
-    this.fillLight = new THREE.DirectionalLight(0x88d4ff, 0.45);
-    this.fillLight.position.set(-10, 14, -12);
+    this.fillLight = new THREE.DirectionalLight(0x88d4ff, 0.48);
+    this.fillLight.position.set(
+      ISLAND_CENTER.x - WORLD_HALF * 1.1,
+      Math.max(20, WORLD_HALF * 0.9),
+      ISLAND_CENTER.z - WORLD_HALF * 1.0,
+    );
     this.scene.add(this.fillLight);
 
-    // Stylized sky-gradient dome
-    const sunDir = new THREE.Vector3(28 - 12, 30 - 5, 24 - 12).normalize();
-    const skyGeo = new THREE.SphereGeometry(140, 28, 20);
+    // Stylized sky-gradient dome centered on the archipelago
+    const sunDir = new THREE.Vector3()
+      .subVectors(this.sunLight.position, ISLAND_CENTER)
+      .normalize();
+    const skyGeo = new THREE.SphereGeometry(Math.max(180, WORLD_HALF * 8.5), 28, 20);
     const skyMat = new THREE.ShaderMaterial({
       vertexShader: SKY_VERTEX_SHADER,
       fragmentShader: SKY_FRAGMENT_SHADER,
@@ -177,7 +196,8 @@ export class WorldScene {
     this.waterGroup.name = "ocean_group";
     this.waterGroup.position.set(ISLAND_CENTER.x, this.waterLevel, ISLAND_CENTER.z);
 
-    const oceanGeo = new THREE.PlaneGeometry(180, 180, 44, 44);
+    const oceanSpan = Math.max(240, WORLD_HALF * 12);
+    const oceanGeo = new THREE.PlaneGeometry(oceanSpan, oceanSpan, 52, 52);
     const posAttr = oceanGeo.getAttribute("position");
     this.oceanBaseX = new Float32Array(posAttr.count);
     this.oceanBaseY = new Float32Array(posAttr.count);
@@ -199,11 +219,16 @@ export class WorldScene {
     this.oceanMesh.receiveShadow = true;
     this.waterGroup.add(this.oceanMesh);
 
-    const innerFoamGeo = new THREE.RingGeometry(6.8, 10.4, 56, 2);
+    const innerFoamGeo = new THREE.RingGeometry(
+      WORLD_HALF * 0.58,
+      WORLD_HALF * 0.84,
+      64,
+      2,
+    );
     const innerFoamMat = new THREE.MeshBasicMaterial({
       color: 0xe6ffff,
       transparent: true,
-      opacity: 0.36,
+      opacity: 0.34,
       depthWrite: false,
       side: THREE.DoubleSide,
     });
@@ -213,11 +238,16 @@ export class WorldScene {
     this.innerFoamRing.position.y = 0.04;
     this.waterGroup.add(this.innerFoamRing);
 
-    const outerFoamGeo = new THREE.RingGeometry(10.6, 12.6, 56, 1);
+    const outerFoamGeo = new THREE.RingGeometry(
+      WORLD_HALF * 0.86,
+      WORLD_HALF * 1.02,
+      64,
+      1,
+    );
     const outerFoamMat = new THREE.MeshBasicMaterial({
       color: 0xc9f9ff,
       transparent: true,
-      opacity: 0.2,
+      opacity: 0.19,
       depthWrite: false,
       side: THREE.DoubleSide,
     });
@@ -258,9 +288,9 @@ export class WorldScene {
         const bx = this.oceanBaseX[i] ?? 0;
         const by = this.oceanBaseY[i] ?? 0;
         const wave =
-          Math.sin(bx * 0.22 + t * 1.45) * 0.09 +
-          Math.cos(by * 0.19 - t * 1.15) * 0.08 +
-          Math.sin((bx + by) * 0.12 + t * 0.8) * 0.04;
+          Math.sin(bx * 0.14 + t * 1.45) * 0.11 +
+          Math.cos(by * 0.12 - t * 1.15) * 0.1 +
+          Math.sin((bx + by) * 0.08 + t * 0.8) * 0.05;
         posAttr.setZ(i, wave);
       }
       posAttr.needsUpdate = true;
@@ -271,23 +301,25 @@ export class WorldScene {
     const innerScale = 1.0 + Math.sin(t * 1.35) * 0.035;
     this.innerFoamRing.scale.set(innerScale, innerScale, 1);
     if (this.innerFoamRing.material instanceof THREE.MeshBasicMaterial) {
-      this.innerFoamRing.material.opacity = 0.32 + Math.sin(t * 1.35) * 0.08;
+      this.innerFoamRing.material.opacity = 0.3 + Math.sin(t * 1.35) * 0.08;
     }
 
     const outerScale = 1.0 + Math.cos(t * 1.05 + 1.1) * 0.045;
     this.outerFoamRing.scale.set(outerScale, outerScale, 1);
     if (this.outerFoamRing.material instanceof THREE.MeshBasicMaterial) {
-      this.outerFoamRing.material.opacity = 0.18 + Math.cos(t * 1.05 + 1.1) * 0.06;
+      this.outerFoamRing.material.opacity = 0.17 + Math.cos(t * 1.05 + 1.1) * 0.06;
     }
 
-    // Drifting clouds
+    // Drifting clouds spanning the archipelago sky
+    const wrapMin = ISLAND_CENTER.x - WORLD_HALF * 3.4;
+    const wrapMax = ISLAND_CENTER.x + WORLD_HALF * 3.4;
     for (const cloud of this.clouds) {
       cloud.group.position.x += cloud.speed * safeDt;
-      if (cloud.group.position.x > 74) {
-        cloud.group.position.x = -50;
+      if (cloud.group.position.x > wrapMax) {
+        cloud.group.position.x = wrapMin;
       }
       cloud.group.position.y =
-        cloud.baseY + Math.sin(t * 0.45 + cloud.bobPhase) * 0.28;
+        cloud.baseY + Math.sin(t * 0.45 + cloud.bobPhase) * 0.35;
     }
   }
 
@@ -334,22 +366,23 @@ export class WorldScene {
   }
 
   private buildClouds(): void {
+    const span = Math.max(24, WORLD_HALF * 2.2);
     const cloudSpecs: ReadonlyArray<{
-      x: number;
+      ox: number;
       y: number;
-      z: number;
+      oz: number;
       scale: number;
       speed: number;
       phase: number;
     }> = [
-      { x: -26, y: 20, z: -24, scale: 1.2, speed: 0.72, phase: 0.2 },
-      { x: 18, y: 23, z: -32, scale: 1.45, speed: 0.56, phase: 1.4 },
-      { x: 48, y: 19, z: -12, scale: 1.05, speed: 0.85, phase: 2.3 },
-      { x: -34, y: 22, z: 28, scale: 1.35, speed: 0.62, phase: 3.1 },
-      { x: 6, y: 25, z: 46, scale: 1.5, speed: 0.5, phase: 4.0 },
-      { x: 44, y: 21, z: 38, scale: 1.15, speed: 0.76, phase: 5.2 },
-      { x: -12, y: 24, z: 4, scale: 1.1, speed: 0.68, phase: 1.9 },
-      { x: 58, y: 26, z: 14, scale: 1.3, speed: 0.58, phase: 2.8 },
+      { ox: -span * 1.15, y: 31, oz: -span * 0.95, scale: 1.9, speed: 0.85, phase: 0.2 },
+      { ox: span * 0.15, y: 35, oz: -span * 1.25, scale: 2.2, speed: 0.65, phase: 1.4 },
+      { ox: span * 1.1, y: 30, oz: -span * 0.55, scale: 1.75, speed: 0.95, phase: 2.3 },
+      { ox: -span * 1.3, y: 34, oz: span * 0.75, scale: 2.05, speed: 0.72, phase: 3.1 },
+      { ox: -span * 0.1, y: 38, oz: span * 1.2, scale: 2.3, speed: 0.58, phase: 4.0 },
+      { ox: span * 1.05, y: 32, oz: span * 0.95, scale: 1.85, speed: 0.88, phase: 5.2 },
+      { ox: -span * 0.65, y: 36, oz: -span * 0.1, scale: 1.7, speed: 0.78, phase: 1.9 },
+      { ox: span * 1.35, y: 39, oz: span * 0.25, scale: 2.1, speed: 0.68, phase: 2.8 },
     ];
 
     const puffOffsets: ReadonlyArray<readonly [number, number, number, number]> = [
@@ -378,7 +411,11 @@ export class WorldScene {
         cluster.add(mesh);
       }
 
-      cluster.position.set(spec.x, spec.y, spec.z);
+      cluster.position.set(
+        ISLAND_CENTER.x + spec.ox,
+        spec.y,
+        ISLAND_CENTER.z + spec.oz,
+      );
       cluster.scale.setScalar(spec.scale);
       this.cloudsRoot.add(cluster);
 

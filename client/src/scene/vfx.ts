@@ -1,5 +1,9 @@
 import * as THREE from "three";
-import type { EvoPodState, Vec3 } from "@critter/shared";
+import { SDF_DIMS, type EvoPodState, type Vec3 } from "@critter/shared";
+
+const WORLD_SPAN_X = SDF_DIMS.nx * SDF_DIMS.voxelSize;
+const WORLD_SPAN_Y = SDF_DIMS.ny * SDF_DIMS.voxelSize;
+const WORLD_SPAN_Z = SDF_DIMS.nz * SDF_DIMS.voxelSize;
 
 interface DynamicParticle {
   mesh: THREE.Mesh;
@@ -125,7 +129,7 @@ export class VfxSystem {
     this.windGroup.name = "vfx_wind_ribbons";
     this.group.add(this.windGroup);
 
-    const ribbonGeo = new THREE.CylinderGeometry(0.014, 0.048, 3.0, 6, 1, true);
+    const ribbonGeo = new THREE.CylinderGeometry(0.018, 0.056, 3.8, 6, 1, true);
     ribbonGeo.rotateX(Math.PI * 0.5);
 
     this.sharedGeos = {
@@ -139,8 +143,8 @@ export class VfxSystem {
       ribbon: ribbonGeo,
     };
 
-    // Build translucent sunlit wind-stream ribbons
-    for (let i = 0; i < 10; i++) {
+    // Build translucent sunlit wind-stream ribbons spanning the sculpted archipelago sky
+    for (let i = 0; i < 16; i++) {
       const mat = new THREE.MeshBasicMaterial({
         color: 0xffffff,
         transparent: true,
@@ -150,9 +154,9 @@ export class VfxSystem {
       });
       const mesh = new THREE.Mesh(this.sharedGeos.ribbon, mat);
       mesh.position.set(
-        2 + this.nextRand() * 20,
-        5.5 + this.nextRand() * 7.5,
-        2 + this.nextRand() * 20,
+        2 + this.nextRand() * (WORLD_SPAN_X - 4),
+        Math.max(5.5, WORLD_SPAN_Y * 0.28) + this.nextRand() * (WORLD_SPAN_Y * 0.52),
+        2 + this.nextRand() * (WORLD_SPAN_Z - 4),
       );
       this.windGroup.add(mesh);
       this.windRibbons.push({
@@ -536,9 +540,13 @@ export class VfxSystem {
         dir,
         driftSpeed * ribbon.speedFactor * safeDt,
       );
-      ribbon.mesh.position.x = wrapCoord(ribbon.mesh.position.x, -2, 26);
-      ribbon.mesh.position.y = wrapCoord(ribbon.mesh.position.y, 4.5, 13.5);
-      ribbon.mesh.position.z = wrapCoord(ribbon.mesh.position.z, -2, 26);
+      ribbon.mesh.position.x = wrapCoord(ribbon.mesh.position.x, -3, WORLD_SPAN_X + 3);
+      ribbon.mesh.position.y = wrapCoord(
+        ribbon.mesh.position.y,
+        Math.max(4.5, WORLD_SPAN_Y * 0.25),
+        WORLD_SPAN_Y * 0.85,
+      );
+      ribbon.mesh.position.z = wrapCoord(ribbon.mesh.position.z, -3, WORLD_SPAN_Z + 3);
       ribbon.material.opacity = targetOpacity;
       const stretch = hasWind ? Math.min(1.8, 0.75 + speed * 0.14) : 0.55;
       ribbon.mesh.scale.set(1, 1, stretch);

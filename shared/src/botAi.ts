@@ -1,5 +1,5 @@
 import { GRAVITY, safeNormalizeVec3 } from "./physics.js";
-import type { SdfWorld } from "./sdf.js";
+import { SDF_DIMS, type SdfWorld } from "./sdf.js";
 import type { CritterState, GadgetId, MatchState, Vec3 } from "./types.js";
 
 /** Tactical move and firing plan computed for an AI bot critter's turn. */
@@ -14,6 +14,10 @@ export interface BotPlan {
 const MIN_BOT_POWER = 0.25;
 const MAX_BOT_POWER = 1.0;
 const FALLBACK_DIR: Vec3 = { x: 0.7071, y: 0.7071, z: 0 };
+const WORLD_CENTER_X = SDF_DIMS.nx * SDF_DIMS.voxelSize * 0.5;
+const WORLD_CENTER_Z = SDF_DIMS.nz * SDF_DIMS.voxelSize * 0.5;
+const WORLD_MAX_X = SDF_DIMS.nx * SDF_DIMS.voxelSize;
+const WORLD_MAX_Z = SDF_DIMS.nz * SDF_DIMS.voxelSize;
 
 function clamp(val: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, val));
@@ -31,7 +35,7 @@ function hasTerrainObstruction(
   if (dist < 1.0) {
     return false;
   }
-  const steps = Math.ceil(dist / 0.6);
+  const steps = Math.ceil(dist / 0.85);
   for (let i = 1; i < steps; i++) {
     const t = i / steps;
     const px = from.x + dx * t;
@@ -63,12 +67,17 @@ function solveBallisticAim(
   const wz = windAffected ? wind.z : 0;
   const effGravity = GRAVITY * gravityScale;
 
-  // Try candidate flight times to find a clean launch speed within [speedMin..speedMin+speedRange]
-  const baseT = clamp(dist / 12.0, 0.35, 1.85);
-  const candidates = [baseT, clamp(baseT * 1.3, 0.4, 2.2), clamp(baseT * 0.75, 0.25, 1.4)];
+  // Test candidate flight times spanning close-range to cross-archipelago high arcs
+  const baseT = clamp(dist / 16.5, 0.35, 2.4);
+  const candidates = [
+    baseT,
+    clamp(baseT * 1.28, 0.45, 2.9),
+    clamp(baseT * 0.78, 0.3, 1.9),
+    clamp(baseT * 1.55, 0.6, 3.3),
+  ];
 
   let bestDir: Vec3 = FALLBACK_DIR;
-  let bestPower = 0.6;
+  let bestPower = 0.65;
   let bestError = Infinity;
 
   for (const t of candidates) {
@@ -92,16 +101,96 @@ function solveBallisticAim(
   return { direction: bestDir, power: bestPower };
 }
 
+/**
+ * Walk incrementally from `start` toward `(goalX, goalZ)` while verifying every
+ * intermediate foothold stays on safe walkable terrain above `waterLevel` (never off cliffs).
+ */
+function findSafeWalkStep(
+  world: SdfWorld,
+  start: Vec3,
+  goalX: number,
+  goalZ: number,
+  maxStepDist: number,
+  waterLevel: number,
+): Vec3 {
+  const baseDx = goalX - start.x;
+  const baseDz = goalZ - start.z;
+  const baseDist = Math.hypot(baseDx, baseDz);
+  if (baseDist < 0.25) {
+    return { ...start };
+  }
+
+  const baseAngle = Math.atan2(baseDx, baseDz);
+  const angleOffsets = [0, 0.42, -0.42, 0.85, -0.85];
+  const stepSize = 1.0;
+
+  let bestPos: Vec3 = { ...start };
+  let bestProgress = -Infinity;
+
+  for (const offset of angleOffsets) {
+    const angle = baseAngle + offset;
+    const dirX = Math.sin(angle);
+    const dirZ = Math.cos(angle);
+
+    let curX = start.x;
+    let curY = start.y;
+    let curZ = start.z;
+    const targetDist = Math.min(maxStepDist, baseDist);
+
+    for (let d = stepSize; d <= targetDist + 0.01; d += stepSize) {
+      const clampedD = Math.min(d, targetDist);
+      const nx = start.x + dirX * clampedD;
+      const nz = start.z + dirZ * clampedD;
+      if (
+        nx < 3.0 ||
+        nx > WORLD_MAX_X - 3.0 ||
+        nz < 3.0 ||
+        nz > WORLD_MAX_Z - 3.0
+      ) {
+        break;
+      }
+      const sy = world.getSurfaceY(nx, nz);
+      if (sy === null || sy <= waterLevel + 1.0) {
+        break;
+      }
+      if (Math.abs(sy - curY) > 1.8) {
+        break;
+      }
+      const normal = world.sampleNormal(nx, sy, nz);
+      if (normal.y < 0.56) {
+        break;
+      }
+      curX = nx;
+      curY = sy;
+      curZ = nz;
+    }
+
+    const moved = Math.hypot(curX - start.x, curZ - start.z);
+    if (moved < 0.5) {
+      continue;
+    }
+    const newGoalDist = Math.hypot(goalX - curX, goalZ - curZ);
+    const progress = baseDist - newGoalDist;
+    if (progress > bestProgress) {
+      bestProgress = progress;
+      bestPos = { x: curX, y: curY, z: curZ };
+    }
+  }
+
+  return bestPos;
+}
+
 function chooseMoveTarget(
   state: MatchState,
   world: SdfWorld,
   bot: CritterState,
+  primaryEnemy: CritterState | null,
 ): Vec3 {
-  // Opportunistically grab nearby uncollected Evo Pods above water
+  // 1. Opportunistically grab nearby uncollected Evo Pods safely above water
   let bestPodPos: Vec3 | null = null;
-  let bestPodDist = 5.0;
+  let bestPodDist = 12.0;
   for (const pod of state.evoPods) {
-    if (pod.collected || pod.position.y <= state.waterLevel + 0.8) {
+    if (pod.collected || pod.position.y <= state.waterLevel + 1.0) {
       continue;
     }
     const d = Math.hypot(
@@ -115,31 +204,65 @@ function chooseMoveTarget(
     }
   }
   if (bestPodPos) {
-    return bestPodPos;
+    const stepTowardPod = findSafeWalkStep(
+      world,
+      bot.position,
+      bestPodPos.x,
+      bestPodPos.z,
+      7.5,
+      state.waterLevel,
+    );
+    if (
+      Math.hypot(
+        stepTowardPod.x - bot.position.x,
+        stepTowardPod.z - bot.position.z,
+      ) >= 0.5
+    ) {
+      return stepTowardPod;
+    }
   }
 
-  // If standing dangerously close to rising water, step toward higher nearby ground
-  if (bot.position.y < state.waterLevel + 1.8) {
-    let bestPos: Vec3 = { ...bot.position };
-    let bestY = bot.position.y;
-    const offsets: ReadonlyArray<[number, number]> = [
-      [1.5, 0],
-      [-1.5, 0],
-      [0, 1.5],
-      [0, -1.5],
-      [1.2, 1.2],
-      [-1.2, -1.2],
-    ];
-    for (const [ox, oz] of offsets) {
-      const cx = bot.position.x + ox;
-      const cz = bot.position.z + oz;
-      const sy = world.getSurfaceY(cx, cz);
-      if (sy !== null && sy > bestY) {
-        bestY = sy;
-        bestPos = { x: cx, y: sy, z: cz };
-      }
+  // 2. Retreat inward/uphill if near rising water or outer sudden-death crumble zone
+  const radialFromCenter = Math.hypot(
+    bot.position.x - WORLD_CENTER_X,
+    bot.position.z - WORLD_CENTER_Z,
+  );
+  if (
+    bot.position.y < state.waterLevel + 2.2 ||
+    (state.turnNumber >= 5 && radialFromCenter > 22.5)
+  ) {
+    const safeInward = findSafeWalkStep(
+      world,
+      bot.position,
+      WORLD_CENTER_X,
+      WORLD_CENTER_Z,
+      6.0,
+      state.waterLevel,
+    );
+    if (safeInward.y >= bot.position.y - 0.5) {
+      return safeInward;
     }
-    return bestPos;
+  }
+
+  // 3. On early turns or when out of optimal engagement range (> 26m), advance toward mid-island/enemy
+  if (primaryEnemy) {
+    const enemyDist = Math.hypot(
+      primaryEnemy.position.x - bot.position.x,
+      primaryEnemy.position.z - bot.position.z,
+    );
+    if (state.turnNumber <= 3 || enemyDist > 26.0) {
+      // Blend target between enemy direction and central high-ground bridges
+      const goalX = primaryEnemy.position.x * 0.55 + WORLD_CENTER_X * 0.45;
+      const goalZ = primaryEnemy.position.z * 0.55 + WORLD_CENTER_Z * 0.45;
+      return findSafeWalkStep(
+        world,
+        bot.position,
+        goalX,
+        goalZ,
+        6.5,
+        state.waterLevel,
+      );
+    }
   }
 
   return { ...bot.position };
@@ -147,7 +270,8 @@ function chooseMoveTarget(
 
 /**
  * Plan a deterministic tactical turn for an AI bot critter:
- * picks nearest/weakest enemy (never own teammate in 2v2), selects an optimal gadget,
+ * picks nearest/weakest enemy (never own teammate in 2v2), advances safely across
+ * the 60m archipelago without walking off cliffs, selects an optimal gadget,
  * and computes a gravity- and wind-compensated aim vector with power in [0.25..1.0].
  */
 export function planBotTurn(
@@ -158,14 +282,13 @@ export function planBotTurn(
   const bot = state.critters.find((c) => c.id === botId);
   if (!bot) {
     return {
-      moveTarget: { x: 12, y: 7, z: 12 },
+      moveTarget: { x: WORLD_CENTER_X, y: 10, z: WORLD_CENTER_Z },
       gadgetId: "gale_mortar",
       direction: FALLBACK_DIR,
-      power: 0.5,
+      power: 0.55,
     };
   }
 
-  const moveTarget = chooseMoveTarget(state, world, bot);
   const enemies = state.critters.filter((c) => {
     if (!c.alive || c.id === bot.id) return false;
     if (state.mode === "2v2" && bot.team !== null && c.team === bot.team) {
@@ -176,36 +299,38 @@ export function planBotTurn(
 
   if (enemies.length === 0) {
     return {
-      moveTarget,
+      moveTarget: { ...bot.position },
       gadgetId: "gale_mortar",
       direction: FALLBACK_DIR,
-      power: 0.5,
+      power: 0.55,
     };
   }
 
   // Pick nearest / weakest enemy using deterministic composite score
-  let target = enemies[0];
+  let target = enemies[0] ?? null;
   let bestScore = Infinity;
   for (const enemy of enemies) {
     const dist = Math.hypot(
-      enemy.position.x - moveTarget.x,
-      enemy.position.y - moveTarget.y,
-      enemy.position.z - moveTarget.z,
+      enemy.position.x - bot.position.x,
+      enemy.position.y - bot.position.y,
+      enemy.position.z - bot.position.z,
     );
     const hpRatio = enemy.maxHp > 0 ? enemy.hp / enemy.maxHp : 1;
-    const score = dist * 0.75 + hpRatio * 6.0;
+    const score = dist * 0.75 + hpRatio * 8.0;
     if (score < bestScore) {
       bestScore = score;
       target = enemy;
     }
   }
 
+  const moveTarget = chooseMoveTarget(state, world, bot, target);
+
   if (!target) {
     return {
       moveTarget,
       gadgetId: "gale_mortar",
       direction: FALLBACK_DIR,
-      power: 0.5,
+      power: 0.55,
     };
   }
 
@@ -247,15 +372,15 @@ export function planBotTurn(
     return c === null || c > 0;
   };
 
-  if (obstructed && hasCharge("burrow_bore")) {
+  if (obstructed && hasCharge("burrow_bore") && dist <= 32.0) {
     const solved = solveBallisticAim(
       origin,
       targetAimPos,
       state.wind,
       false,
       0.25,
-      12.0,
-      12.0,
+      15.0,
+      14.0,
     );
     return {
       moveTarget,
@@ -269,7 +394,7 @@ export function planBotTurn(
     const fireflyDir =
       safeNormalizeVec3({
         x: targetAimPos.x - origin.x,
-        y: Math.max(0.5, targetAimPos.y - origin.y + 3.0),
+        y: Math.max(0.6, targetAimPos.y - origin.y + 5.0),
         z: targetAimPos.z - origin.z,
       }) ?? FALLBACK_DIR;
     return {
@@ -282,7 +407,7 @@ export function planBotTurn(
   }
 
   const gadgetId: GadgetId =
-    dist >= 6.5 && hasCharge("spore_burst") ? "spore_burst" : "gale_mortar";
+    dist >= 10.0 && hasCharge("spore_burst") ? "spore_burst" : "gale_mortar";
 
   const solved = solveBallisticAim(
     origin,
@@ -290,8 +415,8 @@ export function planBotTurn(
     state.wind,
     true,
     1.0,
-    6.0,
-    16.0,
+    9.0,
+    18.5,
   );
 
   return {

@@ -71,10 +71,10 @@ describe("CameraRig", () => {
     expect(afterPos.y).toBeGreaterThan(10);
     expect(afterPos.distanceTo(beforePos)).toBeGreaterThan(1.5);
 
-    const center = new THREE.Vector3(12, 5, 12);
+    const center = new THREE.Vector3(30, 8, 30);
     const distFromCenter = afterPos.distanceTo(center);
-    expect(distFromCenter).toBeGreaterThanOrEqual(13.5);
-    expect(distFromCenter).toBeLessThanOrEqual(32.5);
+    expect(distFromCenter).toBeGreaterThanOrEqual(19.5);
+    expect(distFromCenter).toBeLessThanOrEqual(68.5);
 
     rig.toggleDroneRecon();
     rig.update(makeContext(world));
@@ -89,7 +89,7 @@ describe("CameraRig", () => {
     rig.update(makeContext(world, { phase: "ACTIVE" }));
     expect(rig.getMode()).toBe("drone_recon");
 
-    const shotPos: Vec3 = { x: 14, y: 11, z: 10 };
+    const shotPos: Vec3 = { x: 28, y: 15, z: 26 };
     for (let i = 0; i < 15; i++) {
       rig.update(
         makeContext(world, {
@@ -116,7 +116,7 @@ describe("CameraRig", () => {
       makeContext(world, {
         localAlive: false,
         phase: "RESOLVING",
-        shotPos: { x: 10, y: 9, z: 12 },
+        shotPos: { x: 26, y: 14, z: 30 },
       }),
     );
     expect(rig.getMode()).toBe("shot_cam");
@@ -128,19 +128,19 @@ describe("CameraRig", () => {
   it("pulls over_shoulder camera closer when solid SDF terrain blocks directly behind targetPos", () => {
     const world = new SdfWorld(505, "emerald_spire");
 
-    // Find a solid hill/plateau wall where facing away puts solid rock directly behind the critter
-    // West plateau is centered at (7.2, y<=8.3, 12.0). Stand just outside its east/south cliff flank
-    // facing away from the cliff so -forward enters solid rock!
+    // Dynamically locate a solid plateau flank on the 60m island where facing +Z puts solid rock directly behind
+    const sp = world.findSpawnPoints(1)[0];
+    expect(sp).toBeDefined();
+    const probeX = sp?.x ?? 14.0;
+    const probeStartZ = sp?.z ?? 14.5;
+    const probeY = Math.max(5.0, (sp?.y ?? 11.0) - 3.5);
     let targetPos: Vec3 | null = null;
     let aimYaw = 0;
-    const probeY = 6.0;
 
-    // Scan outward from (7.2, 6.0, 12.0) along +Z until we exit solid rock into air
-    for (let z = 12.0; z <= 21.0; z += 0.25) {
-      if (!world.isSolid(7.2, probeY, z) && !world.isSolid(7.2, probeY + 1.1, z)) {
-        // Verify solid rock exists directly behind (at z - 1.5 .. z - 3.5) when facing +Z (yaw = 0)
-        if (world.isSolid(7.2, probeY + 1.1, z - 2.0)) {
-          targetPos = { x: 7.2, y: probeY, z: z + 0.35 };
+    for (let z = probeStartZ; z <= probeStartZ + 18.0; z += 0.35) {
+      if (!world.isSolid(probeX, probeY, z) && !world.isSolid(probeX, probeY + 1.1, z)) {
+        if (world.isSolid(probeX, probeY + 1.1, z - 2.0)) {
+          targetPos = { x: probeX, y: probeY, z: z + 0.35 };
           aimYaw = 0; // forward = +Z, so behind = -Z into the plateau cliff!
           break;
         }

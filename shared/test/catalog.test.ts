@@ -34,8 +34,8 @@ describe("Critter Siege catalogs & stats", () => {
       starter: true,
       unlockCost: 0,
       baseHp: 100,
-      moveSpeed: 5.2,
-      jumpImpulse: 7.4,
+      moveSpeed: 8.0,
+      jumpImpulse: 9.8,
       carveBonus: 1.2,
       knockbackResist: 0,
       grappleReachBonus: 1.0,
@@ -51,8 +51,8 @@ describe("Critter Siege catalogs & stats", () => {
       starter: true,
       unlockCost: 0,
       baseHp: 100,
-      moveSpeed: 5.82,
-      jumpImpulse: 8.29,
+      moveSpeed: 8.8,
+      jumpImpulse: 10.8,
       podMagnetRadius: 2.3,
       airControl: 0.4,
     });
@@ -63,8 +63,8 @@ describe("Critter Siege catalogs & stats", () => {
       starter: true,
       unlockCost: 0,
       baseHp: 115,
-      moveSpeed: 4.9,
-      jumpImpulse: 7.0,
+      moveSpeed: 7.8,
+      jumpImpulse: 9.6,
       knockbackResist: 0.2,
       airControl: 0.3,
     });
@@ -75,8 +75,8 @@ describe("Critter Siege catalogs & stats", () => {
       starter: true,
       unlockCost: 0,
       baseHp: 100,
-      moveSpeed: 5.4,
-      jumpImpulse: 7.8,
+      moveSpeed: 8.35,
+      jumpImpulse: 10.2,
       grappleReachBonus: 1.15,
       airControl: 0.75,
     });
@@ -221,8 +221,8 @@ describe("Critter Siege catalogs & stats", () => {
     expect(skySniper.bonusMiniDart).toBe(true);
     expect(skySniper.extendedTrajectory).toBe(true);
     expect(skySniper.mobilityBonus).toBe(65);
-    expect(skySniper.moveSpeed).toBeCloseTo(5.4 * 1.65, 4);
-    expect(skySniper.jumpImpulse).toBeCloseTo(7.8 * 1.22, 4);
+    expect(skySniper.moveSpeed).toBeCloseTo(8.35 * 1.65, 4);
+    expect(skySniper.jumpImpulse).toBeCloseTo(10.2 * 1.22, 4);
     expect(skySniper.carveMultiplier).toBeCloseTo(1.6, 4);
     expect(skySniper.apex).toBe("sky_bomber");
   });
@@ -257,7 +257,7 @@ describe("Critter Siege catalogs & stats", () => {
       turnEnding: true,
       windAffected: true,
       baseDamage: 34,
-      carveRadius: 2.4,
+      carveRadius: 3.2,
       knockback: 11,
       bonusLobbyOnly: false,
     });
@@ -267,7 +267,7 @@ describe("Critter Siege catalogs & stats", () => {
       turnEnding: true,
       windAffected: false,
       baseDamage: 24,
-      carveRadius: 0.7,
+      carveRadius: 0.9,
       knockback: 19,
     });
 
@@ -285,7 +285,7 @@ describe("Critter Siege catalogs & stats", () => {
       turnEnding: true,
       windAffected: true,
       baseDamage: 16,
-      carveRadius: 1.8,
+      carveRadius: 2.6,
       knockback: 12,
       subSporeCount: 5,
     });
@@ -295,7 +295,7 @@ describe("Critter Siege catalogs & stats", () => {
       turnEnding: true,
       windAffected: false,
       baseDamage: 36,
-      carveRadius: 2.3,
+      carveRadius: 3.1,
       knockback: 10,
       tunnelDurationSec: 0.6,
     });
@@ -305,7 +305,7 @@ describe("Critter Siege catalogs & stats", () => {
       turnEnding: true,
       windAffected: false,
       baseDamage: 30,
-      carveRadius: 2.0,
+      carveRadius: 2.8,
       knockback: 11,
       requiresDronePing: true,
     });
@@ -316,7 +316,7 @@ describe("Critter Siege catalogs & stats", () => {
       chargesPerRound: 0,
       turnEnding: true,
       baseDamage: 18,
-      carveRadius: 1.5,
+      carveRadius: 2.2,
       knockback: -14,
     });
 
@@ -336,7 +336,7 @@ describe("Critter Siege catalogs & stats", () => {
       chargesPerRound: 0,
       turnEnding: true,
       baseDamage: 22,
-      carveRadius: 1.2,
+      carveRadius: 1.8,
       knockback: 14,
     });
   });
