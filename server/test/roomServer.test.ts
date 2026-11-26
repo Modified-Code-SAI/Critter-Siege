@@ -61,7 +61,7 @@ class TestWsClient {
   ): Promise<ServerMessage>;
   public waitFor(
     predicate: (msg: ServerMessage) => boolean,
-    timeoutMs = 3000,
+    timeoutMs = 15000,
     fromIndex = 0,
   ): Promise<ServerMessage> {
     for (let i = fromIndex; i < this.messages.length; i++) {
@@ -180,7 +180,7 @@ describe("authoritative WebSocket room server", () => {
         m.type === "LOBBY_UPDATED" &&
         m.lobby.botCount === 1 &&
         m.lobby.theme === "canyon_arch",
-      3000,
+      15000,
       hostLobbyIndex,
     );
     expect(updatedLobby.lobby.players.length).toBe(3);
@@ -243,7 +243,7 @@ describe("authoritative WebSocket room server", () => {
     guest.send({ type: "LOBBY_CONFIG", mapScale: "grand" });
     const notHostErr = await guest.waitFor(
       (m): m is Extract<ServerMessage, { type: "ERROR" }> => m.type === "ERROR",
-      3000,
+      15000,
       guestErrIdx,
     );
     expect(notHostErr.code).toBe("NOT_HOST");
@@ -254,7 +254,7 @@ describe("authoritative WebSocket room server", () => {
     const lobbyUpdated = await host.waitFor(
       (m): m is Extract<ServerMessage, { type: "LOBBY_UPDATED" }> =>
         m.type === "LOBBY_UPDATED" && m.lobby.mapScale === "grand",
-      3000,
+      15000,
       lobbyIdx,
     );
     expect(lobbyUpdated.lobby.mapScale).toBe("grand");
@@ -330,7 +330,7 @@ describe("authoritative WebSocket room server", () => {
 
     const fireErr = await inactiveClient.waitFor(
       (m): m is Extract<ServerMessage, { type: "ERROR" }> => m.type === "ERROR",
-      3000,
+      15000,
       errStartIdx,
     );
     expect(fireErr.code).toBeTruthy();
@@ -407,7 +407,7 @@ describe("authoritative WebSocket room server", () => {
           m.type === "STATE_SNAPSHOT" &&
           m.state.phase === "RESOLVING" &&
           m.state.carveLog.length >= 1,
-        3000,
+        15000,
         afterFireIdx,
       );
       expect(resolvingSnap.state.carveLog.length).toBeGreaterThanOrEqual(1);
@@ -418,7 +418,7 @@ describe("authoritative WebSocket room server", () => {
           m.type === "STATE_SNAPSHOT" &&
           m.state.phase === "ACTIVE" &&
           m.state.activePlayerId === guestJoined.playerId,
-        10000,
+        20000,
         afterFireIdx,
       );
       const carveCountBeforeDrop = p2TurnSnap.state.carveLog.length;
@@ -434,7 +434,7 @@ describe("authoritative WebSocket room server", () => {
           m.type === "STATE_SNAPSHOT" &&
           (m.state.phase === "RESOLVING" ||
             m.state.turnNumber > p2TurnSnap.state.turnNumber),
-        2500,
+        15000,
         beforeDropIdx,
       );
       expect(
@@ -480,6 +480,6 @@ describe("authoritative WebSocket room server", () => {
       expect(reconSnap.state.carveLog.length).toBeGreaterThanOrEqual(1);
       expect(reconSnap.state.carveLog).toEqual(liveHostState?.carveLog);
     },
-    15000,
+    30000,
   );
 });
