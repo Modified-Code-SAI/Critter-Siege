@@ -10,7 +10,9 @@ import type {
   GadgetId,
   GameMode,
   HardpointSlot,
+  LobbyConfigMessage,
   LobbyState,
+  MapScaleChoice,
   MatchState,
   MutationId,
   SpeciesId,
@@ -28,6 +30,7 @@ export type ClientMessage =
       theme?: ThemeId;
       mode?: GameMode;
       botCount?: number;
+      mapScale?: MapScaleChoice;
       bonusGadget?: GadgetId | null;
     }
   | {
@@ -43,15 +46,7 @@ export type ClientMessage =
       playerId: string;
       reconnectToken: string;
     }
-  | {
-      type: "LOBBY_CONFIG";
-      theme?: ThemeId;
-      mode?: GameMode;
-      botCount?: number;
-      species?: SpeciesId;
-      team?: TeamId;
-      bonusGadget?: GadgetId | null;
-    }
+  | LobbyConfigMessage
   | {
       type: "START_MATCH";
     }
@@ -125,6 +120,7 @@ const THEME_SET = new Set<string>(THEME_IDS);
 const SLOT_SET = new Set<string>(HARDPOINT_SLOTS);
 const MODE_SET = new Set<string>(["ffa", "2v2"]);
 const TEAM_SET = new Set<string>(["A", "B"]);
+const MAP_SCALE_CHOICE_SET = new Set<string>(["auto", "duel", "grand"]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -212,6 +208,13 @@ function parseGameMode(value: unknown): GameMode | null {
   return value as GameMode;
 }
 
+function parseMapScaleChoice(value: unknown): MapScaleChoice | null {
+  if (typeof value !== "string" || !MAP_SCALE_CHOICE_SET.has(value)) {
+    return null;
+  }
+  return value as MapScaleChoice;
+}
+
 function parseTeamId(value: unknown): TeamId | null {
   if (typeof value !== "string" || !TEAM_SET.has(value)) return null;
   return value as TeamId;
@@ -253,6 +256,11 @@ function parseCreateRoom(raw: Record<string, unknown>): ClientMessage | null {
     const botCount = parseBotCount(raw.botCount);
     if (botCount === null) return null;
     msg.botCount = botCount;
+  }
+  if (raw.mapScale !== undefined) {
+    const mapScale = parseMapScaleChoice(raw.mapScale);
+    if (!mapScale) return null;
+    msg.mapScale = mapScale;
   }
   const bonus = parseOptionalBonusGadget(raw.bonusGadget);
   if (!bonus.ok) return null;
@@ -300,7 +308,7 @@ function parseReconnectRoom(
 }
 
 function parseLobbyConfig(raw: Record<string, unknown>): ClientMessage | null {
-  const msg: Extract<ClientMessage, { type: "LOBBY_CONFIG" }> = {
+  const msg: LobbyConfigMessage = {
     type: "LOBBY_CONFIG",
   };
 
@@ -318,6 +326,11 @@ function parseLobbyConfig(raw: Record<string, unknown>): ClientMessage | null {
     const botCount = parseBotCount(raw.botCount);
     if (botCount === null) return null;
     msg.botCount = botCount;
+  }
+  if (raw.mapScale !== undefined) {
+    const mapScale = parseMapScaleChoice(raw.mapScale);
+    if (!mapScale) return null;
+    msg.mapScale = mapScale;
   }
   if (raw.species !== undefined) {
     const species = parseSpeciesId(raw.species);

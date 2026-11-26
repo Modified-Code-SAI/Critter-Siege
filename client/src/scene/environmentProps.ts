@@ -1,14 +1,11 @@
 import * as THREE from "three";
 import {
-  SDF_DIMS,
   createSeededRng,
   type HazardState,
   type SdfWorld,
   type Vec3,
 } from "@critter/shared";
 
-const WORLD_MAX_X = SDF_DIMS.nx * SDF_DIMS.voxelSize;
-const WORLD_MAX_Z = SDF_DIMS.nz * SDF_DIMS.voxelSize;
 const ZERO_MATRIX = new THREE.Matrix4().makeScale(0, 0, 0);
 
 interface InstancedBinding {
@@ -150,11 +147,22 @@ export class EnvironmentProps {
       order: number;
     }
 
+    const worldMaxX = world.worldWidth;
+    const worldMaxZ = world.worldDepth;
+    const isGrand = world.mapScale === "grand";
+    const margin = isGrand ? 6.0 : 4.5;
+    const gridStep = isGrand ? 2.6 : 1.35;
+    const jitter = isGrand ? 1.5 : 0.9;
+    const maxLandmarks = isGrand ? 16 : 10;
+    const maxTrees = isGrand ? 64 : 36;
+    const maxBoulders = isGrand ? 70 : 45;
+    const maxFlora = isGrand ? 180 : 120;
+
     const spots: SurfaceSpot[] = [];
-    for (let x = 4.5; x <= WORLD_MAX_X - 4.5; x += 1.35) {
-      for (let z = 4.5; z <= WORLD_MAX_Z - 4.5; z += 1.35) {
-        const jx = x + (rng() - 0.5) * 0.9;
-        const jz = z + (rng() - 0.5) * 0.9;
+    for (let x = margin; x <= worldMaxX - margin; x += gridStep) {
+      for (let z = margin; z <= worldMaxZ - margin; z += gridStep) {
+        const jx = x + (rng() - 0.5) * jitter;
+        const jz = z + (rng() - 0.5) * jitter;
         const sy = world.getSurfaceY(jx, jz);
         if (sy === null || sy <= waterLevel + 0.65) {
           continue;
@@ -181,13 +189,13 @@ export class EnvironmentProps {
 
     spots.sort((a, b) => b.order - a.order);
 
-    // 1. Pick ~10 carved stone ruins & lantern posts first so trees don't overlap them
+    // 1. Pick carved stone ruins & lantern posts first so trees don't overlap them
     const landmarkSpots: Array<{ pos: Vec3; kind: "ruin" | "lantern"; rotY: number }> = [];
     for (const spot of spots) {
-      if (landmarkSpots.length >= 10) break;
+      if (landmarkSpots.length >= maxLandmarks) break;
       if (spot.normalY < 0.72 || spot.pos.y < 3.2) continue;
       if (!isClearOfAvoid(spot.pos, 3.3)) continue;
-      if (!isClearOfList(spot.pos, placedLandmarks, 6.2)) continue;
+      if (!isClearOfList(spot.pos, placedLandmarks, isGrand ? 10.5 : 6.2)) continue;
       placedLandmarks.push(spot.pos);
       landmarkSpots.push({
         pos: spot.pos,
@@ -196,16 +204,16 @@ export class EnvironmentProps {
       });
     }
 
-    // 2. Pick ~36 multi-tier pine & oak trees on broad sunlit grassy tops
+    // 2. Pick multi-tier pine & oak trees on broad sunlit grassy tops
     const pineSpots: Array<{ pos: Vec3; scale: number; rotY: number; tint: number }> = [];
     const oakSpots: Array<{ pos: Vec3; scale: number; rotY: number; tint: number }> = [];
     for (const spot of spots) {
-      if (pineSpots.length + oakSpots.length >= 36) break;
+      if (pineSpots.length + oakSpots.length >= maxTrees) break;
       if (!spot.isGrass || spot.pos.y < 3.5) continue;
       if (world.sample(spot.pos.x, spot.pos.y + 3.2, spot.pos.z) <= 0.1) continue;
       if (!isClearOfAvoid(spot.pos, 3.1)) continue;
       if (!isClearOfList(spot.pos, placedLandmarks, 3.2)) continue;
-      if (!isClearOfList(spot.pos, placedTrees, 3.0)) continue;
+      if (!isClearOfList(spot.pos, placedTrees, isGrand ? 4.4 : 3.0)) continue;
 
       placedTrees.push(spot.pos);
       const entry = {
@@ -221,7 +229,7 @@ export class EnvironmentProps {
       }
     }
 
-    // 3. Pick ~45 sculpted mossy boulders across cliff rims, coves, and meadows
+    // 3. Pick sculpted mossy boulders across cliff rims, coves, and meadows
     const boulderSpots: Array<{
       pos: Vec3;
       sx: number;
@@ -234,11 +242,11 @@ export class EnvironmentProps {
       mossy: boolean;
     }> = [];
     for (const spot of spots) {
-      if (boulderSpots.length >= 45) break;
+      if (boulderSpots.length >= maxBoulders) break;
       if (!isClearOfAvoid(spot.pos, 2.8)) continue;
       if (!isClearOfList(spot.pos, placedLandmarks, 2.4)) continue;
       if (!isClearOfList(spot.pos, placedTrees, 1.9)) continue;
-      if (!isClearOfList(spot.pos, placedBoulders, 2.3)) continue;
+      if (!isClearOfList(spot.pos, placedBoulders, isGrand ? 3.4 : 2.3)) continue;
 
       placedBoulders.push(spot.pos);
       const base = 0.52 + rng() * 0.72;
@@ -255,7 +263,7 @@ export class EnvironmentProps {
       });
     }
 
-    // 4. Pick ~120 lush grass tufts, flowering shrubs & wildflower clusters
+    // 4. Pick lush grass tufts, flowering shrubs & wildflower clusters
     const floraSpots: Array<{
       pos: Vec3;
       scale: number;
@@ -265,7 +273,7 @@ export class EnvironmentProps {
       hasFlowers: boolean;
     }> = [];
     for (const spot of spots) {
-      if (floraSpots.length >= 120) break;
+      if (floraSpots.length >= maxFlora) break;
       if (spot.normalY < 0.62 || spot.pos.y < 3.0) continue;
       if (!isClearOfAvoid(spot.pos, 2.65)) continue;
       if (!isClearOfList(spot.pos, placedLandmarks, 1.5)) continue;
@@ -1075,6 +1083,84 @@ export class EnvironmentProps {
       };
     }
 
+    if (hazard.type === "spark_mine") {
+      // Sculpted proximity Spark Mine: forged dome casing + radial prongs + electric core + proximity ring
+      const hullMat = new THREE.MeshStandardMaterial({
+        color: 0x2f3846,
+        roughness: 0.42,
+        metalness: 0.72,
+      });
+      const baseRing = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.46, 0.56, 0.2, 12),
+        hullMat,
+      );
+      baseRing.position.y = 0.1;
+      baseRing.castShadow = true;
+      baseRing.receiveShadow = true;
+
+      const dome = new THREE.Mesh(
+        new THREE.SphereGeometry(0.42, 12, 8),
+        hullMat.clone(),
+      );
+      dome.scale.set(1.0, 0.58, 1.0);
+      dome.position.y = 0.22;
+      dome.castShadow = true;
+
+      const coreMat = new THREE.MeshStandardMaterial({
+        color: 0x7ef7ff,
+        emissive: 0x16bfff,
+        emissiveIntensity: 1.5,
+        roughness: 0.18,
+        metalness: 0.15,
+      });
+      pulseMaterials.push(coreMat);
+
+      const core = new THREE.Mesh(new THREE.OctahedronGeometry(0.18, 0), coreMat);
+      core.position.y = 0.5;
+
+      const prongMat = new THREE.MeshStandardMaterial({
+        color: 0xffa630,
+        emissive: 0xd9480f,
+        emissiveIntensity: 0.75,
+        roughness: 0.35,
+        metalness: 0.45,
+      });
+      pulseMaterials.push(prongMat);
+
+      for (let i = 0; i < 6; i++) {
+        const a = (i / 6) * Math.PI * 2;
+        const prong = new THREE.Mesh(
+          new THREE.ConeGeometry(0.065, 0.26, 6),
+          prongMat.clone(),
+        );
+        prong.position.set(Math.cos(a) * 0.42, 0.32, Math.sin(a) * 0.42);
+        prong.rotation.set(Math.sin(a) * 0.75, -a, -Math.cos(a) * 0.75);
+        prong.castShadow = true;
+        group.add(prong);
+      }
+
+      const warningRing = new THREE.Mesh(
+        new THREE.TorusGeometry(0.84, 0.034, 8, 26),
+        new THREE.MeshBasicMaterial({
+          color: 0x4ee8ff,
+          transparent: true,
+          opacity: 0.56,
+          depthWrite: false,
+        }),
+      );
+      warningRing.rotation.x = Math.PI * 0.5;
+      warningRing.position.y = 0.08;
+
+      group.add(baseRing, dome, core, warningRing);
+      return {
+        type: hazard.type,
+        group,
+        pulseMaterials,
+        warningRing,
+        phaseOffset,
+      };
+    }
+
     // 'thorn_patch': Tangled bramble vine coils + sharp conical thorns + glowing magenta spores
     const vineMat = new THREE.MeshStandardMaterial({
       color: 0x3b1f3d,
@@ -1158,6 +1244,23 @@ export class EnvironmentProps {
       }
       if (visual.warningRing) {
         const ringScale = 0.92 + pulse * 0.24;
+        visual.warningRing.scale.set(ringScale, ringScale, 1);
+      }
+      return;
+    }
+
+    if (visual.type === "spark_mine") {
+      const pulse = 0.5 + 0.5 * Math.sin(phase * 2.1);
+      const coreMat = visual.pulseMaterials[0];
+      const prongMat = visual.pulseMaterials[1];
+      if (coreMat) {
+        coreMat.emissiveIntensity = 1.15 + pulse * 1.35;
+      }
+      if (prongMat) {
+        prongMat.emissiveIntensity = 0.45 + pulse * 0.75;
+      }
+      if (visual.warningRing) {
+        const ringScale = 0.9 + pulse * 0.28;
         visual.warningRing.scale.set(ringScale, ringScale, 1);
       }
       return;

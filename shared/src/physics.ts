@@ -1,5 +1,5 @@
 import { GADGET_CATALOG, computeCritterStats } from "./catalog.js";
-import { SDF_DIMS, type SdfWorld } from "./sdf.js";
+import type { SdfWorld } from "./sdf.js";
 import type {
   ApexId,
   CarveOp,
@@ -8,6 +8,7 @@ import type {
   GadgetId,
   HardpointSlot,
   ImpactEvent,
+  MapScale,
   MutationId,
   ShotSimulationResult,
   SpeciesId,
@@ -19,13 +20,20 @@ export type { CritterHitResult, ImpactEvent, ShotSimulationResult };
 /** World gravitational acceleration in m/s^2. */
 export const GRAVITY = 18.0;
 
-const MIN_LAUNCH_SPEED = 9.0;
-const MAX_LAUNCH_SPEED = 27.5;
+/** Minimum vertical drop in meters onto solid rock before fall damage applies. */
+export const FALL_DAMAGE_THRESHOLD_M = 7.5;
+/** Fall damage dealt per meter dropped beyond the safe threshold. */
+export const FALL_DAMAGE_PER_METER = 3.5;
+/** Maximum fall damage dealt from a single drop onto solid rock. */
+export const FALL_DAMAGE_MAX = 25;
+
+const DUEL_MIN_LAUNCH_SPEED = 9.0;
+const DUEL_MAX_LAUNCH_SPEED = 27.5;
+const GRAND_MIN_LAUNCH_SPEED = 11.0;
+const GRAND_MAX_LAUNCH_SPEED = 42.0;
+const GRAND_CARVE_MULTIPLIER = 1.35;
 const SIM_DT = 0.025;
-const MAX_FLIGHT_SEC = 5.5;
 const WORLD_MIN_XZ = -6.0;
-const WORLD_MAX_X = SDF_DIMS.nx * SDF_DIMS.voxelSize + 6.0;
-const WORLD_MAX_Z = SDF_DIMS.nz * SDF_DIMS.voxelSize + 6.0;
 const WORLD_MIN_Y = -6.0;
 const CRITTER_RADIUS = 0.55;
 const CRITTER_HEIGHT_CENTER = 0.5;
@@ -59,6 +67,27 @@ export function safeNormalizeVec3(v: Vec3): Vec3 | null {
   return { x: v.x / len, y: v.y / len, z: v.z / len };
 }
 
+/**
+ * Compute fair fall damage when a critter drops more than 7.5m onto solid rock:
+ * `(drop - 7.5) * 3.5` capped at 25, reduced by `fallDamageResist` (e.g. 0.5 for Spring Paws).
+ */
+export function computeFallDamage(
+  dropMeters: number,
+  fallDamageResist = 0,
+): number {
+  if (!Number.isFinite(dropMeters) || dropMeters <= FALL_DAMAGE_THRESHOLD_M) {
+    return 0;
+  }
+  const clampedResist = Number.isFinite(fallDamageResist)
+    ? Math.max(0, Math.min(1, fallDamageResist))
+    : 0;
+  const raw = Math.min(
+    FALL_DAMAGE_MAX,
+    (dropMeters - FALL_DAMAGE_THRESHOLD_M) * FALL_DAMAGE_PER_METER,
+  );
+  return Math.round(raw * (1 - clampedResist));
+}
+
 function clampPower(power: number): number {
   if (!Number.isFinite(power)) {
     return 0.5;
@@ -66,24 +95,31 @@ function clampPower(power: number): number {
   return Math.max(0.1, Math.min(1.0, power));
 }
 
-/** Compute deterministic projectile launch speed in m/s for a gadget and power [0.1..1.0]. */
-export function computeLaunchSpeed(gadgetId: GadgetId, power: number): number {
+/** Compute deterministic projectile launch speed in m/s for a gadget, power [0.1..1.0], and mapScale. */
+export function computeLaunchSpeed(
+  gadgetId: GadgetId,
+  power: number,
+  mapScale: MapScale = "duel",
+): number {
   const p = clampPower(power);
+  const isGrand = mapScale === "grand";
   if (gadgetId === "burrow_bore") {
-    return 15.0 + p * 14.0;
+    return isGrand ? 20.0 + p * 20.0 : 15.0 + p * 14.0;
   }
   if (gadgetId === "seeker_firefly") {
-    return 22.0;
+    return isGrand ? 32.0 : 22.0;
   }
-  return MIN_LAUNCH_SPEED + p * (MAX_LAUNCH_SPEED - MIN_LAUNCH_SPEED);
+  const minSpd = isGrand ? GRAND_MIN_LAUNCH_SPEED : DUEL_MIN_LAUNCH_SPEED;
+  const maxSpd = isGrand ? GRAND_MAX_LAUNCH_SPEED : DUEL_MAX_LAUNCH_SPEED;
+  return minSpd + p * (maxSpd - minSpd);
 }
 
-function isOutOfBounds(p: Vec3): boolean {
+function isOutOfBounds(world: SdfWorld, p: Vec3): boolean {
   return (
     p.x < WORLD_MIN_XZ ||
-    p.x > WORLD_MAX_X ||
+    p.x > world.worldWidth + 6.0 ||
     p.z < WORLD_MIN_XZ ||
-    p.z > WORLD_MAX_Z ||
+    p.z > world.worldDepth + 6.0 ||
     p.y < WORLD_MIN_Y
   );
 }
@@ -164,7 +200,9 @@ function resolveSeekerTarget(
   if (droneTarget && isFiniteVec3(droneTarget)) {
     return { ...droneTarget };
   }
-  for (let dist = 1.0; dist <= 36.0; dist += 0.75) {
+  const maxDist = world.mapScale === "grand" ? 85.0 : 36.0;
+  const step = world.dims.voxelSize;
+  for (let dist = 1.0; dist <= maxDist; dist += step) {
     const px = origin.x + dir.x * dist;
     const py = origin.y + dir.y * dist;
     const pz = origin.z + dir.z * dist;
@@ -172,11 +210,79 @@ function resolveSeekerTarget(
       return { x: px, y: py, z: pz };
     }
   }
+  const fallbackDist = world.mapScale === "grand" ? 64.0 : 26.0;
   return {
-    x: origin.x + dir.x * 26.0,
-    y: origin.y + dir.y * 26.0,
-    z: origin.z + dir.z * 26.0,
+    x: origin.x + dir.x * fallbackDist,
+    y: origin.y + dir.y * fallbackDist,
+    z: origin.z + dir.z * fallbackDist,
   };
+}
+
+function steerSeekerFirefly(
+  world: SdfWorld,
+  pos: Vec3,
+  vel: Vec3,
+  fallbackDir: Vec3,
+  seekerTarget: Vec3,
+  speed: number,
+  dt: number,
+): void {
+  const dx = seekerTarget.x - pos.x;
+  const dz = seekerTarget.z - pos.z;
+  const horizDist = Math.hypot(dx, dz);
+  const diveRadius = world.mapScale === "grand" ? 18.0 : 10.0;
+  const cruiseAltitude = Math.max(
+    seekerTarget.y + 6.0,
+    world.worldHeight * 0.8,
+  );
+  const curDir = safeNormalizeVec3(vel) ?? fallbackDir;
+
+  let steerVec: Vec3;
+  if (horizDist > diveRadius) {
+    // Climb promptly to high cruise altitude above dividing walls before diving onto target
+    const lookahead = Math.min(horizDist, world.mapScale === "grand" ? 18.0 : 9.0);
+    const ux = dx / Math.max(1e-5, horizDist);
+    const uz = dz / Math.max(1e-5, horizDist);
+    let dy = cruiseAltitude - pos.y;
+    const probeDist = world.mapScale === "grand" ? 4.5 : 2.8;
+    if (
+      world.isSolid(
+        pos.x + curDir.x * probeDist,
+        pos.y + curDir.y * probeDist,
+        pos.z + curDir.z * probeDist,
+      )
+    ) {
+      dy = Math.max(dy, 10.0);
+    }
+    steerVec = {
+      x: ux * lookahead,
+      y: dy,
+      z: uz * lookahead,
+    };
+  } else {
+    steerVec = {
+      x: dx,
+      y: seekerTarget.y - pos.y,
+      z: dz,
+    };
+  }
+
+  const desired = safeNormalizeVec3(steerVec);
+  if (!desired) {
+    return;
+  }
+
+  const blend = Math.min(1, 9.5 * dt);
+  const nextDir = safeNormalizeVec3({
+    x: curDir.x + (desired.x - curDir.x) * blend,
+    y: curDir.y + (desired.y - curDir.y) * blend,
+    z: curDir.z + (desired.z - curDir.z) * blend,
+  });
+  if (nextDir) {
+    vel.x = nextDir.x * speed;
+    vel.y = nextDir.y * speed;
+    vel.z = nextDir.z * speed;
+  }
 }
 
 /**
@@ -218,8 +324,12 @@ export function sampleAimArc(
 
   const gadget = GADGET_CATALOG[params.gadgetId];
   const safeWind = isFiniteVec3(wind) ? wind : { x: 0, y: 0, z: 0 };
-  const speed = computeLaunchSpeed(params.gadgetId, params.power);
-  const dt = 0.065;
+  const speed = computeLaunchSpeed(
+    params.gadgetId,
+    params.power,
+    world.mapScale,
+  );
+  const dt = world.mapScale === "grand" ? 0.085 : 0.065;
 
   const pos: Vec3 = { ...params.origin };
   const vel: Vec3 = { x: dir.x * speed, y: dir.y * speed, z: dir.z * speed };
@@ -230,31 +340,7 @@ export function sampleAimArc(
 
   for (let step = 1; step < maxPoints; step++) {
     if (params.gadgetId === "seeker_firefly" && seekerTarget) {
-      const horizDist = Math.hypot(
-        seekerTarget.x - pos.x,
-        seekerTarget.z - pos.z,
-      );
-      const arcLift = Math.min(9.0, Math.max(0, horizDist - 4.0) * 0.35);
-      const toTarget: Vec3 = {
-        x: seekerTarget.x - pos.x,
-        y: seekerTarget.y + arcLift - pos.y,
-        z: seekerTarget.z - pos.z,
-      };
-      const desired = safeNormalizeVec3(toTarget);
-      if (desired) {
-        const blend = Math.min(1, 7.5 * dt);
-        const curDir = safeNormalizeVec3(vel) ?? dir;
-        const nextDir = safeNormalizeVec3({
-          x: curDir.x + (desired.x - curDir.x) * blend,
-          y: curDir.y + (desired.y - curDir.y) * blend,
-          z: curDir.z + (desired.z - curDir.z) * blend,
-        });
-        if (nextDir) {
-          vel.x = nextDir.x * speed;
-          vel.y = nextDir.y * speed;
-          vel.z = nextDir.z * speed;
-        }
-      }
+      steerSeekerFirefly(world, pos, vel, dir, seekerTarget, speed, dt);
     } else {
       const gravScale = params.gadgetId === "burrow_bore" ? 0.25 : 1.0;
       const ax = gadget.windAffected ? safeWind.x : 0;
@@ -270,7 +356,7 @@ export function sampleAimArc(
     pos.z += vel.z * dt;
     points.push({ ...pos });
 
-    if (world.isSolid(pos.x, pos.y, pos.z) || isOutOfBounds(pos)) {
+    if (world.isSolid(pos.x, pos.y, pos.z) || isOutOfBounds(world, pos)) {
       break;
     }
     if (
@@ -294,28 +380,30 @@ function settleCritterPosition(
   startPos: Vec3,
   initialVel: Vec3,
   waterLevel: number,
-): { position: Vec3; drowned: boolean } {
+): { position: Vec3; drowned: boolean; fallDrop: number } {
   const pos: Vec3 = { ...startPos };
   const vel: Vec3 = { ...initialVel };
   const speed = Math.hypot(vel.x, vel.y, vel.z);
+  let peakY = startPos.y;
 
   // If stationary, check whether the floor beneath critter was carved away
   if (speed < 0.05) {
     if (pos.y <= waterLevel) {
-      return { position: pos, drowned: true };
+      return { position: pos, drowned: true, fallDrop: 0 };
     }
     if (isSolidAfterCarves(world, carveOps, pos.x, pos.y - 0.35, pos.z)) {
-      return { position: pos, drowned: false };
+      return { position: pos, drowned: false, fallDrop: 0 };
     }
   }
 
   // Lift slightly off ground if launching upward or sideways so we don't snag on starting voxel
   if (speed >= 0.05) {
     pos.y += 0.25;
+    peakY = Math.max(peakY, pos.y);
   }
 
   const dt = 0.04;
-  const maxSteps = 80; // 3.2s max flight/fall from elevated 60m archipelago mesas
+  const maxSteps = world.mapScale === "grand" ? 120 : 80;
 
   for (let i = 0; i < maxSteps; i++) {
     vel.y -= GRAVITY * dt;
@@ -323,16 +411,23 @@ function settleCritterPosition(
     const nextY = pos.y + vel.y * dt;
     const nextZ = pos.z + vel.z * dt;
 
-    if (nextY <= waterLevel || isOutOfBounds({ x: nextX, y: nextY, z: nextZ })) {
+    if (nextY > peakY) {
+      peakY = nextY;
+    }
+
+    if (
+      nextY <= waterLevel ||
+      isOutOfBounds(world, { x: nextX, y: nextY, z: nextZ })
+    ) {
       return {
         position: { x: nextX, y: Math.min(nextY, waterLevel), z: nextZ },
         drowned: true,
+        fallDrop: 0,
       };
     }
 
     if (isSolidAfterCarves(world, carveOps, nextX, nextY, nextZ)) {
       if (vel.y <= 0) {
-        // Land smoothly right on top of the solid surface using a proper [lo, hi] binary search
         let lo = nextY;
         let hi = pos.y;
         for (let step = 0; step < 6; step++) {
@@ -343,9 +438,11 @@ function settleCritterPosition(
             hi = mid;
           }
         }
+        const drowned = hi <= waterLevel;
         return {
           position: { x: nextX, y: hi, z: nextZ },
-          drowned: hi <= waterLevel,
+          drowned,
+          fallDrop: drowned ? 0 : Math.max(0, peakY - hi),
         };
       }
       // Hit ceiling or wall while rising: damp velocity and continue falling
@@ -360,13 +457,18 @@ function settleCritterPosition(
     pos.z = nextZ;
   }
 
-  return { position: pos, drowned: pos.y <= waterLevel };
+  const drowned = pos.y <= waterLevel;
+  return {
+    position: pos,
+    drowned,
+    fallDrop: drowned ? 0 : Math.max(0, peakY - pos.y),
+  };
 }
 
 /**
  * Deterministically simulate any Critter Siege weapon or bonus gadget shot,
  * computing flight path, terrain carve ops, blast/melee damage, shield absorption,
- * thorns reflection, knockback trajectories, and drowning outcomes.
+ * thorns reflection, knockback trajectories, fall damage, and drowning outcomes.
  */
 export function simulateShot(
   world: SdfWorld,
@@ -392,7 +494,9 @@ export function simulateShot(
 
   const gadget = GADGET_CATALOG[params.gadgetId];
   const shooterStats = computeCritterStats(params.species, params.equipped);
-  const carveMult = shooterStats.carveMultiplier;
+  const mapCarveScale =
+    world.mapScale === "grand" ? GRAND_CARVE_MULTIPLIER : 1.0;
+  const carveMult = shooterStats.carveMultiplier * mapCarveScale;
   const damageMult = params.apex === "apex_hybrid" ? 1.1 : 1.0;
   const safeWind = isFiniteVec3(wind) ? wind : { x: 0, y: 0, z: 0 };
 
@@ -483,10 +587,17 @@ export function simulateShot(
         knockbackVelocity,
         waterLevel,
       );
-      const newHp = settled.drowned ? 0 : Math.max(0, target.hp - damage);
+      const fallDmg = computeFallDamage(
+        settled.fallDrop,
+        targetStats.fallDamageResist,
+      );
+      const combinedDamage = damage + fallDmg;
+      const newHp = settled.drowned
+        ? 0
+        : Math.max(0, target.hp - combinedDamage);
       hits.push({
         critterId: target.id,
-        damage,
+        damage: combinedDamage,
         shieldAbsorbed,
         knockbackVelocity,
         newPosition: settled.position,
@@ -529,7 +640,12 @@ export function simulateShot(
   }
 
   // --- 2. Ranged ballistic / drill / homing projectiles ---
-  const speed = computeLaunchSpeed(params.gadgetId, params.power);
+  const speed = computeLaunchSpeed(
+    params.gadgetId,
+    params.power,
+    world.mapScale,
+  );
+  const maxFlightSec = world.mapScale === "grand" ? 8.5 : 5.5;
   const pos: Vec3 = { ...params.origin };
   const vel: Vec3 = {
     x: normDir.x * speed,
@@ -548,34 +664,11 @@ export function simulateShot(
   let impactDir: Vec3 = { ...normDir };
   let hitTerrainForBore = false;
 
-  for (let t = SIM_DT; t <= MAX_FLIGHT_SEC; t += SIM_DT) {
+  for (let t = SIM_DT; t <= maxFlightSec; t += SIM_DT) {
     durationSec = Number(t.toFixed(4));
 
     if (params.gadgetId === "seeker_firefly" && seekerTarget) {
-      const horizDist = Math.hypot(
-        seekerTarget.x - pos.x,
-        seekerTarget.z - pos.z,
-      );
-      const arcLift = Math.min(9.0, Math.max(0, horizDist - 4.0) * 0.35);
-      const desired = safeNormalizeVec3({
-        x: seekerTarget.x - pos.x,
-        y: seekerTarget.y + arcLift - pos.y,
-        z: seekerTarget.z - pos.z,
-      });
-      if (desired) {
-        const blend = Math.min(1, 7.5 * SIM_DT);
-        const curDir = safeNormalizeVec3(vel) ?? normDir;
-        const nextDir = safeNormalizeVec3({
-          x: curDir.x + (desired.x - curDir.x) * blend,
-          y: curDir.y + (desired.y - curDir.y) * blend,
-          z: curDir.z + (desired.z - curDir.z) * blend,
-        });
-        if (nextDir) {
-          vel.x = nextDir.x * speed;
-          vel.y = nextDir.y * speed;
-          vel.z = nextDir.z * speed;
-        }
-      }
+      steerSeekerFirefly(world, pos, vel, normDir, seekerTarget, speed, SIM_DT);
     } else {
       const gravScale = params.gadgetId === "burrow_bore" ? 0.25 : 1.0;
       const ax = gadget.windAffected ? safeWind.x : 0;
@@ -594,7 +687,7 @@ export function simulateShot(
       path.push({ ...pos });
     }
 
-    if (pos.y <= waterLevel || isOutOfBounds(pos)) {
+    if (pos.y <= waterLevel || isOutOfBounds(world, pos)) {
       path.push({ ...pos });
       break;
     }
@@ -649,7 +742,7 @@ export function simulateShot(
   // --- 3. Build weapon-specific impacts & carve ops ---
   if (params.gadgetId === "burrow_bore") {
     const tunnelDuration = gadget.tunnelDurationSec ?? 0.6;
-    const tunnelSpeed = 6.0;
+    const tunnelSpeed = 6.0 * mapCarveScale;
     const entryPos: Vec3 = { ...impactPos };
     const endPos: Vec3 = hitTerrainForBore
       ? {
@@ -696,7 +789,7 @@ export function simulateShot(
     });
   } else if (params.gadgetId === "spore_burst") {
     const count = gadget.subSporeCount ?? 5;
-    const spreadRadius = 2.4;
+    const spreadRadius = 2.4 * mapCarveScale;
     for (let i = 0; i < count; i++) {
       const angle = (i * Math.PI * 2) / count;
       const sx = impactPos.x + Math.cos(angle) * spreadRadius;
@@ -717,7 +810,7 @@ export function simulateShot(
         time: Number((durationSec + 0.18).toFixed(4)),
         position: subPos,
         carveOp: subCarve,
-        damageRadius: 2.9,
+        damageRadius: 2.9 * mapCarveScale,
         baseDamage: gadget.baseDamage,
         knockback: gadget.knockback,
         isSubSpore: true,
@@ -783,7 +876,7 @@ export function simulateShot(
     }
   }
 
-  // --- 5. Resolve damage, Aegis Crest shield, knockback & post-carve settling ---
+  // --- 5. Resolve damage, Aegis Crest shield, knockback, fall damage & post-carve settling ---
   const hits: CritterHitResult[] = [];
 
   for (const critter of critters) {
@@ -849,6 +942,11 @@ export function simulateShot(
       kbVel,
       waterLevel,
     );
+    const fallDmg = computeFallDamage(
+      settled.fallDrop,
+      targetStats.fallDamageResist,
+    );
+    totalDamage += fallDmg;
     const newHp = settled.drowned ? 0 : Math.max(0, critter.hp - totalDamage);
     hits.push({
       critterId: critter.id,

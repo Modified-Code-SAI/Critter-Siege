@@ -9,9 +9,15 @@ import {
   createDefaultGadgetCharges,
 } from "./catalog.js";
 import * as Hazards from "./hazards.js";
-import { safeNormalizeVec3, simulateShot, type ShotParams } from "./physics.js";
+import {
+  FALL_DAMAGE_THRESHOLD_M,
+  computeFallDamage,
+  safeNormalizeVec3,
+  simulateShot,
+  type ShotParams,
+} from "./physics.js";
 import { createSeededRng } from "./rng.js";
-import { SDF_DIMS, SdfWorld } from "./sdf.js";
+import { SdfWorld } from "./sdf.js";
 import type {
   CarveOp,
   CritterState,
@@ -22,6 +28,8 @@ import type {
   GameMode,
   HardpointSlot,
   HazardState,
+  MapScale,
+  MapScaleChoice,
   MatchConfig,
   MatchPlayerSeed,
   MatchState,
@@ -34,7 +42,8 @@ import type {
 
 export type { EngineEvent, MatchConfig, MatchPlayerSeed };
 
-const DEFAULT_TURN_DURATION_SEC = 22.0;
+const DUEL_TURN_DURATION_SEC = 28.0;
+const GRAND_TURN_DURATION_SEC = 35.0;
 const DEFAULT_RETREAT_DURATION_SEC = 6.0;
 const DEFAULT_DRAFT_DURATION_SEC = 18.0;
 const INITIAL_WATER_LEVEL = 1.5;
@@ -56,6 +65,17 @@ const DEFAULT_COLORS = [
   "#9b59b6",
   "#1abc9c",
 ];
+
+/** Resolve a lobby map-scale selection (`'auto' | 'duel' | 'grand'`) using total critter count. */
+export function resolveMapScale(
+  choice: MapScaleChoice | undefined,
+  playerCount: number,
+): MapScale {
+  if (choice === "duel" || choice === "grand") {
+    return choice;
+  }
+  return playerCount >= 3 ? "grand" : "duel";
+}
 
 function normalizeTeam(
   mode: GameMode,
@@ -122,13 +142,15 @@ function cloneDraft(d: PendingDraftState): PendingDraftState {
 
 /**
  * Authoritative deterministic PvP match state machine for Critter Siege.
- * Drives FFA and 2v2 turns, SDF terrain carving, Evo Pod deferred drafting,
+ * Drives FFA and 2v2 turns, dynamic 60m Duel vs 144m Grand SDF maps, terrain carving,
+ * Spark Mines & interactive hazards, fall damage, Evo Pod deferred drafting,
  * rising water sudden death, and multi-round Apex evolution.
  */
 export class MatchEngine {
   private readonly config: MatchConfig;
   private readonly roomCode: string;
   private readonly matchId: string;
+  private readonly mapScale: MapScale;
   private readonly maxRounds: number;
   private readonly turnDurationSec: number;
   private readonly retreatDurationSec: number;
@@ -148,6 +170,7 @@ export class MatchEngine {
   private evoPods: EvoPodState[] = [];
   private hazards: HazardState[] = [];
   private readonly thornTriggeredThisTurn = new Set<string>();
+  private readonly fallPeakY = new Map<string, number>();
   private pendingDrafts: PendingDraftState[] = [];
   private teamScores: Record<TeamId, number> = { A: 0, B: 0 };
   private winnerId: string | null = null;
@@ -163,9 +186,14 @@ export class MatchEngine {
     this.config = config;
     this.roomCode = config.roomCode ?? config.matchId ?? "LOCAL";
     this.matchId = config.matchId ?? `match-${this.roomCode}-${config.seed}`;
+    this.mapScale = resolveMapScale(config.mapScale, config.players.length);
     this.maxRounds = Math.max(1, config.maxRounds ?? config.roundCount ?? 3);
+    const defaultTurnSec =
+      this.mapScale === "grand"
+        ? GRAND_TURN_DURATION_SEC
+        : DUEL_TURN_DURATION_SEC;
     this.turnDurationSec =
-      (config.turnDurationMs ?? DEFAULT_TURN_DURATION_SEC * 1000) / 1000;
+      (config.turnDurationMs ?? defaultTurnSec * 1000) / 1000;
     this.retreatDurationSec =
       (config.retreatDurationMs ?? DEFAULT_RETREAT_DURATION_SEC * 1000) / 1000;
     this.phaseTimeRemainingSec = this.turnDurationSec;
@@ -196,6 +224,7 @@ export class MatchEngine {
     this._world = new SdfWorld(
       this.config.seed + this.round * 101,
       this.config.theme,
+      this.mapScale,
     );
     this.initializeCritters();
     this.rollWind();
@@ -209,7 +238,7 @@ export class MatchEngine {
     return this._world;
   }
 
-  /** Update active critter movement during ACTIVE or RETREAT, handling Evo Pod magnet pickup & drowning. */
+  /** Update active critter movement during ACTIVE or RETREAT, handling pods, hazards, fall damage & drowning. */
   public applyMove(
     playerId: string,
     position: Vec3,
@@ -230,23 +259,81 @@ export class MatchEngine {
       return [];
     }
 
+    const prevPos: Vec3 = { ...critter.position };
     critter.position = { ...position };
     critter.yaw = yaw;
     critter.pitch = pitch;
 
     const events: EngineEvent[] = [];
     events.push(...this.collectPodsInRange(critter));
-    events.push(
-      ...Hazards.applyGroundHazardsForCritter(
-        this._world,
-        this.hazards,
-        critter,
-        this.thornTriggeredThisTurn,
-        this.waterLevel,
-      ),
+
+    const hazardEvents = Hazards.applyGroundHazardsForCritter(
+      this._world,
+      this.hazards,
+      critter,
+      this.thornTriggeredThisTurn,
+      this.waterLevel,
+      {
+        critters: this.critters,
+        shooter: critter,
+        areTeammates: (a, b) => this.areTeammates(a, b),
+        onEnemyKo: (attacker) => this.awardEnemyKo(attacker),
+      },
+    );
+    events.push(...hazardEvents);
+
+    const hitGeyser = hazardEvents.some(
+      (e) => e.type === "HAZARD_TRIGGERED" && e.hazardType === "steam_geyser",
+    );
+    const hitSparkMine = hazardEvents.some(
+      (e) => e.type === "HAZARD_TRIGGERED" && e.hazardType === "spark_mine",
     );
 
-    // Check water drowning or thorn KO
+    if (hitGeyser) {
+      // Thermal geyser cushions landing & catapults upward; do not count upward launch as fall damage
+      this.fallPeakY.set(playerId, prevPos.y);
+    } else if (hitSparkMine) {
+      this.fallPeakY.set(playerId, critter.position.y);
+    } else if (critter.alive && critter.position.y > this.waterLevel) {
+      const stepHoriz = Math.hypot(
+        position.x - prevPos.x,
+        position.z - prevPos.z,
+      );
+      const grounded = this._world.isSolid(
+        position.x,
+        position.y - 0.55,
+        position.z,
+      );
+      if (stepHoriz > 3.5) {
+        // Large horizontal jump/teleport resets fall tracking cleanly
+        this.fallPeakY.set(playerId, position.y);
+      } else if (!grounded) {
+        const prevPeak = this.fallPeakY.get(playerId) ?? prevPos.y;
+        this.fallPeakY.set(
+          playerId,
+          Math.max(prevPeak, prevPos.y, position.y),
+        );
+      } else {
+        const peakY = Math.max(
+          this.fallPeakY.get(playerId) ?? prevPos.y,
+          prevPos.y,
+        );
+        const drop = peakY - position.y;
+        if (drop > FALL_DAMAGE_THRESHOLD_M) {
+          const stats = computeCritterStats(critter.species, critter.equipped);
+          const fallDmg = computeFallDamage(drop, stats.fallDamageResist);
+          if (fallDmg > 0) {
+            critter.hp = Math.max(0, critter.hp - fallDmg);
+            if (critter.hp <= 0) {
+              critter.alive = false;
+            }
+          }
+        }
+        this.fallPeakY.set(playerId, position.y);
+      }
+    }
+
+    // Check water drowning, spark mine, thorn, or fall KO
     if (!critter.alive || critter.position.y <= this.waterLevel) {
       critter.alive = false;
       critter.hp = 0;
@@ -255,6 +342,8 @@ export class MatchEngine {
       } else {
         events.push(...this.enterDraftOrNextTurn());
       }
+    } else if (this.checkRoundEnded()) {
+      events.push(...this.finishRound());
     }
 
     return events;
@@ -295,9 +384,10 @@ export class MatchEngine {
         critter.gadgetCharges.vine_grapple = charges - 1;
       }
 
-      const reach = 18.0 * SPECIES_CATALOG[critter.species].grappleReachBonus;
+      const baseReach = this.mapScale === "grand" ? 26.0 : 18.0;
+      const reach = baseReach * SPECIES_CATALOG[critter.species].grappleReachBonus;
 
-      // Check if an uncollected Evo Pod is near the grapple target or ray -> yank it!
+      // Check if an uncollected Evo Pod is near the grapple target -> yank it!
       let pulledPod: EvoPodState | null = null;
       for (const pod of this.evoPods) {
         if (pod.collected) continue;
@@ -337,11 +427,16 @@ export class MatchEngine {
         if (dist > 0.05) {
           const clampedDist = Math.min(dist, reach);
           const scale = clampedDist / dist;
-          destination = {
-            x: critter.position.x + dx * scale,
-            y: critter.position.y + dy * scale,
-            z: critter.position.z + dz * scale,
-          };
+          const destX = critter.position.x + dx * scale;
+          let destY = critter.position.y + dy * scale;
+          const destZ = critter.position.z + dz * scale;
+          if (destY > this.waterLevel && this._world.isSolid(destX, destY, destZ)) {
+            const surfY = this._world.getSurfaceY(destX, destZ);
+            if (surfY !== null) {
+              destY = surfY + 0.1;
+            }
+          }
+          destination = { x: destX, y: destY, z: destZ };
         }
       } else {
         for (let d = 1.0; d <= reach; d += 0.5) {
@@ -358,6 +453,7 @@ export class MatchEngine {
 
       if (destination) {
         critter.position = destination;
+        this.fallPeakY.set(playerId, destination.y);
         events.push(...this.collectPodsInRange(critter));
         events.push(
           ...Hazards.applyGroundHazardsForCritter(
@@ -366,6 +462,12 @@ export class MatchEngine {
             critter,
             this.thornTriggeredThisTurn,
             this.waterLevel,
+            {
+              critters: this.critters,
+              shooter: critter,
+              areTeammates: (a, b) => this.areTeammates(a, b),
+              onEnemyKo: (attacker) => this.awardEnemyKo(attacker),
+            },
           ),
         );
         if (!critter.alive || critter.position.y <= this.waterLevel) {
@@ -376,6 +478,8 @@ export class MatchEngine {
           } else {
             events.push(...this.enterDraftOrNextTurn());
           }
+        } else if (this.checkRoundEnded()) {
+          events.push(...this.finishRound());
         }
       }
       return events;
@@ -524,7 +628,7 @@ export class MatchEngine {
   }
 
   /**
-   * Finalize RESOLVING phase: end round if decisive, enter RETREAT (5s) if shooter survived,
+   * Finalize RESOLVING phase: end round if decisive, enter RETREAT (6s) if shooter survived,
    * or skip RETREAT cleanly if shooter KO'd (Review Focus #2).
    */
   public completeResolving(): EngineEvent[] {
@@ -574,21 +678,22 @@ export class MatchEngine {
 
     critter.retreatBurrowUsedThisTurn = true;
     const stats = computeCritterStats(critter.species, critter.equipped);
+    const carveScale = this.mapScale === "grand" ? 1.35 : 1.0;
     const start: Vec3 = {
       x: critter.position.x,
       y: critter.position.y + 0.3,
       z: critter.position.z,
     };
     const end: Vec3 = {
-      x: start.x + normDir.x * 2.8,
-      y: start.y + normDir.y * 2.8,
-      z: start.z + normDir.z * 2.8,
+      x: start.x + normDir.x * 2.8 * carveScale,
+      y: start.y + normDir.y * 2.8 * carveScale,
+      z: start.z + normDir.z * 2.8 * carveScale,
     };
     const op: CarveOp = {
       shape: "capsule",
       center: start,
       end,
-      radius: Number((1.25 * stats.carveMultiplier).toFixed(4)),
+      radius: Number((1.25 * stats.carveMultiplier * carveScale).toFixed(4)),
     };
     const dirtyChunks = this._world.applyCarve(op);
 
@@ -599,6 +704,7 @@ export class MatchEngine {
       z: start.z + normDir.z * 1.4,
     };
     critter.position = tuckPos;
+    this.fallPeakY.set(playerId, tuckPos.y);
 
     return [{ type: "TERRAIN_CARVED", op, dirtyChunks }];
   }
@@ -784,6 +890,7 @@ export class MatchEngine {
       seed: this.config.seed,
       theme: this.config.theme,
       mode: this.config.mode,
+      mapScale: this.mapScale,
       phase: this.phase,
       round: this.round,
       maxRounds: this.maxRounds,
@@ -807,15 +914,25 @@ export class MatchEngine {
     };
   }
 
+  private buildRoundGadgetCharges(bonus: GadgetId | null): Record<GadgetId, number | null> {
+    const charges = createDefaultGadgetCharges(bonus);
+    if (this.mapScale === "grand" && charges.vine_grapple !== null) {
+      charges.vine_grapple = 3;
+    }
+    return charges;
+  }
+
   private initializeCritters(): void {
     const spawns = this._world.findSpawnPoints(this.config.players.length);
+    const centerX = this._world.centerX;
+    const centerZ = this._world.centerZ;
+    this.fallPeakY.clear();
     this.critters = this.config.players.map((p, idx) => {
-      const centerX = SDF_DIMS.nx * SDF_DIMS.voxelSize * 0.5;
-      const centerZ = SDF_DIMS.nz * SDF_DIMS.voxelSize * 0.5;
       const spawn = spawns[idx] ?? { x: centerX + idx, y: 10.0, z: centerZ };
       const team = normalizeTeam(this.config.mode, p.team, idx);
       const stats = computeCritterStats(p.species, {});
       const bonus = this.playerBonusMap.get(p.id) ?? null;
+      this.fallPeakY.set(p.id, spawn.y);
       return {
         id: p.id,
         name: p.name,
@@ -835,7 +952,7 @@ export class MatchEngine {
         pendingEvoDraft: false,
         equipped: {},
         apex: null,
-        gadgetCharges: createDefaultGadgetCharges(bonus),
+        gadgetCharges: this.buildRoundGadgetCharges(bonus),
         roundShieldRemaining: stats.roundShieldHits,
         kills: 0,
         damageDealt: 0,
@@ -863,6 +980,18 @@ export class MatchEngine {
       b.team !== null &&
       a.team === b.team
     );
+  }
+
+  private awardEnemyKo(attacker: CritterState): void {
+    attacker.kills += 1;
+    attacker.score += 1;
+    if (this.config.mode === "2v2" && attacker.team) {
+      this.teamScores[attacker.team] += 1;
+    }
+    attacker.evoCharge = Math.min(100, attacker.evoCharge + 50);
+    if (attacker.evoCharge >= 100) {
+      attacker.pendingEvoDraft = true;
+    }
   }
 
   private rollWind(): void {
@@ -1002,6 +1131,10 @@ export class MatchEngine {
     simulation: ReturnType<typeof simulateShot>,
   ): EngineEvent[] {
     const events: EngineEvent[] = [];
+    const preImpactPositions = new Map<string, Vec3>();
+    for (const c of this.critters) {
+      preImpactPositions.set(c.id, { ...c.position });
+    }
 
     for (const op of simulation.carveOps) {
       const dirtyChunks = this._world.applyCarve(op);
@@ -1029,15 +1162,7 @@ export class MatchEngine {
         target.alive = false;
         // Review Focus #2 & #3: Only true enemy KOs award +1 KO point & +50% Evo Charge!
         if (!isSelf && !isFriendly) {
-          shooter.kills += 1;
-          shooter.score += 1;
-          if (this.config.mode === "2v2" && shooter.team) {
-            this.teamScores[shooter.team] += 1;
-          }
-          shooter.evoCharge = Math.min(100, shooter.evoCharge + 50);
-          if (shooter.evoCharge >= 100) {
-            shooter.pendingEvoDraft = true;
-          }
+          this.awardEnemyKo(shooter);
         }
       }
     }
@@ -1050,18 +1175,6 @@ export class MatchEngine {
     });
 
     // Trigger Blast Barrel chain detonations from projectile/melee impacts
-    const awardEnemyKo = (attacker: CritterState): void => {
-      attacker.kills += 1;
-      attacker.score += 1;
-      if (this.config.mode === "2v2" && attacker.team) {
-        this.teamScores[attacker.team] += 1;
-      }
-      attacker.evoCharge = Math.min(100, attacker.evoCharge + 50);
-      if (attacker.evoCharge >= 100) {
-        attacker.pendingEvoDraft = true;
-      }
-    };
-
     events.push(
       ...Hazards.resolveBarrelChainDetonations({
         world: this._world,
@@ -1070,12 +1183,13 @@ export class MatchEngine {
         shooter,
         initialImpacts: simulation.impacts,
         waterLevel: this.waterLevel,
+        preImpactPositions,
         areTeammates: (a, b) => this.areTeammates(a, b),
-        onEnemyKo: awardEnemyKo,
+        onEnemyKo: (attacker) => this.awardEnemyKo(attacker),
       }),
     );
 
-    // Check if any knocked-back surviving critter landed on a Thermal Geyser or Thorn Patch
+    // Check if any knocked-back surviving critter landed on a Spark Mine, Thermal Geyser, or Thorn Patch
     for (const hit of simulation.hits) {
       const target = this.findCritter(hit.critterId);
       if (target && target.alive) {
@@ -1086,9 +1200,19 @@ export class MatchEngine {
             target,
             this.thornTriggeredThisTurn,
             this.waterLevel,
+            {
+              critters: this.critters,
+              shooter,
+              areTeammates: (a, b) => this.areTeammates(a, b),
+              onEnemyKo: (attacker) => this.awardEnemyKo(attacker),
+            },
           ),
         );
       }
+    }
+
+    for (const c of this.critters) {
+      this.fallPeakY.set(c.id, c.position.y);
     }
 
     return events;
@@ -1126,6 +1250,7 @@ export class MatchEngine {
       c.droneNudgeUsedThisTurn = false;
       c.retreatBurrowUsedThisTurn = false;
       c.skyBomberDropUsedThisTurn = false;
+      this.fallPeakY.set(c.id, c.position.y);
     }
 
     // Decay temporary prism walls & land parachuting pods
@@ -1140,10 +1265,14 @@ export class MatchEngine {
 
     this.shiftWindSlightly();
 
-    // Turn 6+: Raise water +0.65m/turn and crumble outer archipelago ring
-    if (this.turnNumber >= 6) {
+    // Sudden Death: Turn 6+ on Duel (60m) vs Turn 8+ on Grand (144m)
+    const suddenDeathTurn = this.mapScale === "grand" ? 8 : 6;
+    if (this.turnNumber >= suddenDeathTurn) {
       this.waterLevel = Number((this.waterLevel + 0.65).toFixed(2));
-      const crumbleRadius = Math.max(10.0, 27.5 - (this.turnNumber - 6) * 1.3);
+      const crumbleRadius =
+        this.mapScale === "grand"
+          ? Math.max(22.0, 66.0 - (this.turnNumber - 8) * 3.0)
+          : Math.max(10.0, 27.5 - (this.turnNumber - 6) * 1.3);
       this._world.crumbleOuterRing(crumbleRadius);
       Hazards.pruneSubmergedHazards(this._world, this.hazards, this.waterLevel);
       events.push({ type: "WATER_ROSE", waterLevel: this.waterLevel });
@@ -1458,14 +1587,16 @@ export class MatchEngine {
     this._world = new SdfWorld(
       this.config.seed + this.round * 101,
       this.config.theme,
+      this.mapScale,
     );
 
     const spawns = this._world.findSpawnPoints(this.critters.length);
+    const centerX = this._world.centerX;
+    const centerZ = this._world.centerZ;
+    this.fallPeakY.clear();
     for (let i = 0; i < this.critters.length; i++) {
       const c = this.critters[i];
       if (!c) continue;
-      const centerX = SDF_DIMS.nx * SDF_DIMS.voxelSize * 0.5;
-      const centerZ = SDF_DIMS.nz * SDF_DIMS.voxelSize * 0.5;
       const spawn = spawns[i] ?? { x: centerX + i, y: 10.0, z: centerZ };
       const stats = computeCritterStats(c.species, c.equipped);
       const bonus = this.playerBonusMap.get(c.id) ?? null;
@@ -1475,11 +1606,12 @@ export class MatchEngine {
       c.maxHp = stats.maxHp;
       c.hp = stats.maxHp;
       c.roundShieldRemaining = stats.roundShieldHits;
-      c.gadgetCharges = createDefaultGadgetCharges(bonus);
+      c.gadgetCharges = this.buildRoundGadgetCharges(bonus);
       c.droneNudgeUsedThisTurn = false;
       c.retreatBurrowUsedThisTurn = false;
       c.skyBomberDropUsedThisTurn = false;
       c.pendingEvoDraft = c.evoCharge >= 100;
+      this.fallPeakY.set(c.id, spawn.y);
     }
 
     this.hazards = Hazards.createRoundHazards(this._world, this.round, spawns);

@@ -431,6 +431,7 @@ describe("WebSocket client message parser", () => {
         theme: "canyon_arch",
         mode: "2v2",
         botCount: 1,
+        mapScale: "grand",
         species: "badger",
         team: "B",
         bonusGadget: null,
@@ -440,9 +441,34 @@ describe("WebSocket client message parser", () => {
       theme: "canyon_arch",
       mode: "2v2",
       botCount: 1,
+      mapScale: "grand",
       species: "badger",
       team: "B",
       bonusGadget: null,
+    });
+
+    expect(
+      parseClientMessage({
+        type: "LOBBY_CONFIG",
+        mapScale: "auto",
+      }),
+    ).toEqual({
+      type: "LOBBY_CONFIG",
+      mapScale: "auto",
+    });
+
+    expect(
+      parseClientMessage({
+        type: "CREATE_ROOM",
+        playerName: "Sapper",
+        species: "mole",
+        mapScale: "duel",
+      }),
+    ).toEqual({
+      type: "CREATE_ROOM",
+      playerName: "Sapper",
+      species: "mole",
+      mapScale: "duel",
     });
 
     expect(

@@ -119,6 +119,9 @@ export class VfxSystem {
   private readonly droneInnerRing: THREE.Mesh;
 
   private pseudoSeed = 1337;
+  private worldSpanX = WORLD_SPAN_X;
+  private worldSpanY = WORLD_SPAN_Y;
+  private worldSpanZ = WORLD_SPAN_Z;
 
   public constructor() {
     this.group = new THREE.Group();
@@ -724,6 +727,42 @@ export class VfxSystem {
     }
   }
 
+  /** Resize atmospheric wind-ribbon and sunlit pollen bounds for Duel (60m) vs Grand (144m) worlds. */
+  public setWorldBounds(
+    worldWidth: number,
+    worldHeight: number,
+    worldDepth: number,
+  ): void {
+    const safeW = Number.isFinite(worldWidth) && worldWidth > 10 ? worldWidth : WORLD_SPAN_X;
+    const safeH = Number.isFinite(worldHeight) && worldHeight > 10 ? worldHeight : WORLD_SPAN_Y;
+    const safeD = Number.isFinite(worldDepth) && worldDepth > 10 ? worldDepth : WORLD_SPAN_Z;
+
+    this.worldSpanX = safeW;
+    this.worldSpanY = safeH;
+    this.worldSpanZ = safeD;
+
+    for (const ribbon of this.windRibbons) {
+      ribbon.mesh.position.set(
+        2 + this.nextRand() * (safeW - 4),
+        Math.max(5.5, safeH * 0.26) + this.nextRand() * (safeH * 0.56),
+        2 + this.nextRand() * (safeD - 4),
+      );
+    }
+
+    const pollenPos = this.pollenPoints.geometry.getAttribute("position");
+    if (pollenPos instanceof THREE.BufferAttribute) {
+      for (let i = 0; i < POLLEN_MOTE_COUNT; i++) {
+        pollenPos.setXYZ(
+          i,
+          4 + this.nextRand() * (safeW - 8),
+          3.2 + this.nextRand() * (safeH * 0.65),
+          4 + this.nextRand() * (safeD - 8),
+        );
+      }
+      pollenPos.needsUpdate = true;
+    }
+  }
+
   /** Animate sunlit white wind ribbons streaming in the exact 3D wind direction and speed. */
   public updateWindRibbons(wind: Vec3, dtSec: number): void {
     const safeDt = Number.isFinite(dtSec) ? Math.max(0, Math.min(dtSec, 0.1)) : 0;
@@ -744,13 +783,13 @@ export class VfxSystem {
         dir,
         driftSpeed * ribbon.speedFactor * safeDt,
       );
-      ribbon.mesh.position.x = wrapCoord(ribbon.mesh.position.x, -3, WORLD_SPAN_X + 3);
+      ribbon.mesh.position.x = wrapCoord(ribbon.mesh.position.x, -3, this.worldSpanX + 3);
       ribbon.mesh.position.y = wrapCoord(
         ribbon.mesh.position.y,
-        Math.max(4.5, WORLD_SPAN_Y * 0.24),
-        WORLD_SPAN_Y * 0.88,
+        Math.max(4.5, this.worldSpanY * 0.24),
+        this.worldSpanY * 0.88,
       );
-      ribbon.mesh.position.z = wrapCoord(ribbon.mesh.position.z, -3, WORLD_SPAN_Z + 3);
+      ribbon.mesh.position.z = wrapCoord(ribbon.mesh.position.z, -3, this.worldSpanZ + 3);
       ribbon.material.opacity = targetOpacity;
       const stretch = hasWind ? Math.min(2.1, 0.8 + speed * 0.16) : 0.6;
       ribbon.mesh.scale.set(1, 1, stretch);
@@ -812,9 +851,9 @@ export class VfxSystem {
         let y = pollenPos.getY(i) + Math.cos(t * 0.9 + phase * 1.3) * 0.28 * safeDt;
         let z = pollenPos.getZ(i) + (wz + Math.cos(t * 0.65 + phase) * 0.35) * spd * safeDt;
 
-        x = wrapCoord(x, 3, WORLD_SPAN_X - 3);
-        y = wrapCoord(y, 2.8, WORLD_SPAN_Y * 0.78);
-        z = wrapCoord(z, 3, WORLD_SPAN_Z - 3);
+        x = wrapCoord(x, 3, this.worldSpanX - 3);
+        y = wrapCoord(y, 2.8, this.worldSpanY * 0.78);
+        z = wrapCoord(z, 3, this.worldSpanZ - 3);
         pollenPos.setXYZ(i, x, y, z);
       }
       pollenPos.needsUpdate = true;

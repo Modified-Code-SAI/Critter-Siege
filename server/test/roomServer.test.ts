@@ -200,9 +200,73 @@ describe("authoritative WebSocket room server", () => {
 
     expect(hostSnap.state.seed).toBe(guestSnap.state.seed);
     expect(hostSnap.state.theme).toBe("canyon_arch");
+    expect(hostSnap.state.mapScale).toBe("grand");
     expect(hostSnap.state.critters).toHaveLength(3);
     expect(guestSnap.state.critters).toHaveLength(3);
     expect(hostSnap.state.critters.filter((c) => c.isBot)).toHaveLength(1);
+    expect(updatedLobby.lobby.mapScale).toBe("auto");
+  });
+
+  it("supports LOBBY_CONFIG mapScale override ('auto' | 'duel' | 'grand') and restricts changes to room host", async () => {
+    server = await startServer(0, {
+      tickIntervalMs: 40,
+      disconnectGraceMs: 150,
+      botThinkDelayMs: 60,
+    });
+
+    const host = await trackClient(server.port);
+    host.send({
+      type: "CREATE_ROOM",
+      playerName: "HostMole",
+      species: "mole",
+    });
+    const hostJoined = await host.waitFor(
+      (m): m is Extract<ServerMessage, { type: "ROOM_JOINED" }> =>
+        m.type === "ROOM_JOINED",
+    );
+    expect(hostJoined.lobby.mapScale).toBe("auto");
+
+    const guest = await trackClient(server.port);
+    guest.send({
+      type: "JOIN_ROOM",
+      roomCode: hostJoined.roomCode,
+      playerName: "GuestRat",
+      species: "norway_rat",
+    });
+    await guest.waitFor(
+      (m): m is Extract<ServerMessage, { type: "ROOM_JOINED" }> =>
+        m.type === "ROOM_JOINED",
+    );
+
+    // Guest attempting to change mapScale is rejected with NOT_HOST
+    const guestErrIdx = guest.messages.length;
+    guest.send({ type: "LOBBY_CONFIG", mapScale: "grand" });
+    const notHostErr = await guest.waitFor(
+      (m): m is Extract<ServerMessage, { type: "ERROR" }> => m.type === "ERROR",
+      3000,
+      guestErrIdx,
+    );
+    expect(notHostErr.code).toBe("NOT_HOST");
+
+    // Host overrides 2-player match to 'grand'
+    const lobbyIdx = host.messages.length;
+    host.send({ type: "LOBBY_CONFIG", mapScale: "grand" });
+    const lobbyUpdated = await host.waitFor(
+      (m): m is Extract<ServerMessage, { type: "LOBBY_UPDATED" }> =>
+        m.type === "LOBBY_UPDATED" && m.lobby.mapScale === "grand",
+      3000,
+      lobbyIdx,
+    );
+    expect(lobbyUpdated.lobby.mapScale).toBe("grand");
+
+    host.send({ type: "START_MATCH" });
+    const snap = await host.waitFor(
+      (m): m is Extract<ServerMessage, { type: "STATE_SNAPSHOT" }> =>
+        m.type === "STATE_SNAPSHOT",
+    );
+    expect(snap.state.critters).toHaveLength(2);
+    expect(snap.state.mapScale).toBe("grand");
+    expect(snap.state.phaseTimeRemainingSec).toBe(35);
   });
 
   it("rejects FIRE_ACTION from non-active player with ERROR and does not advance the turn", async () => {

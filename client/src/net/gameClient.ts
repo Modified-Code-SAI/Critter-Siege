@@ -9,6 +9,7 @@ import {
   type GameMode,
   type HardpointSlot,
   type LobbyState,
+  type MapScaleChoice,
   type MatchPlayerSeed,
   type MatchState,
   type MutationId,
@@ -30,6 +31,7 @@ export interface LobbyViewState {
   hostId: string | null;
   gameMode: GameMode;
   theme: ThemeId;
+  mapScale?: MapScaleChoice;
   botCount: number;
   players: Array<{
     id: string;
@@ -60,6 +62,7 @@ export interface SandboxConfig {
   color: string;
   gameMode: GameMode;
   theme: ThemeId;
+  mapScale?: MapScaleChoice;
   botCount: number;
   bonusGadget: GadgetId | null;
 }
@@ -68,6 +71,7 @@ export interface SandboxConfig {
 export interface LobbyConfigUpdate {
   theme?: ThemeId;
   mode?: GameMode;
+  mapScale?: MapScaleChoice;
   botCount?: number;
   species?: SpeciesId;
   team?: 0 | 1 | TeamId;
@@ -191,6 +195,7 @@ function mapLobbyToView(
     hostId: lobby.hostId,
     gameMode: lobby.mode,
     theme: lobby.theme,
+    mapScale: lobby.mapScale ?? "auto",
     botCount: lobby.botCount,
     players: lobby.players.map((p, idx) => ({
       id: p.id,
@@ -321,6 +326,7 @@ export class GameClient {
       seed,
       theme: config.theme,
       mode: config.gameMode,
+      ...(config.mapScale !== undefined ? { mapScale: config.mapScale } : {}),
       players,
     });
 
@@ -331,6 +337,7 @@ export class GameClient {
       hostId: "p1",
       gameMode: config.gameMode,
       theme: config.theme,
+      mapScale: config.mapScale ?? "auto",
       botCount: clampedBots,
       players: players.map((p, idx) => ({
         id: p.id,
@@ -366,6 +373,7 @@ export class GameClient {
     options?: {
       theme?: ThemeId;
       mode?: GameMode;
+      mapScale?: MapScaleChoice;
       botCount?: number;
       bonusGadget?: GadgetId | null;
     },
@@ -377,6 +385,7 @@ export class GameClient {
       species,
       ...(options?.theme !== undefined ? { theme: options.theme } : {}),
       ...(options?.mode !== undefined ? { mode: options.mode } : {}),
+      ...(options?.mapScale !== undefined ? { mapScale: options.mapScale } : {}),
       ...(options?.botCount !== undefined
         ? { botCount: Math.max(0, Math.min(3, Math.floor(options.botCount))) }
         : {}),
@@ -429,7 +438,7 @@ export class GameClient {
     return true;
   }
 
-  /** Update lobby settings (theme, mode, bot count, species, team, bonus gadget). */
+  /** Update lobby settings (theme, mode, mapScale, bot count, species, team, bonus gadget). */
   public sendLobbyConfig(config: LobbyConfigUpdate): void {
     if (this.mode !== "online") {
       return;
@@ -445,6 +454,7 @@ export class GameClient {
       type: "LOBBY_CONFIG",
       ...(config.theme !== undefined ? { theme: config.theme } : {}),
       ...(config.mode !== undefined ? { mode: config.mode } : {}),
+      ...(config.mapScale !== undefined ? { mapScale: config.mapScale } : {}),
       ...(config.botCount !== undefined
         ? { botCount: Math.max(0, Math.min(3, Math.floor(config.botCount))) }
         : {}),
@@ -629,10 +639,12 @@ export class GameClient {
       (c) => c.id === this.playerId,
     );
     if (!localCritter) {
+      const isGrand = this.lastState?.mapScale === "grand";
+      const fallbackCenter = isGrand ? 72 : SDF_DIMS.nx * SDF_DIMS.voxelSize * 0.5;
       return {
-        x: SDF_DIMS.nx * SDF_DIMS.voxelSize * 0.5,
-        y: 8,
-        z: SDF_DIMS.nz * SDF_DIMS.voxelSize * 0.5,
+        x: this.sandboxEngine?.world.centerX ?? fallbackCenter,
+        y: isGrand ? 14 : 8,
+        z: this.sandboxEngine?.world.centerZ ?? fallbackCenter,
       };
     }
     return {
@@ -951,8 +963,8 @@ export class GameClient {
     }
 
     // Nudge slightly toward island center for safety during retreat
-    const centerX = SDF_DIMS.nx * SDF_DIMS.voxelSize * 0.5;
-    const centerZ = SDF_DIMS.nz * SDF_DIMS.voxelSize * 0.5;
+    const centerX = this.sandboxEngine.world.centerX;
+    const centerZ = this.sandboxEngine.world.centerZ;
     const dx = centerX - bot.position.x;
     const dz = centerZ - bot.position.z;
     const dist = Math.hypot(dx, dz);

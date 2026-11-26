@@ -77,7 +77,6 @@ const LOBBY_SHOWCASE_SPECIES: readonly {
 const GRAVITY = 18.0;
 const MOVE_SYNC_INTERVAL_MS = 66;
 const WORLD_SPAN_X = SDF_DIMS.nx * SDF_DIMS.voxelSize;
-const WORLD_SPAN_Y = SDF_DIMS.ny * SDF_DIMS.voxelSize;
 const WORLD_SPAN_Z = SDF_DIMS.nz * SDF_DIMS.voxelSize;
 const WORLD_CENTER_X = WORLD_SPAN_X * 0.5;
 const WORLD_CENTER_Z = WORLD_SPAN_Z * 0.5;
@@ -127,7 +126,7 @@ function findLocalGroundY(
   z: number,
   refY: number,
 ): number | null {
-  const startY = Math.min(WORLD_SPAN_Y - 1.5, refY + 1.2);
+  const startY = Math.min(world.worldHeight - 1.5, refY + 1.2);
   const endY = Math.max(0.5, refY - 1.6);
   const step = 0.2;
 
@@ -578,7 +577,7 @@ class CritterSiegeApp {
       this.activeWorld,
       {
         gadgetId: "gale_mortar",
-        origin: { x: WORLD_CENTER_X, y: 10, z: WORLD_CENTER_Z },
+        origin: { x: this.activeWorld.centerX, y: 10, z: this.activeWorld.centerZ },
         direction: { x: 0, y: 1, z: 0 },
         power: 0.5,
       },
@@ -629,10 +628,25 @@ class CritterSiegeApp {
     this.matchState = state;
     this.inMatch = true;
 
-    const worldKey = `${state.matchId}:${state.seed}:${state.round}:${state.theme}`;
+    const suddenDeathTurn = state.mapScale === "grand" ? 8 : 6;
+    const worldKey = `${state.matchId}:${state.seed}:${state.round}:${state.theme}:${state.mapScale}`;
     if (worldKey !== this.activeWorldKey) {
       this.activeWorldKey = worldKey;
-      this.activeWorld = new SdfWorld(state.seed + state.round * 101, state.theme);
+      this.activeWorld = new SdfWorld(
+        state.seed + state.round * 101,
+        state.theme,
+        state.mapScale,
+      );
+      this.worldScene.setWorldBounds(
+        this.activeWorld.worldWidth,
+        this.activeWorld.worldHeight,
+        this.activeWorld.worldDepth,
+      );
+      this.vfx.setWorldBounds(
+        this.activeWorld.worldWidth,
+        this.activeWorld.worldHeight,
+        this.activeWorld.worldDepth,
+      );
       this.appliedCarveCount = 0;
       this.appliedCrumbleTurn = 0;
       for (const op of state.carveLog) {
@@ -652,7 +666,7 @@ class CritterSiegeApp {
         state.waterLevel,
         avoidPoints,
       );
-      if (state.carveLog.length > 0 || state.turnNumber >= 6) {
+      if (state.carveLog.length > 0 || state.turnNumber >= suddenDeathTurn) {
         this.environmentProps.pruneAfterCarve(this.activeWorld, state.waterLevel);
       }
       this.environmentProps.syncHazards(state.hazards ?? [], this.elapsedSec);
@@ -743,7 +757,10 @@ class CritterSiegeApp {
 
           this.shotPlayback = {
             gadgetId: ev.gadgetId,
-            path: sim.path.length > 0 ? sim.path : [{ x: WORLD_CENTER_X, y: 10, z: WORLD_CENTER_Z }],
+            path:
+              sim.path.length > 0
+                ? sim.path
+                : [{ x: this.activeWorld.centerX, y: 10, z: this.activeWorld.centerZ }],
             durationSec: Math.max(0.24, sim.durationSec),
             elapsedSec: 0,
             holdAfterSec: 0.45,
@@ -759,12 +776,16 @@ class CritterSiegeApp {
             this.vfx.spawnBarrelExplosion(ev.position, 2.8);
             this.audio.playExplosion(2.8);
             this.hud.showToast("BOOM! Blast Barrel chain detonation!", "error");
+          } else if (ev.hazardType === "spark_mine") {
+            this.vfx.spawnBarrelExplosion(ev.position, 2.2);
+            this.audio.playExplosion(2.2);
+            this.hud.showToast("ZAP! Spark Mine proximity blast!", "error");
           } else if (ev.hazardType === "steam_geyser") {
             this.vfx.spawnGeyserBurst(ev.position);
             this.audio.playLaunch("vine_grapple");
             if (localId && ev.affectedCritterIds.includes(localId)) {
               this.localGrounded = false;
-              this.localVel.y = 10.5;
+              this.localVel.y = this.activeWorld.mapScale === "grand" ? 13.5 : 10.5;
             }
             this.hud.showToast("WHOOSH! Thermal Geyser launch!", "info");
           } else if (ev.hazardType === "thorn_patch") {
@@ -844,16 +865,23 @@ class CritterSiegeApp {
     state: MatchState,
     rebuildNow: boolean,
   ): void {
-    if (state.turnNumber < 6 || state.turnNumber <= this.appliedCrumbleTurn) {
+    const suddenDeathTurn = state.mapScale === "grand" ? 8 : 6;
+    if (
+      state.turnNumber < suddenDeathTurn ||
+      state.turnNumber <= this.appliedCrumbleTurn
+    ) {
       return;
     }
     const dirty = new Set<string>();
     for (
-      let t = Math.max(6, this.appliedCrumbleTurn + 1);
+      let t = Math.max(suddenDeathTurn, this.appliedCrumbleTurn + 1);
       t <= state.turnNumber;
       t++
     ) {
-      const crumbleRadius = Math.max(10.0, 27.5 - (t - 6) * 1.3);
+      const crumbleRadius =
+        state.mapScale === "grand"
+          ? Math.max(22.0, 66.0 - (t - 8) * 3.0)
+          : Math.max(10.0, 27.5 - (t - 6) * 1.3);
       for (const key of this.activeWorld.crumbleOuterRing(crumbleRadius)) {
         dirty.add(key);
       }
@@ -1004,10 +1032,10 @@ class CritterSiegeApp {
     this.environmentProps.syncHazards(this.previewHazards, this.elapsedSec);
 
     // Frame the rotating 3D GLB showcase hero critter on the right-center sunlit ridge
-    // with the sweeping 60m sculpted island, trees, arches, and ocean stretching behind it!
+    // with the sweeping sculpted island, trees, arches, and ocean stretching behind it!
     const hero = this.lobbyHeroPos;
-    const toCenterX = WORLD_CENTER_X - hero.x;
-    const toCenterZ = WORLD_CENTER_Z - hero.z;
+    const toCenterX = this.activeWorld.centerX - hero.x;
+    const toCenterZ = this.activeWorld.centerZ - hero.z;
     const toCenterLen = Math.hypot(toCenterX, toCenterZ);
     const baseDirX = toCenterLen > 0.1 ? toCenterX / toCenterLen : 0.7;
     const baseDirZ = toCenterLen > 0.1 ? toCenterZ / toCenterLen : -0.7;
@@ -1131,7 +1159,7 @@ class CritterSiegeApp {
         ? { x: this.localPos.x, y: this.localPos.y, z: this.localPos.z }
         : focusCritter
           ? focusCritter.position
-          : { x: WORLD_CENTER_X, y: 9, z: WORLD_CENTER_Z };
+          : { x: this.activeWorld.centerX, y: 9, z: this.activeWorld.centerZ };
     const viewerYaw = canMove ? moveInput.yaw : focusCritter?.yaw ?? 0;
 
     this.cameraRig.update({
@@ -1281,7 +1309,11 @@ class CritterSiegeApp {
     const i0 = Math.floor(idxFloat);
     const i1 = Math.min(pb.path.length - 1, i0 + 1);
     const frac = idxFloat - i0;
-    const p0 = pb.path[i0] ?? { x: WORLD_CENTER_X, y: 10, z: WORLD_CENTER_Z };
+    const p0 = pb.path[i0] ?? {
+      x: this.activeWorld.centerX,
+      y: 10,
+      z: this.activeWorld.centerZ,
+    };
     const p1 = pb.path[i1] ?? p0;
 
     const currentPos: Vec3 = {
@@ -1375,11 +1407,11 @@ class CritterSiegeApp {
     if (moveX !== 0 || moveZ !== 0) {
       const nextX = Math.max(
         1.8,
-        Math.min(WORLD_SPAN_X - 1.8, this.localPos.x + moveX * dtSec),
+        Math.min(this.activeWorld.worldWidth - 1.8, this.localPos.x + moveX * dtSec),
       );
       const nextZ = Math.max(
         1.8,
-        Math.min(WORLD_SPAN_Z - 1.8, this.localPos.z + moveZ * dtSec),
+        Math.min(this.activeWorld.worldDepth - 1.8, this.localPos.z + moveZ * dtSec),
       );
 
       if (this.localGrounded) {
@@ -1517,8 +1549,8 @@ class CritterSiegeApp {
       );
     }
     return Math.atan2(
-      WORLD_CENTER_X - localCritter.position.x,
-      WORLD_CENTER_Z - localCritter.position.z,
+      this.activeWorld.centerX - localCritter.position.x,
+      this.activeWorld.centerZ - localCritter.position.z,
     );
   }
 
@@ -1556,7 +1588,17 @@ class CritterSiegeApp {
 
   private rebuildLobbyPreview(theme: ThemeId): void {
     this.previewTheme = theme;
-    this.activeWorld = new SdfWorld(4242, theme);
+    this.activeWorld = new SdfWorld(4242, theme, "duel");
+    this.worldScene.setWorldBounds(
+      this.activeWorld.worldWidth,
+      this.activeWorld.worldHeight,
+      this.activeWorld.worldDepth,
+    );
+    this.vfx.setWorldBounds(
+      this.activeWorld.worldWidth,
+      this.activeWorld.worldHeight,
+      this.activeWorld.worldDepth,
+    );
     this.terrainRenderer.rebuildAll(this.activeWorld);
     this.worldScene.setWaterLevel(1.8);
 
@@ -1644,9 +1686,9 @@ class CritterSiegeApp {
     const profile = this.progression.getProfile();
     const spawns = this.activeWorld.findSpawnPoints(LOBBY_SHOWCASE_SPECIES.length);
     const heroPos = spawns[0] ?? {
-      x: WORLD_CENTER_X - 10,
+      x: this.activeWorld.centerX - 10,
       y: 10,
-      z: WORLD_CENTER_Z + 10,
+      z: this.activeWorld.centerZ + 10,
     };
     this.lobbyHeroPos = { ...heroPos };
 
@@ -1672,15 +1714,15 @@ class CritterSiegeApp {
       const spec = others[i];
       if (!spec) continue;
       const pos = spawns[i + 1] ?? {
-        x: WORLD_CENTER_X - 6 + i * 6,
+        x: this.activeWorld.centerX - 6 + i * 6,
         y: 10,
-        z: WORLD_CENTER_Z,
+        z: this.activeWorld.centerZ,
       };
       const rig = new CritterRig(spec.species, spec.color, spec.label);
       rig.root.position.set(pos.x, pos.y, pos.z);
       rig.root.rotation.y = Math.atan2(
-        WORLD_CENTER_X - pos.x,
-        WORLD_CENTER_Z - pos.z,
+        this.activeWorld.centerX - pos.x,
+        this.activeWorld.centerZ - pos.z,
       );
       const hpBar = rig.root.getObjectByName("hp_bar_sprite");
       if (hpBar) {

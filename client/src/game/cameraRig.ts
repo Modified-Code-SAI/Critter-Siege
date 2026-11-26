@@ -24,7 +24,7 @@ export interface CameraUpdateContext {
 const DEFAULT_FOV = 64;
 const FIRST_PERSON_FOV = 52;
 const CAMERA_NEAR = 0.1;
-const CAMERA_FAR = 420;
+const CAMERA_FAR = 720;
 
 const OVER_SHOULDER_BACK = 4.6;
 const OVER_SHOULDER_RIGHT = 1.15;
@@ -35,6 +35,7 @@ const FIRST_PERSON_EYE_Y = 0.85;
 const DRONE_MIN_DIST = 20.0;
 const DRONE_MAX_DIST = 68.0;
 const DRONE_DEFAULT_DIST = 46.0;
+const DRONE_GRAND_SCALE = 2.15;
 const DRONE_MIN_PITCH = 0.25;
 const DRONE_MAX_PITCH = 1.38;
 const DRONE_DEFAULT_PITCH = Math.PI * 0.25;
@@ -44,7 +45,7 @@ const PULLBACK_MARGIN = 0.35;
 const PULLBACK_SDF_CLEARANCE = 0.22;
 const MIN_CAMERA_ARM = 0.65;
 
-const ISLAND_CENTER = new THREE.Vector3(
+const DEFAULT_ISLAND_CENTER = new THREE.Vector3(
   SDF_DIMS.nx * SDF_DIMS.voxelSize * 0.5,
   8.0,
   SDF_DIMS.nz * SDF_DIMS.voxelSize * 0.5,
@@ -79,14 +80,14 @@ export class CameraRig {
   private droneDistance = DRONE_DEFAULT_DIST;
 
   private readonly currentPos = new THREE.Vector3(
-    ISLAND_CENTER.x,
+    DEFAULT_ISLAND_CENTER.x,
     22,
-    ISLAND_CENTER.z + 32,
+    DEFAULT_ISLAND_CENTER.z + 32,
   );
-  private readonly currentLookAt = ISLAND_CENTER.clone();
+  private readonly currentLookAt = DEFAULT_ISLAND_CENTER.clone();
   private readonly desiredPos = new THREE.Vector3();
   private readonly desiredLookAt = new THREE.Vector3();
-  private readonly lastShotPos = ISLAND_CENTER.clone();
+  private readonly lastShotPos = DEFAULT_ISLAND_CENTER.clone();
   private readonly shotTravelDir = new THREE.Vector3(0, 0, 1);
   private hasLastShotPos = false;
   private currentFov = DEFAULT_FOV;
@@ -186,9 +187,10 @@ export class CameraRig {
     const safeDt = clamp(finiteOr(ctx.dtSec, 0.016), 0, 0.25);
     const safeYaw = finiteOr(ctx.yaw, 0);
     const safePitch = clamp(finiteOr(ctx.pitch, 0), -1.2, 1.2);
-    const targetX = finiteOr(ctx.targetPos.x, ISLAND_CENTER.x);
-    const targetY = finiteOr(ctx.targetPos.y, ISLAND_CENTER.y);
-    const targetZ = finiteOr(ctx.targetPos.z, ISLAND_CENTER.z);
+    const centerY = ctx.world.mapScale === "grand" ? 14.0 : 8.0;
+    const targetX = finiteOr(ctx.targetPos.x, ctx.world.centerX);
+    const targetY = finiteOr(ctx.targetPos.y, centerY);
+    const targetZ = finiteOr(ctx.targetPos.z, ctx.world.centerZ);
 
     // Leaving RESOLVING into RETREAT or ACTIVE clears temporary shot_cam and drone_recon
     if (
@@ -214,7 +216,7 @@ export class CameraRig {
       this.computeShotCamPose(ctx.shotPos);
     } else if (this.mode === "spectator_drone" || this.mode === "drone_recon") {
       dampRate = 8.5;
-      this.computeDronePose();
+      this.computeDronePose(ctx.world);
     } else if (this.mode === "first_person") {
       snapImmediate = true;
       targetFov = FIRST_PERSON_FOV;
@@ -442,16 +444,22 @@ export class CameraRig {
     return pulledIn;
   }
 
-  private computeDronePose(): void {
+  private computeDronePose(world: SdfWorld): void {
     const cosP = Math.cos(this.dronePitch);
     const sinP = Math.sin(this.dronePitch);
+    const isGrand = world.mapScale === "grand";
+    const scale = isGrand ? DRONE_GRAND_SCALE : 1.0;
+    const centerX = world.centerX;
+    const centerY = isGrand ? 14.0 : 8.0;
+    const centerZ = world.centerZ;
+    const effectiveDist = this.droneDistance * scale;
 
     this.desiredPos.set(
-      ISLAND_CENTER.x + Math.sin(this.droneYaw) * cosP * this.droneDistance,
-      ISLAND_CENTER.y + sinP * this.droneDistance,
-      ISLAND_CENTER.z + Math.cos(this.droneYaw) * cosP * this.droneDistance,
+      centerX + Math.sin(this.droneYaw) * cosP * effectiveDist,
+      centerY + sinP * effectiveDist,
+      centerZ + Math.cos(this.droneYaw) * cosP * effectiveDist,
     );
-    this.desiredLookAt.copy(ISLAND_CENTER);
+    this.desiredLookAt.set(centerX, centerY, centerZ);
   }
 
   private computeShotCamPose(shotPos: Vec3 | null): void {

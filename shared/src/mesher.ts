@@ -1,4 +1,4 @@
-import { SDF_DIMS, type SdfWorld } from "./sdf.js";
+import type { SdfWorld } from "./sdf.js";
 
 /** Indexed smooth triangle mesh buffers produced for a single terrain chunk. */
 export interface ChunkMeshData {
@@ -154,11 +154,10 @@ export function meshChunkSurfaceNets(
   cy: number,
   cz: number,
 ): ChunkMeshData {
-  const cs = SDF_DIMS.chunkSize;
-  const vs = SDF_DIMS.voxelSize;
-  const maxCellLimitX = SDF_DIMS.nx - 2;
-  const maxCellLimitY = SDF_DIMS.ny - 2;
-  const maxCellLimitZ = SDF_DIMS.nz - 2;
+  const { nx, ny, nz, voxelSize: vs, chunkSize: cs } = world.dims;
+  const maxCellLimitX = nx - 2;
+  const maxCellLimitY = ny - 2;
+  const maxCellLimitZ = nz - 2;
 
   const startX = cx * cs;
   const startY = cy * cs;
@@ -184,13 +183,35 @@ export function meshChunkSurfaceNets(
   }
 
   // Owned cells: [start .. ownedEnd - 1]; vertex cells include +1 high-border overlap
-  const ownedEndX = Math.min(startX + cs, SDF_DIMS.nx - 1);
-  const ownedEndY = Math.min(startY + cs, SDF_DIMS.ny - 1);
-  const ownedEndZ = Math.min(startZ + cs, SDF_DIMS.nz - 1);
+  const ownedEndX = Math.min(startX + cs, nx - 1);
+  const ownedEndY = Math.min(startY + cs, ny - 1);
+  const ownedEndZ = Math.min(startZ + cs, nz - 1);
 
   const maxCellX = Math.min(ownedEndX, maxCellLimitX);
   const maxCellY = Math.min(ownedEndY, maxCellLimitY);
   const maxCellZ = Math.min(ownedEndZ, maxCellLimitZ);
+
+  // Fast empty-chunk early-out: skip chunks whose corner voxels all share the same sign
+  const firstSolid = world.getValue(startX, startY, startZ) < 0;
+  let hasSignChange = false;
+  scan: for (let z = startZ; z <= maxCellZ + 1; z++) {
+    for (let y = startY; y <= maxCellY + 1; y++) {
+      for (let x = startX; x <= maxCellX + 1; x++) {
+        if ((world.getValue(x, y, z) < 0) !== firstSolid) {
+          hasSignChange = true;
+          break scan;
+        }
+      }
+    }
+  }
+  if (!hasSignChange) {
+    return {
+      positions: new Float32Array(0),
+      normals: new Float32Array(0),
+      colors: new Float32Array(0),
+      indices: new Uint32Array(0),
+    };
+  }
 
   const sizeX = maxCellX - startX + 1;
   const sizeY = maxCellY - startY + 1;

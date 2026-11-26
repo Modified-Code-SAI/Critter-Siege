@@ -231,8 +231,27 @@ export interface CritterState {
   color: string;
 }
 
+/** Battlefield map scale preset: 60m Duel (2p) vs 144m Grand (3-4p). */
+export type MapScale = "duel" | "grand";
+
+/** Lobby map scale choice allowing automatic selection by player count. */
+export type MapScaleChoice = "auto" | MapScale;
+
+/** Voxel grid & chunk geometry dimensions for a sculpted SDF world. */
+export interface SdfDimensions {
+  nx: number;
+  ny: number;
+  nz: number;
+  voxelSize: number;
+  chunkSize: number;
+}
+
 /** Interactive environmental hazard types scattered across sculpted islands. */
-export type HazardType = "blast_barrel" | "steam_geyser" | "thorn_patch";
+export type HazardType =
+  | "blast_barrel"
+  | "steam_geyser"
+  | "thorn_patch"
+  | "spark_mine";
 
 /** Authoritative runtime state for one interactive environmental hazard. */
 export interface HazardState {
@@ -241,6 +260,7 @@ export interface HazardState {
   position: Vec3;
   radius: number;
   active: boolean;
+  armed?: boolean;
 }
 
 /** Parachuting or landed Evolution Pod pickup state. */
@@ -268,6 +288,18 @@ export interface PendingDraftState {
   requiresSlotSwap: boolean;
 }
 
+/** Lobby configuration message sent from client to room server. */
+export interface LobbyConfigMessage {
+  type: "LOBBY_CONFIG";
+  theme?: ThemeId;
+  mode?: GameMode;
+  botCount?: number;
+  mapScale?: MapScaleChoice;
+  species?: SpeciesId;
+  team?: TeamId;
+  bonusGadget?: GadgetId | null;
+}
+
 /** Lobby participant configuration before match start. */
 export interface LobbyPlayer {
   id: string;
@@ -286,6 +318,7 @@ export interface LobbyState {
   theme: ThemeId;
   mode: GameMode;
   botCount: number;
+  mapScale?: MapScaleChoice;
   started: boolean;
   players: LobbyPlayer[];
 }
@@ -312,6 +345,7 @@ export interface MatchConfig {
   seed: number;
   theme: ThemeId;
   mode: GameMode;
+  mapScale?: MapScaleChoice;
   maxRounds?: number;
   roundCount?: number;
   turnDurationMs?: number;
@@ -326,6 +360,7 @@ export interface MatchState {
   seed: number;
   theme: ThemeId;
   mode: GameMode;
+  mapScale: MapScale;
   phase: TurnPhase;
   round: number;
   maxRounds: number;

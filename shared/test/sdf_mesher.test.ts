@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   SDF_DIMS,
+  SDF_PRESETS,
   SdfWorld,
   chunkKey,
   createSeededRng,
@@ -341,7 +342,7 @@ describe("SdfWorld & Surface Nets smooth terrain mesher", () => {
     expect(elapsedMs).toBeLessThan(25);
   });
 
-  it("places 6-10 deterministic interactive hazards clear of spawns and sculpts a pass-through tunnel beneath emerald_spire pinnacle", () => {
+  it("places 8-10 deterministic interactive hazards across all 4 types clear of spawns and sculpts a pass-through tunnel beneath emerald_spire pinnacle", () => {
     for (const theme of ALL_THEMES) {
       const worldA = new SdfWorld(7331, theme);
       const worldB = new SdfWorld(7331, theme);
@@ -352,11 +353,12 @@ describe("SdfWorld & Surface Nets smooth terrain mesher", () => {
       const hazardsB = worldB.findHazardPoints(spawnsB);
 
       expect(hazardsA).toEqual(hazardsB);
-      expect(hazardsA.length).toBeGreaterThanOrEqual(6);
+      expect(hazardsA.length).toBeGreaterThanOrEqual(8);
       expect(hazardsA.length).toBeLessThanOrEqual(10);
 
       const typesPresent = new Set(hazardsA.map((h) => h.type));
       expect(typesPresent.has("blast_barrel")).toBe(true);
+      expect(typesPresent.has("spark_mine")).toBe(true);
       expect(typesPresent.has("steam_geyser")).toBe(true);
       expect(typesPresent.has("thorn_patch")).toBe(true);
 
@@ -364,6 +366,7 @@ describe("SdfWorld & Surface Nets smooth terrain mesher", () => {
         expect(h.position.y).toBeGreaterThanOrEqual(2.2);
         expect(worldA.sample(h.position.x, h.position.y + 1.0, h.position.z)).toBeGreaterThan(0);
         if (h.type === "blast_barrel") expect(h.radius).toBe(1.4);
+        if (h.type === "spark_mine") expect(h.radius).toBe(2.4);
         if (h.type === "steam_geyser") expect(h.radius).toBe(1.7);
         if (h.type === "thorn_patch") expect(h.radius).toBe(1.9);
 
@@ -382,5 +385,163 @@ describe("SdfWorld & Surface Nets smooth terrain mesher", () => {
     const spireWorld = new SdfWorld(4242, "emerald_spire");
     expect(spireWorld.sample(30.0, 5.4, 30.0)).toBeGreaterThan(0);
     expect(spireWorld.sample(30.0, 11.0, 30.0)).toBeLessThan(0);
+  });
+
+  it("generates 144m grand maps with 192 chunks, 4 spawns >= 52m apart, and 14-18 hazards across all 3 themes", () => {
+    expect(SDF_PRESETS.duel).toEqual({
+      nx: 80,
+      ny: 36,
+      nz: 80,
+      voxelSize: 0.75,
+      chunkSize: 16,
+    });
+    expect(SDF_PRESETS.grand).toEqual({
+      nx: 128,
+      ny: 44,
+      nz: 128,
+      voxelSize: 1.125,
+      chunkSize: 16,
+    });
+
+    for (const theme of ALL_THEMES) {
+      const grand = new SdfWorld(2026, theme, "grand");
+      expect(grand.mapScale).toBe("grand");
+      expect(grand.dims).toEqual(SDF_PRESETS.grand);
+      expect(grand.worldWidth).toBe(144);
+      expect(grand.worldHeight).toBe(49.5);
+      expect(grand.worldDepth).toBe(144);
+      expect(grand.centerX).toBe(72);
+      expect(grand.centerZ).toBe(72);
+      expect(grand.getAllChunkCoords()).toHaveLength(192);
+
+      const spawns = grand.findSpawnPoints(4);
+      expect(spawns).toHaveLength(4);
+
+      const quadrants = new Set<string>();
+      for (const sp of spawns) {
+        expect(sp.y).toBeGreaterThanOrEqual(4.0);
+        const normal = grand.sampleNormal(sp.x, sp.y, sp.z);
+        expect(normal.y).toBeGreaterThanOrEqual(0.65);
+        expect(grand.sample(sp.x, sp.y + 1.0, sp.z)).toBeGreaterThan(0);
+        quadrants.add(`${sp.x < grand.centerX ? "W" : "E"}${sp.z < grand.centerZ ? "N" : "S"}`);
+      }
+      expect(quadrants.size).toBe(4);
+
+      for (let i = 0; i < spawns.length; i++) {
+        for (let j = i + 1; j < spawns.length; j++) {
+          const a = spawns[i];
+          const b = spawns[j];
+          expect(a).toBeDefined();
+          expect(b).toBeDefined();
+          if (a && b) {
+            const dist = Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
+            expect(dist).toBeGreaterThanOrEqual(52.0);
+          }
+        }
+      }
+
+      const hazards = grand.findHazardPoints(spawns);
+      expect(hazards.length).toBeGreaterThanOrEqual(14);
+      expect(hazards.length).toBeLessThanOrEqual(18);
+      const typesPresent = new Set(hazards.map((h) => h.type));
+      expect(typesPresent.has("blast_barrel")).toBe(true);
+      expect(typesPresent.has("spark_mine")).toBe(true);
+      expect(typesPresent.has("steam_geyser")).toBe(true);
+      expect(typesPresent.has("thorn_patch")).toBe(true);
+    }
+  });
+
+  it("blocks direct Turn 1 line-of-sight between every pair of spawns across all 3 themes in both duel and grand scales", () => {
+    for (const theme of ALL_THEMES) {
+      // Duel (60m): check 2-player spawns and full 4-quadrant spawns
+      const duel = new SdfWorld(9001, theme, "duel");
+      expect(duel.worldWidth).toBe(60);
+      expect(duel.worldDepth).toBe(60);
+      const duel2 = duel.findSpawnPoints(2);
+      expect(duel2).toHaveLength(2);
+      const d0 = duel2[0];
+      const d1 = duel2[1];
+      expect(d0).toBeDefined();
+      expect(d1).toBeDefined();
+      if (d0 && d1) {
+        expect(Math.hypot(d0.x - d1.x, d0.y - d1.y, d0.z - d1.z)).toBeGreaterThanOrEqual(24.0);
+        expect(duel.hasDirectLineOfSight(d0, d1, 1.1)).toBe(false);
+      }
+
+      const duel4 = duel.findSpawnPoints(4);
+      expect(duel4).toHaveLength(4);
+      for (let i = 0; i < duel4.length; i++) {
+        for (let j = i + 1; j < duel4.length; j++) {
+          const a = duel4[i];
+          const b = duel4[j];
+          expect(a).toBeDefined();
+          expect(b).toBeDefined();
+          if (a && b) {
+            expect(Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z)).toBeGreaterThanOrEqual(24.0);
+            expect(duel.hasDirectLineOfSight(a, b, 1.1)).toBe(false);
+          }
+        }
+      }
+
+      // Grand (144m): check all 6 pairs of 4 spawns
+      const grand = new SdfWorld(9001, theme, "grand");
+      const grand4 = grand.findSpawnPoints(4);
+      expect(grand4).toHaveLength(4);
+      for (let i = 0; i < grand4.length; i++) {
+        for (let j = i + 1; j < grand4.length; j++) {
+          const a = grand4[i];
+          const b = grand4[j];
+          expect(a).toBeDefined();
+          expect(b).toBeDefined();
+          if (a && b) {
+            expect(Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z)).toBeGreaterThanOrEqual(52.0);
+            expect(grand.hasDirectLineOfSight(a, b, 1.1)).toBe(false);
+          }
+        }
+      }
+    }
+  });
+
+  it("meshes all 192 chunks of a 144m grand world dynamically with fast empty-chunk early-out and zero NaNs", () => {
+    const grand = new SdfWorld(2026, "emerald_spire", "grand");
+    const chunks = grand.getAllChunkCoords();
+    expect(chunks).toHaveLength(192);
+
+    const start = performance.now();
+    let totalVertices = 0;
+    let totalTriangles = 0;
+    let outerChunkVertices = 0;
+    let maxWorldX = 0;
+    let maxWorldZ = 0;
+    let nonFinite = 0;
+
+    for (const { cx, cy, cz } of chunks) {
+      const mesh = meshChunkSurfaceNets(grand, cx, cy, cz);
+      const vCount = mesh.positions.length / 3;
+      totalVertices += vCount;
+      totalTriangles += mesh.indices.length / 3;
+      if (cx >= 5 || cz >= 5) {
+        outerChunkVertices += vCount;
+      }
+      for (let v = 0; v < vCount; v++) {
+        const px = mesh.positions[v * 3] ?? Number.NaN;
+        const py = mesh.positions[v * 3 + 1] ?? Number.NaN;
+        const pz = mesh.positions[v * 3 + 2] ?? Number.NaN;
+        if (!Number.isFinite(px) || !Number.isFinite(py) || !Number.isFinite(pz)) {
+          nonFinite += 1;
+        }
+        if (px > maxWorldX) maxWorldX = px;
+        if (pz > maxWorldZ) maxWorldZ = pz;
+      }
+    }
+    const elapsedMs = performance.now() - start;
+
+    expect(nonFinite).toBe(0);
+    expect(totalVertices).toBeGreaterThan(8000);
+    expect(totalTriangles).toBeGreaterThan(8000);
+    expect(outerChunkVertices).toBeGreaterThan(2000);
+    expect(maxWorldX).toBeGreaterThan(110);
+    expect(maxWorldZ).toBeGreaterThan(110);
+    expect(elapsedMs).toBeLessThan(2000);
   });
 });

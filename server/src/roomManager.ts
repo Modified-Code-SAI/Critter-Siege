@@ -9,6 +9,7 @@ import {
   type GameMode,
   type LobbyPlayer,
   type LobbyState,
+  type MapScaleChoice,
   type MatchPlayerSeed,
   type MatchState,
   type ServerMessage,
@@ -69,6 +70,7 @@ interface RoomRecord {
   theme: ThemeId;
   mode: GameMode;
   botCount: number;
+  mapScale?: MapScaleChoice;
   started: boolean;
   nextHumanSeq: number;
   humans: HumanSeat[];
@@ -248,6 +250,7 @@ export class RoomManager {
       theme: msg.theme ?? "emerald_spire",
       mode: msg.mode ?? "ffa",
       botCount: Math.max(0, Math.min(MAX_ROOM_PLAYERS - 1, msg.botCount ?? 0)),
+      mapScale: msg.mapScale ?? "auto",
       started: false,
       nextHumanSeq: 2,
       humans: [hostSeat],
@@ -430,13 +433,14 @@ export class RoomManager {
     const touchesHostSettings =
       msg.theme !== undefined ||
       msg.mode !== undefined ||
-      msg.botCount !== undefined;
+      msg.botCount !== undefined ||
+      msg.mapScale !== undefined;
 
     if (touchesHostSettings && seat.id !== room.hostId) {
       this.sendError(
         socket,
         "NOT_HOST",
-        "Only the room host can update mode, theme, or bot count.",
+        "Only the room host can update mode, theme, bot count, or map scale.",
       );
       return;
     }
@@ -450,6 +454,9 @@ export class RoomManager {
     if (msg.botCount !== undefined) {
       const maxBots = Math.max(0, MAX_ROOM_PLAYERS - room.humans.length);
       room.botCount = Math.max(0, Math.min(maxBots, msg.botCount));
+    }
+    if (msg.mapScale !== undefined) {
+      room.mapScale = msg.mapScale;
     }
     if (msg.species !== undefined) {
       seat.species = msg.species;
@@ -490,12 +497,19 @@ export class RoomManager {
 
     const players = this.buildMatchPlayers(room);
     const seed = randomInt(1, 0x7fffffff);
+    const resolvedMapScale =
+      room.mapScale === "duel" || room.mapScale === "grand"
+        ? room.mapScale
+        : totalCritters >= 3
+          ? "grand"
+          : "duel";
 
     room.engine = new MatchEngine({
       roomCode: room.roomCode,
       seed,
       theme: room.theme,
       mode: room.mode,
+      mapScale: resolvedMapScale,
       players,
     });
     room.started = true;
@@ -975,6 +989,7 @@ export class RoomManager {
       theme: room.theme,
       mode: room.mode,
       botCount: room.botCount,
+      mapScale: room.mapScale ?? "auto",
       started: room.started,
       players,
     };
