@@ -1818,4 +1818,68 @@ describe("Authoritative MatchEngine turn state machine & review edge cases", () 
       Math.min(100, evoBeforeSuper + bonusEvoFromOtherPods + 25),
     );
   });
+
+  it("routes Spark Mine water plunges during Cycle 1 through Water Rescue (-35 HP) instead of instant KO", () => {
+    const engine = new MatchEngine(
+      makeBaseConfig({
+        seed: 2027,
+        theme: "emerald_spire",
+      }),
+    );
+
+    const init = engine.getSnapshot();
+    const mine = (init.hazards ?? []).find((h) => h.type === "spark_mine");
+    expect(mine).toBeDefined();
+    if (!mine) return;
+
+    // Carve a deep ocean channel directly on the +X side of the Spark Mine so its knockback plunges p1 into water
+    for (let dx = 2; dx <= 16; dx += 4) {
+      for (let y = mine.position.y + 1; y >= 0; y -= 4) {
+        engine.world.applyCarve({
+          shape: "sphere",
+          center: { x: mine.position.x + dx, y, z: mine.position.z },
+          radius: 4.5,
+        });
+      }
+    }
+
+    // Approach from the +X side so knockback launches p1 straight into the carved ocean pit
+    const triggerPos = {
+      x: mine.position.x + 1.2,
+      y: mine.position.y,
+      z: mine.position.z,
+    };
+    const evs = advanceAndWalkTo(
+      engine,
+      "p1",
+      triggerPos,
+      16,
+      (stepEvs) =>
+        stepEvs.some(
+          (e) => e.type === "HAZARD_TRIGGERED" && e.hazardType === "spark_mine",
+        ),
+    );
+
+    expect(
+      evs.some(
+        (e) => e.type === "HAZARD_TRIGGERED" && e.hazardType === "spark_mine",
+      ),
+    ).toBe(true);
+    const rescueEv = evs.find(
+      (e) => e.type === "WATER_RESCUED" && e.playerId === "p1",
+    );
+    expect(rescueEv).toBeDefined();
+    if (rescueEv && rescueEv.type === "WATER_RESCUED") {
+      expect(rescueEv.damage).toBe(35);
+    }
+
+    const afterSnap = engine.getSnapshot();
+    const p1After = afterSnap.critters.find((c) => c.id === "p1");
+    expect(p1After).toBeDefined();
+    if (p1After) {
+      expect(p1After.alive).toBe(true);
+      expect(p1After.hp).toBeGreaterThan(0);
+      expect(p1After.position.y).toBeGreaterThan(afterSnap.waterLevel + 1.0);
+    }
+  });
 });

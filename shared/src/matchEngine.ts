@@ -308,6 +308,8 @@ export class MatchEngine {
         shooter: critter,
         areTeammates: (a, b) => this.areTeammates(a, b),
         onEnemyKo: (attacker) => this.awardEnemyKo(attacker),
+        onWaterContact: (target, attacker) =>
+          this.resolveWaterContact(target, attacker),
       },
     );
     events.push(...hazardEvents);
@@ -552,6 +554,8 @@ export class MatchEngine {
               shooter: critter,
               areTeammates: (a, b) => this.areTeammates(a, b),
               onEnemyKo: (attacker) => this.awardEnemyKo(attacker),
+              onWaterContact: (target, attacker) =>
+                this.resolveWaterContact(target, attacker),
             },
           ),
         );
@@ -1435,6 +1439,8 @@ export class MatchEngine {
         preImpactPositions,
         areTeammates: (a, b) => this.areTeammates(a, b),
         onEnemyKo: (attacker) => this.awardEnemyKo(attacker),
+        onWaterContact: (target, attacker) =>
+          this.resolveWaterContact(target, attacker),
       }),
     );
 
@@ -1454,6 +1460,8 @@ export class MatchEngine {
               shooter,
               areTeammates: (a, b) => this.areTeammates(a, b),
               onEnemyKo: (attacker) => this.awardEnemyKo(attacker),
+              onWaterContact: (affected, attacker) =>
+                this.resolveWaterContact(affected, attacker),
             },
           ),
         );

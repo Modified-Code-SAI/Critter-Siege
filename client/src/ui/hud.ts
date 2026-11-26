@@ -364,6 +364,7 @@ export class HudController {
   private readonly blShieldEl: HTMLSpanElement;
   private readonly blHpTextEl: HTMLSpanElement;
   private readonly blHpFillEl: HTMLDivElement;
+  private blMoveFillEl: HTMLDivElement | null = null;
   private readonly blEvoCircleEl: SVGCircleElement;
   private readonly blEvoTextEl: HTMLSpanElement;
   private readonly blHardpointsEl: HTMLDivElement;
@@ -624,6 +625,9 @@ export class HudController {
     this.blTeamEl = bottomLeft.querySelector('[data-ref="bl-team"]') as HTMLSpanElement;
     this.blShieldEl = bottomLeft.querySelector('[data-ref="bl-shield"]') as HTMLSpanElement;
     this.blHpFillEl = bottomLeft.querySelector('[data-ref="bl-hp-fill"]') as HTMLDivElement;
+    this.blMoveFillEl = bottomLeft.querySelector<HTMLDivElement>(
+      '[data-ref="bl-move-fill"]',
+    );
     this.blHpTextEl = bottomLeft.querySelector('[data-ref="bl-hp-text"]') as HTMLSpanElement;
     this.blEvoCircleEl = bottomLeft.querySelector(
       '[data-ref="bl-evo-circle"]',
@@ -1075,16 +1079,13 @@ export class HudController {
         hpPct > 55 ? "high" : hpPct > 25 ? "mid" : "low";
       this.blHpTextEl.textContent = `${Math.ceil(localCritter.hp)}`;
 
-      const moveFillEl = this.blHpFillEl
-        .closest(".cs-hp-cluster")
-        ?.querySelector<HTMLDivElement>('[data-ref="bl-move-fill"]');
-      if (moveFillEl) {
+      if (this.blMoveFillEl) {
         const movePct = Math.max(
           0,
           Math.min(100, frame.localMoveStamina ?? localCritter.moveStamina),
         );
-        moveFillEl.style.width = `${movePct.toFixed(1)}%`;
-        moveFillEl.dataset.tier =
+        this.blMoveFillEl.style.width = `${movePct.toFixed(1)}%`;
+        this.blMoveFillEl.dataset.tier =
           movePct > 35 ? "high" : movePct > 0 ? "low" : "empty";
       }
 

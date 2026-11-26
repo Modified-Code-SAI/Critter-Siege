@@ -1485,11 +1485,7 @@ class CritterSiegeApp {
             this.lastSyncedPos.copy(this.localPos);
           }
         } else {
-          this.vfx.setGrappleTether(
-            id,
-            { x: curPos.x, y: curPos.y + 0.55, z: curPos.z },
-            glide.to,
-          );
+          this.vfx.setGrappleTether(id, curPos, glide.to);
         }
       }
       for (const id of completedGlides) {
