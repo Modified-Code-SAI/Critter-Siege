@@ -111,9 +111,176 @@ interface ShotPlayback {
   hitStopSec?: number;
 }
 
-function getWsUrl(): string {
-  const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
-  return `${proto}//${window.location.host}/ws`;
+/** SessionStorage key preserving ?server= WebSocket URL across page reloads. */
+export const WS_SERVER_STORAGE_KEY = "critter_siege_ws_server_v1";
+
+const NO_WS_SERVER_TOAST =
+  "Play Now works anytime! For online rooms on GitHub Pages, add ?server=wss://your-server-url (or run a Cloudflare tunnel).";
+
+/** Optional environment overrides for deterministic WS URL resolution tests. */
+export interface ResolveWsUrlOptions {
+  search?: string;
+  hostname?: string;
+  locationHost?: string;
+  locationProtocol?: string;
+  envWsUrl?: string;
+  storage?: Pick<Storage, "getItem" | "setItem" | "removeItem"> | null;
+}
+
+/**
+ * Normalize a custom multiplayer server URL (`wss://...`, `ws://...`, or `https://...`)
+ * into a canonical WebSocket URL appending `/ws` when path is empty or `/`.
+ */
+export function normalizeServerWsUrl(raw: string): string {
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    return "";
+  }
+  const withScheme = trimmed.includes("://")
+    ? trimmed
+    : /^(localhost|127\.0\.0\.1|\[::1\])(?::|\/|$)/i.test(trimmed)
+      ? `ws://${trimmed}`
+      : `wss://${trimmed}`;
+
+  let parsed: URL;
+  try {
+    parsed = new URL(withScheme);
+  } catch {
+    return "";
+  }
+
+  if (parsed.protocol === "https:") {
+    parsed.protocol = "wss:";
+  } else if (parsed.protocol === "http:") {
+    parsed.protocol = "ws:";
+  }
+
+  if (parsed.protocol !== "ws:" && parsed.protocol !== "wss:") {
+    return "";
+  }
+
+  if (parsed.pathname === "" || parsed.pathname === "/") {
+    parsed.pathname = "/ws";
+  }
+
+  return parsed.toString();
+}
+
+function isStaticGithubPagesHost(hostname: string): boolean {
+  const lower = hostname.trim().toLowerCase();
+  return lower === "github.io" || lower.endsWith(".github.io");
+}
+
+function readBrowserStorage(): Pick<Storage, "getItem" | "setItem" | "removeItem"> | null {
+  try {
+    return typeof sessionStorage !== "undefined" ? sessionStorage : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Resolve any explicit custom multiplayer server URL from `?server=`,
+ * persisted `sessionStorage`, or build-time `VITE_WS_URL`.
+ */
+export function resolveCustomServerUrl(opts?: ResolveWsUrlOptions): string {
+  const search =
+    opts?.search ??
+    (typeof window !== "undefined" ? window.location.search : "");
+  const storage =
+    opts && "storage" in opts ? (opts.storage ?? null) : readBrowserStorage();
+
+  try {
+    const params = new URLSearchParams(search);
+    if (params.has("server")) {
+      const rawParam = params.get("server") ?? "";
+      const normalized = normalizeServerWsUrl(rawParam);
+      if (normalized) {
+        try {
+          storage?.setItem(WS_SERVER_STORAGE_KEY, normalized);
+        } catch {
+          // Ignore storage write errors
+        }
+        return normalized;
+      }
+      if (rawParam.trim() === "") {
+        try {
+          storage?.removeItem(WS_SERVER_STORAGE_KEY);
+        } catch {
+          // Ignore storage remove errors
+        }
+      }
+    }
+  } catch {
+    // Ignore malformed query strings
+  }
+
+  try {
+    const stored = storage?.getItem(WS_SERVER_STORAGE_KEY) ?? "";
+    const normalizedStored = normalizeServerWsUrl(stored);
+    if (normalizedStored) {
+      return normalizedStored;
+    }
+  } catch {
+    // Ignore storage read errors
+  }
+
+  const rawEnv: unknown =
+    opts?.envWsUrl !== undefined ? opts.envWsUrl : import.meta.env?.VITE_WS_URL;
+  if (typeof rawEnv === "string" && rawEnv.trim().length > 0) {
+    const normalizedEnv = normalizeServerWsUrl(rawEnv);
+    if (normalizedEnv) {
+      return normalizedEnv;
+    }
+  }
+
+  return "";
+}
+
+/**
+ * Resolve the multiplayer WebSocket URL in priority order:
+ * 1. `?server=` query param (persisted to `critter_siege_ws_server_v1`)
+ * 2. `import.meta.env.VITE_WS_URL`
+ * 3. Same-origin `/ws` on localhost / LAN / custom server, or `""` on `*.github.io`
+ */
+export function resolveWsUrl(opts?: ResolveWsUrlOptions): string {
+  const customUrl = resolveCustomServerUrl(opts);
+  if (customUrl) {
+    return customUrl;
+  }
+
+  const hostname =
+    opts?.hostname ??
+    (typeof window !== "undefined" ? window.location.hostname : "localhost");
+  if (isStaticGithubPagesHost(hostname)) {
+    return "";
+  }
+
+  const locationProtocol =
+    opts?.locationProtocol ??
+    (typeof window !== "undefined" ? window.location.protocol : "http:");
+  const locationHost =
+    opts?.locationHost ??
+    (typeof window !== "undefined" ? window.location.host : "localhost:5173");
+  if (!locationHost) {
+    return "";
+  }
+  const proto = locationProtocol === "https:" ? "wss:" : "ws:";
+  return `${proto}//${locationHost}/ws`;
+}
+
+/** Build a shareable invite link preserving `?server=` whenever a custom server is active. */
+export function buildInviteUrl(
+  origin: string,
+  pathname: string,
+  roomCode: string,
+  customServerUrl?: string,
+): string {
+  const base = `${origin}${pathname}?room=${encodeURIComponent(roomCode)}`;
+  if (customServerUrl && customServerUrl.trim().length > 0) {
+    return `${base}&server=${encodeURIComponent(customServerUrl)}`;
+  }
+  return base;
 }
 
 function readRoomCodeFromUrl(): string {
@@ -489,9 +656,14 @@ class CritterSiegeApp {
       onPlaySandbox: () => this.launchSandboxMatch(),
       onCreateRoom: () => {
         this.audio.playUiClick();
+        const wsUrl = resolveWsUrl();
+        if (!wsUrl) {
+          this.hud.showToast(NO_WS_SERVER_TOAST, "info");
+          return;
+        }
         const p = this.progression.getProfile();
         this.gameClient.connectAndCreateRoom(
-          getWsUrl(),
+          wsUrl,
           p.displayName,
           p.selectedSpecies,
           {
@@ -507,9 +679,14 @@ class CritterSiegeApp {
       },
       onJoinRoom: (roomCode) => {
         this.audio.playUiClick();
+        const wsUrl = resolveWsUrl();
+        if (!wsUrl) {
+          this.hud.showToast(NO_WS_SERVER_TOAST, "info");
+          return;
+        }
         const p = this.progression.getProfile();
         this.gameClient.connectAndJoinRoom(
-          getWsUrl(),
+          wsUrl,
           roomCode,
           p.displayName,
           p.selectedSpecies,
@@ -632,7 +809,8 @@ class CritterSiegeApp {
     this.refreshLobbyHud();
 
     // Seamlessly reconnect to an active online room after browser refresh
-    if (this.gameClient.tryAutoReconnect(getWsUrl())) {
+    const reconnectWsUrl = resolveWsUrl();
+    if (reconnectWsUrl && this.gameClient.tryAutoReconnect(reconnectWsUrl)) {
       this.hud.showToast("Reconnecting to Critter Siege room...", "info");
     }
 
@@ -722,7 +900,12 @@ class CritterSiegeApp {
     if (!code) {
       return;
     }
-    const url = `${window.location.origin}${window.location.pathname}?room=${code}`;
+    const url = buildInviteUrl(
+      window.location.origin,
+      window.location.pathname,
+      code,
+      resolveCustomServerUrl(),
+    );
     if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
       void navigator.clipboard.writeText(url).then(
         () => this.hud.showToast(`Invite link copied (${code})!`, "success"),
@@ -2354,6 +2537,9 @@ class CritterSiegeApp {
 }
 
 function bootstrap(): void {
+  if (typeof document === "undefined") {
+    return;
+  }
   const appEl = document.getElementById("app");
   const hudEl = document.getElementById("hud-root");
   if (!appEl || !hudEl) {

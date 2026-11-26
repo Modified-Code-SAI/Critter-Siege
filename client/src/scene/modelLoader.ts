@@ -2,12 +2,22 @@ import * as THREE from "three";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import type { SpeciesId } from "@critter/shared";
 
+/** Resolve normalized Vite BASE_URL with a guaranteed single trailing slash. */
+function resolveBaseUrl(baseOverride?: string): string {
+  const raw = baseOverride ?? import.meta.env?.BASE_URL ?? "/";
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    return "/";
+  }
+  return trimmed.endsWith("/") ? trimmed : `${trimmed}/`;
+}
+
 /** Starter species backed by sculpted Hunyuan3D-2 + Blender GLB hero models. */
-const CUSTOM_GLB_URLS: Partial<Record<SpeciesId, string>> = {
-  mole: "/models/mole.glb",
-  norway_rat: "/models/norway_rat.glb",
-  badger: "/models/badger.glb",
-  glider_squirrel: "/models/glider_squirrel.glb",
+const CUSTOM_GLB_PATHS: Partial<Record<SpeciesId, string>> = {
+  mole: "models/mole.glb",
+  norway_rat: "models/norway_rat.glb",
+  badger: "models/badger.glb",
+  glider_squirrel: "models/glider_squirrel.glb",
 };
 
 const templateCache = new Map<SpeciesId, Promise<THREE.Group | null>>();
@@ -53,12 +63,16 @@ function tuneGlbMaterial(material: THREE.Material): void {
 
 /** Return true if a species has a sculpted GLB hero model in client/public/models/. */
 export function hasCustomGlbSpecies(species: SpeciesId): boolean {
-  return CUSTOM_GLB_URLS[species] !== undefined;
+  return CUSTOM_GLB_PATHS[species] !== undefined;
 }
 
 /** Return the static Vite public URL for a species GLB model, or null if procedural. */
-export function getSpeciesModelUrl(species: SpeciesId): string | null {
-  return CUSTOM_GLB_URLS[species] ?? null;
+export function getSpeciesModelUrl(
+  species: SpeciesId,
+  baseOverride?: string,
+): string | null {
+  const rel = CUSTOM_GLB_PATHS[species];
+  return rel ? `${resolveBaseUrl(baseOverride)}${rel}` : null;
 }
 
 /**
@@ -158,18 +172,21 @@ export async function loadSpeciesModel(
 /** Handcrafted Blender 5.2.4 LTS set-piece landmark prop identifiers. */
 export type PropLandmarkKind = "watchtower" | "ruin_arch" | "gnarled_pine";
 
-const PROP_GLB_URLS: Readonly<Record<PropLandmarkKind, string>> = {
-  watchtower: "/models/props/watchtower.glb",
-  ruin_arch: "/models/props/ruin_arch.glb",
-  gnarled_pine: "/models/props/gnarled_pine.glb",
+const PROP_GLB_PATHS: Readonly<Record<PropLandmarkKind, string>> = {
+  watchtower: "models/props/watchtower.glb",
+  ruin_arch: "models/props/ruin_arch.glb",
+  gnarled_pine: "models/props/gnarled_pine.glb",
 };
 
 const propTemplateCache = new Map<PropLandmarkKind, Promise<THREE.Group | null>>();
 const resolvedPropTemplates = new Map<PropLandmarkKind, THREE.Group>();
 
 /** Return the static Vite public URL for a handcrafted Blender landmark prop GLB. */
-export function getPropModelUrl(kind: PropLandmarkKind): string {
-  return PROP_GLB_URLS[kind];
+export function getPropModelUrl(
+  kind: PropLandmarkKind,
+  baseOverride?: string,
+): string {
+  return `${resolveBaseUrl(baseOverride)}${PROP_GLB_PATHS[kind]}`;
 }
 
 /**
@@ -230,7 +247,7 @@ export async function loadPropModel(
   if (!pending) {
     const loader = getLoader();
     pending = loader
-      .loadAsync(PROP_GLB_URLS[kind])
+      .loadAsync(getPropModelUrl(kind))
       .then((gltf) => {
         const normalized = normalizePropGlbModel(gltf.scene, kind);
         resolvedPropTemplates.set(kind, normalized);

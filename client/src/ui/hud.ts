@@ -22,8 +22,13 @@ import type { LobbyViewState } from "../net/gameClient.js";
 import type { PlayerProfile } from "../profile/progression.js";
 
 /** Resolve the crisp 256px 3D rendered portrait URL for any playable Critter Siege species. */
-export function getSpeciesPortraitUrl(species: SpeciesId): string {
-  return `/portraits/${species}.jpg`;
+export function getSpeciesPortraitUrl(
+  species: SpeciesId,
+  baseOverride?: string,
+): string {
+  const raw = (baseOverride ?? import.meta.env?.BASE_URL ?? "/").trim();
+  const base = !raw ? "/" : raw.endsWith("/") ? raw : `${raw}/`;
+  return `${base}portraits/${species}.jpg`;
 }
 
 /** Breakdown displayed on the Match Over Siege Essence summary modal. */
