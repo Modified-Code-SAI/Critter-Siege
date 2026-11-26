@@ -84,19 +84,23 @@ describe("EnvironmentProps lush scenery & interactive hazard visuals", () => {
     // Animate across elapsed time without throwing
     props.syncHazards(hazards, 2.25);
 
-    // Detonate the first Blast Barrel and first Spark Mine -> must remove and dispose their geometries
+    // Detonate the first Blast Barrel and first Spark Mine -> must remove and dispose their geometries & materials
     const barrel = hazards.find((h) => h.type === "blast_barrel");
     const mine = hazards.find((h) => h.type === "spark_mine");
+    const thorn = hazards.find((h) => h.type === "thorn_patch");
     expect(barrel).toBeDefined();
     expect(mine).toBeDefined();
-    if (!barrel || !mine) return;
+    expect(thorn).toBeDefined();
+    if (!barrel || !mine || !thorn) return;
 
     const barrelObj = hazardGroup?.getObjectByName(`hazard_${barrel.id}`);
     const mineObj = hazardGroup?.getObjectByName(`hazard_${mine.id}`);
+    const thornObj = hazardGroup?.getObjectByName(`hazard_${thorn.id}`);
     expect(barrelObj).toBeDefined();
     expect(mineObj).toBeDefined();
+    expect(thornObj).toBeDefined();
 
-    // Verify Spark Mine has dark metallic dome, pulsing crimson LED beacon, and glowing sensor ring
+    // Verify Spark Mine has dark metallic dome, pulsing crimson LED beacon, shared pulsing prongs, and glowing sensor ring
     const mineBeacon = mineObj?.getObjectByName("spark_mine_beacon");
     const mineRing = mineObj?.getObjectByName("spark_mine_ring");
     expect(mineBeacon).toBeInstanceOf(THREE.Mesh);
@@ -106,11 +110,47 @@ describe("EnvironmentProps lush scenery & interactive hazard visuals", () => {
       expect(mineBeacon.material.emissive.r).toBeGreaterThan(mineBeacon.material.emissive.b * 2);
     }
 
+    const collectUniqueMaterials = (root: THREE.Object3D): THREE.Material[] => {
+      const mats = new Set<THREE.Material>();
+      for (const m of collectAllMeshes(root)) {
+        if (Array.isArray(m.material)) {
+          for (const item of m.material) mats.add(item);
+        } else {
+          mats.add(m.material);
+        }
+      }
+      return Array.from(mats);
+    };
+
+    // All 6 spark_mine cone prongs must share a single pulsing material (zero orphaned clone)
+    const mineProngMats = new Set(
+      (mineObj ? collectAllMeshes(mineObj) : [])
+        .filter((m) => m.geometry.type === "ConeGeometry")
+        .map((m) => m.material),
+    );
+    expect(mineProngMats.size).toBe(1);
+
+    // All 10 thorn_patch cone thorns must share a single material (zero orphaned clone)
+    const thornConeMats = new Set(
+      (thornObj ? collectAllMeshes(thornObj) : [])
+        .filter((m) => m.geometry.type === "ConeGeometry")
+        .map((m) => m.material),
+    );
+    expect(thornConeMats.size).toBe(1);
+
     const disposeSpies = [
       ...(barrelObj ? collectAllMeshes(barrelObj) : []),
       ...(mineObj ? collectAllMeshes(mineObj) : []),
     ].map((m) => vi.spyOn(m.geometry, "dispose"));
+    const mineMatDisposeSpies = (mineObj ? collectUniqueMaterials(mineObj) : []).map((mat) =>
+      vi.spyOn(mat, "dispose"),
+    );
+    const thornMatDisposeSpies = (thornObj ? collectUniqueMaterials(thornObj) : []).map((mat) =>
+      vi.spyOn(mat, "dispose"),
+    );
     expect(disposeSpies.length).toBeGreaterThan(2);
+    expect(mineMatDisposeSpies.length).toBeGreaterThan(2);
+    expect(thornMatDisposeSpies.length).toBeGreaterThan(1);
 
     const updatedHazards = hazards.map((h) =>
       h.id === barrel.id || h.id === mine.id ? { ...h, active: false } : h,
@@ -121,8 +161,14 @@ describe("EnvironmentProps lush scenery & interactive hazard visuals", () => {
     for (const spy of disposeSpies) {
       expect(spy).toHaveBeenCalledTimes(1);
     }
+    for (const spy of mineMatDisposeSpies) {
+      expect(spy).toHaveBeenCalled();
+    }
 
     props.dispose();
+    for (const spy of thornMatDisposeSpies) {
+      expect(spy).toHaveBeenCalled();
+    }
   });
 
   it("scales instanced scenery cleanly across 144m grand worlds with lush density and zero BoxGeometry", () => {

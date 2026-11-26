@@ -538,11 +538,14 @@ class CritterSiegeApp {
         if (mode === "over_shoulder") {
           this.cameraRig.exitDroneRecon();
           this.cameraRig.setFirstPerson(false);
+          this.input.syncFirstPerson(false);
         } else if (mode === "first_person") {
           this.cameraRig.exitDroneRecon();
           this.cameraRig.setFirstPerson(true);
+          this.input.syncFirstPerson(true);
         } else if (this.cameraRig.getMode() !== "drone_recon") {
           this.input.exitPointerLock();
+          this.input.syncFirstPerson(false);
           this.cameraRig.toggleDroneRecon();
         }
       },

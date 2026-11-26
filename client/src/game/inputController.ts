@@ -308,6 +308,14 @@ export class InputController {
     this.chargeSource = null;
   }
 
+  /** Sync external HUD camera-mode changes so pressing V always toggles cleanly in 1 keypress. */
+  public syncFirstPerson(active: boolean): void {
+    this.firstPersonToggled = active;
+    if (!active) {
+      this.rmbEnteredFirstPerson = false;
+    }
+  }
+
   /** Configure whether the local player can move, fire, or is in drone/spectator mode. */
   public setCanAct(
     canMove: boolean,

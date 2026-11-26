@@ -387,6 +387,7 @@ export class HudController {
   private uiFireActive = false;
 
   private lastHudAvatarSpecies: SpeciesId | null = null;
+  private lastPointerLocked: boolean | null = null;
   private lastHardpointSig = "";
   private lastHotbarSig = "";
   private lastDraftSig = "";
@@ -417,7 +418,7 @@ export class HudController {
         <div class="cs-glass cs-turn-pill">
           <span class="cs-round-badge" data-ref="round">R1/3</span>
           <span class="cs-phase-badge" data-ref="phase">YOUR TURN</span>
-          <span class="cs-timer-readout" data-ref="timer">22s</span>
+          <span class="cs-timer-readout" data-ref="timer">28s</span>
           <span class="cs-divider"></span>
           <span class="cs-active-player" data-ref="active">Critter</span>
           <span class="cs-divider"></span>
@@ -965,16 +966,20 @@ export class HudController {
           !isDrone &&
           cameraMode !== "shot_cam";
 
-    // Subtle Pointer-Lock free-look indicator pill
+    // Subtle Pointer-Lock free-look indicator pill (cached to avoid 60Hz DOM churn)
     const showLookHint = canInteract && !frame.charging;
     this.lookHintEl.classList.toggle("cs-hidden", !showLookHint);
     if (showLookHint) {
-      if (frame.pointerLocked) {
-        this.lookHintEl.classList.add("cs-look-locked");
-        this.lookHintEl.innerHTML = `Mouse-Look Active · <kbd>ESC</kbd> for cursor`;
-      } else {
-        this.lookHintEl.classList.remove("cs-look-locked");
-        this.lookHintEl.innerHTML = `Click anywhere to look freely · <kbd>ESC</kbd> for cursor`;
+      const locked = Boolean(frame.pointerLocked);
+      if (locked !== this.lastPointerLocked) {
+        this.lastPointerLocked = locked;
+        if (locked) {
+          this.lookHintEl.classList.add("cs-look-locked");
+          this.lookHintEl.innerHTML = `Mouse-Look Active · <kbd>ESC</kbd> for cursor`;
+        } else {
+          this.lookHintEl.classList.remove("cs-look-locked");
+          this.lookHintEl.innerHTML = `Click anywhere to look freely · <kbd>ESC</kbd> for cursor`;
+        }
       }
     }
 

@@ -1149,7 +1149,7 @@ export class EnvironmentProps {
         const a = (i / 6) * Math.PI * 2;
         const prong = new THREE.Mesh(
           new THREE.ConeGeometry(0.06, 0.24, 6),
-          prongMat.clone(),
+          prongMat,
         );
         prong.position.set(Math.cos(a) * 0.44, 0.31, Math.sin(a) * 0.44);
         prong.rotation.set(Math.sin(a) * 0.78, -a, -Math.cos(a) * 0.78);
@@ -1222,7 +1222,7 @@ export class EnvironmentProps {
       const rad = i % 2 === 0 ? 0.92 : 0.46;
       const thorn = new THREE.Mesh(
         new THREE.ConeGeometry(0.11, 0.72, 6),
-        thornMat.clone(),
+        thornMat,
       );
       thorn.position.set(Math.cos(a) * rad, 0.34, Math.sin(a) * rad);
       thorn.rotation.set(Math.sin(a) * 0.38, -a, -Math.cos(a) * 0.38);

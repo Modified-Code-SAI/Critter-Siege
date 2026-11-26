@@ -527,6 +527,14 @@ describe("CameraRig", () => {
     windowBus.dispatch("keydown", { code: "KeyX", repeat: false } as unknown as Event);
     windowBus.dispatch("keydown", { code: "KeyG", repeat: false } as unknown as Event);
     expect(fpStates).toEqual([true, false, true]);
+    // External HUD switch to Shoulder via syncFirstPerson(false) -> next V press enters Visor in 1 keypress
+    controller.syncFirstPerson(false);
+    windowBus.dispatch("keydown", { code: "KeyV", repeat: false } as unknown as Event);
+    expect(fpStates).toEqual([true, false, true, true]);
+    // External HUD switch to Visor via syncFirstPerson(true) -> next V press exits Visor in 1 keypress
+    controller.syncFirstPerson(true);
+    windowBus.dispatch("keydown", { code: "KeyV", repeat: false } as unknown as Event);
+    expect(fpStates).toEqual([true, false, true, true, false]);
     expect(selectedIndices).toEqual([2]);
     expect(burrowCalls).toBe(1);
     expect(nudgeCalls).toBe(1);
