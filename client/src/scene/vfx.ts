@@ -56,15 +56,29 @@ function disposeMaterial(material: THREE.Material | THREE.Material[]): void {
 }
 
 function disposeObjectTree(root: THREE.Object3D): void {
+  const geos = new Set<THREE.BufferGeometry>();
+  const mats = new Set<THREE.Material>();
+  const addMat = (material: THREE.Material | THREE.Material[]): void => {
+    if (Array.isArray(material)) {
+      for (const item of material) {
+        mats.add(item);
+      }
+      return;
+    }
+    mats.add(material);
+  };
   root.traverse((obj) => {
-    if (obj instanceof THREE.Mesh) {
-      obj.geometry.dispose();
-      disposeMaterial(obj.material);
-    } else if (obj instanceof THREE.Line) {
-      obj.geometry.dispose();
-      disposeMaterial(obj.material);
+    if (obj instanceof THREE.Mesh || obj instanceof THREE.Line) {
+      geos.add(obj.geometry);
+      addMat(obj.material);
     }
   });
+  for (const g of geos) {
+    g.dispose();
+  }
+  for (const m of mats) {
+    m.dispose();
+  }
 }
 
 function wrapCoord(v: number, min: number, max: number): number {
@@ -814,7 +828,87 @@ export class VfxSystem {
     }
   }
 
-  /** Synchronize glowing cyan Evo Pods and parachutes with authoritative match state. */
+  /**
+   * Maintain a live taut glowing 3D vine tether between a gliding critter and its cliff anchor
+   * during the 0.42s animated grapple reel-up / rappel. Pass `from = null` to release & dispose.
+   */
+  public setGrappleTether(
+    id: string,
+    from: Vec3 | null,
+    to?: Vec3,
+  ): void {
+    const name = `grapple_tether_${id}`;
+    const existing = this.group.getObjectByName(name);
+
+    if (!from || !to) {
+      if (existing) {
+        this.group.remove(existing);
+        existing.traverse((obj) => {
+          if (obj instanceof THREE.Mesh) {
+            disposeMaterial(obj.material);
+          }
+        });
+      }
+      return;
+    }
+
+    const start = new THREE.Vector3(from.x, from.y + 0.55, from.z);
+    const end = new THREE.Vector3(to.x, to.y + 0.45, to.z);
+    const delta = end.clone().sub(start);
+    const dist = delta.length();
+    if (!Number.isFinite(dist) || dist < 0.08) {
+      this.setGrappleTether(id, null);
+      return;
+    }
+
+    let tetherGroup: THREE.Group;
+    if (existing instanceof THREE.Group) {
+      tetherGroup = existing;
+    } else {
+      tetherGroup = new THREE.Group();
+      tetherGroup.name = name;
+      tetherGroup.userData.isGrappleTether = true;
+      const outerMesh = new THREE.Mesh(
+        this.sharedGeos.grappleBeam,
+        new THREE.MeshBasicMaterial({
+          color: 0x34d399,
+          transparent: true,
+          opacity: 0.92,
+          depthWrite: false,
+        }),
+      );
+      outerMesh.name = "tether_outer";
+      const coreMesh = new THREE.Mesh(
+        this.sharedGeos.grappleBeam,
+        new THREE.MeshBasicMaterial({
+          color: 0xd1fae5,
+          transparent: true,
+          opacity: 0.96,
+          depthWrite: false,
+        }),
+      );
+      coreMesh.name = "tether_core";
+      tetherGroup.add(outerMesh, coreMesh);
+      this.group.add(tetherGroup);
+    }
+
+    const dir = delta.clone().divideScalar(dist);
+    const mid = start.clone().addScaledVector(delta, 0.5);
+    const upY = new THREE.Vector3(0, 1, 0);
+    tetherGroup.position.copy(mid);
+    tetherGroup.quaternion.setFromUnitVectors(upY, dir);
+
+    const outer = tetherGroup.getObjectByName("tether_outer");
+    if (outer) {
+      outer.scale.set(1.15, dist, 1.15);
+    }
+    const core = tetherGroup.getObjectByName("tether_core");
+    if (core) {
+      core.scale.set(0.42, dist, 0.42);
+    }
+  }
+
+  /** Synchronize color-coded Evo DNA, Med-Berry, and Super Gadget air-drop crates & parachutes. */
   public syncEvoPods(
     pods: readonly EvoPodState[],
     elapsedSec: number,
@@ -827,10 +921,15 @@ export class VfxSystem {
         continue;
       }
       activeIds.add(pod.id);
+      const kind = pod.kind ?? "evo_dna";
 
       let visual = this.evoPods.get(pod.id);
-      if (!visual) {
-        visual = this.createEvoPodVisual(pod.id);
+      if (!visual || visual.group.userData.podKind !== kind) {
+        if (visual) {
+          this.evoPodGroup.remove(visual.group);
+          disposeObjectTree(visual.group);
+        }
+        visual = this.createEvoPodVisual(pod.id, kind);
         this.evoPods.set(pod.id, visual);
         this.evoPodGroup.add(visual.group);
       }
@@ -1057,6 +1156,18 @@ export class VfxSystem {
     }
     this.particles.length = 0;
 
+    for (let i = this.group.children.length - 1; i >= 0; i--) {
+      const child = this.group.children[i];
+      if (child && child.userData.isGrappleTether === true) {
+        this.group.remove(child);
+        child.traverse((obj) => {
+          if (obj instanceof THREE.Mesh) {
+            disposeMaterial(obj.material);
+          }
+        });
+      }
+    }
+
     for (const visual of this.evoPods.values()) {
       this.evoPodGroup.remove(visual.group);
       disposeObjectTree(visual.group);
@@ -1121,38 +1232,115 @@ export class VfxSystem {
     });
   }
 
-  private createEvoPodVisual(id: string): EvoPodVisual {
+  private createEvoPodVisual(
+    id: string,
+    kind: NonNullable<EvoPodState["kind"]> = "evo_dna",
+  ): EvoPodVisual {
     const group = new THREE.Group();
     group.name = `evo_pod_${id}`;
+    group.userData.podKind = kind;
 
-    // Glowing cyan icosahedral pod core + hexagonal energy collar
+    const palette =
+      kind === "med_berry"
+        ? {
+            core: 0x22c55e,
+            emissive: 0x10b981,
+            collar: 0xd1fae5,
+            collarEmissive: 0x34d399,
+            canopy: 0xecfdf5,
+            canopyEmissive: 0x22c55e,
+            cord: 0xa7f3d0,
+            beacon: 0x34d399,
+          }
+        : kind === "super_gadget"
+          ? {
+              core: 0xfbbf24,
+              emissive: 0xf59e0b,
+              collar: 0xfef3c7,
+              collarEmissive: 0xf59e0b,
+              canopy: 0xfffbeb,
+              canopyEmissive: 0xfbbf24,
+              cord: 0xfde68a,
+              beacon: 0xfbbf24,
+            }
+          : {
+              core: 0x38f2ff,
+              emissive: 0x10cce8,
+              collar: 0xd8faff,
+              collarEmissive: 0x26d8f8,
+              canopy: 0xf0fdff,
+              canopyEmissive: 0x38d8f0,
+              cord: 0xbff7ff,
+              beacon: 0x38f2ff,
+            };
+
+    const coreGeo =
+      kind === "med_berry"
+        ? new THREE.CylinderGeometry(0.32, 0.34, 0.44, 10)
+        : kind === "super_gadget"
+          ? new THREE.OctahedronGeometry(0.36, 0)
+          : new THREE.IcosahedronGeometry(0.32, 0);
+
     const podCore = new THREE.Mesh(
-      new THREE.IcosahedronGeometry(0.32, 0),
+      coreGeo,
       new THREE.MeshStandardMaterial({
-        color: 0x38f2ff,
-        emissive: 0x10cce8,
+        color: palette.core,
+        emissive: palette.emissive,
         emissiveIntensity: 0.95,
-        roughness: 0.2,
-        metalness: 0.25,
+        roughness: 0.22,
+        metalness: kind === "super_gadget" ? 0.45 : 0.22,
       }),
     );
     podCore.castShadow = true;
 
     const hexCollar = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.38, 0.38, 0.12, 6, 1, true),
+      kind === "super_gadget"
+        ? new THREE.TorusGeometry(0.4, 0.055, 8, 20)
+        : new THREE.CylinderGeometry(0.38, 0.38, 0.12, 6, 1, true),
       new THREE.MeshStandardMaterial({
-        color: 0xd8faff,
-        emissive: 0x26d8f8,
-        emissiveIntensity: 0.6,
+        color: palette.collar,
+        emissive: palette.collarEmissive,
+        emissiveIntensity: 0.65,
         roughness: 0.3,
-        metalness: 0.7,
+        metalness: 0.68,
         side: THREE.DoubleSide,
       }),
     );
+    if (kind === "super_gadget") {
+      hexCollar.rotation.x = Math.PI * 0.5;
+    }
     podCore.add(hexCollar);
+
+    if (kind === "med_berry") {
+      // Sculpted glowing white-mint cross emblem on Med-Berry crate (zero BoxGeometry!)
+      const crossGroup = new THREE.Group();
+      crossGroup.name = "med_berry_cross";
+      const crossMat = new THREE.MeshStandardMaterial({
+        color: 0xffffff,
+        emissive: 0x6ee7b7,
+        emissiveIntensity: 1.15,
+        roughness: 0.2,
+        metalness: 0.05,
+      });
+      const barA = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.06, 0.06, 0.36, 8),
+        crossMat,
+      );
+      barA.position.y = 0.26;
+      barA.rotation.z = Math.PI * 0.5;
+      const barB = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.06, 0.06, 0.36, 8),
+        crossMat,
+      );
+      barB.position.y = 0.26;
+      barB.rotation.x = Math.PI * 0.5;
+      crossGroup.add(barA, barB);
+      podCore.add(crossGroup);
+    }
+
     group.add(podCore);
 
-    // Open canopy parachute + 4 suspension cords for airborne descent
+    // Open canopy parachute + 4 suspension cords (shared cord material) for airborne descent
     const parachuteGroup = new THREE.Group();
     parachuteGroup.name = "evo_pod_parachute";
 
@@ -1167,21 +1355,22 @@ export class VfxSystem {
         Math.PI * 0.52,
       ),
       new THREE.MeshStandardMaterial({
-        color: 0xf0fdff,
-        emissive: 0x38d8f0,
-        emissiveIntensity: 0.2,
-        roughness: 0.6,
+        color: palette.canopy,
+        emissive: palette.canopyEmissive,
+        emissiveIntensity: 0.24,
+        roughness: 0.58,
         side: THREE.DoubleSide,
       }),
     );
     canopy.position.y = 1.05;
     parachuteGroup.add(canopy);
 
+    const cordMat = new THREE.MeshBasicMaterial({ color: palette.cord });
     for (let i = 0; i < 4; i++) {
       const a = (i * Math.PI) / 2 + Math.PI * 0.25;
       const cord = new THREE.Mesh(
         new THREE.CylinderGeometry(0.012, 0.012, 1.15, 6),
-        new THREE.MeshBasicMaterial({ color: 0xbff7ff }),
+        cordMat,
       );
       cord.position.set(Math.cos(a) * 0.34, 0.62, Math.sin(a) * 0.34);
       cord.rotation.set(Math.sin(a) * 0.42, 0, -Math.cos(a) * 0.42);
@@ -1189,17 +1378,18 @@ export class VfxSystem {
     }
     group.add(parachuteGroup);
 
-    // Translucent landed beacon column
+    // Translucent landed beacon column matching crate color
     const beaconMesh = new THREE.Mesh(
       new THREE.CylinderGeometry(0.24, 0.42, 2.8, 6, 1, true),
       new THREE.MeshBasicMaterial({
-        color: 0x38f2ff,
+        color: palette.beacon,
         transparent: true,
-        opacity: 0.25,
+        opacity: 0.26,
         depthWrite: false,
         side: THREE.DoubleSide,
       }),
     );
+    beaconMesh.name = "evo_pod_beacon";
     beaconMesh.position.y = 1.35;
     group.add(beaconMesh);
 

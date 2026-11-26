@@ -92,6 +92,11 @@ export class CameraRig {
   private hasLastShotPos = false;
   private currentFov = DEFAULT_FOV;
 
+  private shakeIntensity = 0;
+  private shakeDurationSec = 0;
+  private shakeElapsedSec = 0;
+  private shakePhase = 0;
+
   public constructor(aspect = 16 / 9) {
     const safeAspect = Number.isFinite(aspect) && aspect > 0 ? aspect : 16 / 9;
     this.camera = new THREE.PerspectiveCamera(
@@ -171,6 +176,24 @@ export class CameraRig {
       this.hasLastShotPos = false;
     }
     this.syncImmediateMode();
+  }
+
+  /** Trigger brief decaying tactical camera screen-shake (scaled to blast radius). */
+  public triggerShake(intensity: number, durationSec = 0.32): void {
+    const safeIntensity = clamp(finiteOr(intensity, 0), 0, 1.5);
+    const safeDuration = clamp(finiteOr(durationSec, 0.32), 0.05, 1.2);
+    if (safeIntensity <= 0) {
+      return;
+    }
+    this.shakeIntensity = Math.min(
+      1.5,
+      Math.max(this.shakeIntensity, safeIntensity),
+    );
+    this.shakeDurationSec = Math.max(
+      this.shakeDurationSec - this.shakeElapsedSec,
+      safeDuration,
+    );
+    this.shakeElapsedSec = 0;
   }
 
   /** Update viewport aspect ratio cleanly. */
@@ -287,6 +310,26 @@ export class CameraRig {
     }
 
     this.camera.position.copy(this.currentPos);
+    if (this.shakeIntensity > 0 && this.shakeDurationSec > 0) {
+      this.shakeElapsedSec += safeDt;
+      if (this.shakeElapsedSec >= this.shakeDurationSec) {
+        this.shakeIntensity = 0;
+        this.shakeDurationSec = 0;
+        this.shakeElapsedSec = 0;
+      } else {
+        const remain = 1 - this.shakeElapsedSec / this.shakeDurationSec;
+        const amp = this.shakeIntensity * remain * remain;
+        this.shakePhase += safeDt * 58;
+        const sx = Math.sin(this.shakePhase * 1.13) * amp;
+        const sy = Math.cos(this.shakePhase * 1.47) * amp * 0.72;
+        const sz = Math.sin(this.shakePhase * 0.89 + 1.3) * amp * 0.65;
+        this.camera.position.set(
+          this.currentPos.x + sx,
+          this.currentPos.y + sy,
+          this.currentPos.z + sz,
+        );
+      }
+    }
     this.camera.lookAt(this.currentLookAt);
   }
 

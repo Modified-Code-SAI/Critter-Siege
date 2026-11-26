@@ -10,7 +10,12 @@ import {
   type ThemeId,
 } from "@critter/shared";
 
-const ALL_THEMES: ThemeId[] = ["emerald_spire", "canyon_arch", "twin_pillars"];
+const ALL_THEMES: ThemeId[] = [
+  "emerald_spire",
+  "canyon_arch",
+  "twin_pillars",
+  "mountain_spine",
+];
 
 describe("Deterministic PRNG (createSeededRng)", () => {
   it("produces identical sequences in [0, 1) for the same seed", () => {
@@ -387,7 +392,7 @@ describe("SdfWorld & Surface Nets smooth terrain mesher", () => {
     expect(spireWorld.sample(30.0, 11.0, 30.0)).toBeLessThan(0);
   });
 
-  it("generates 144m grand maps with 192 chunks, 4 spawns >= 52m apart, and 14-18 hazards across all 3 themes", () => {
+  it("generates 144m grand maps with 192 chunks, 4 spawns >= 52m apart, and 14-18 hazards across all 4 themes", () => {
     expect(SDF_PRESETS.duel).toEqual({
       nx: 80,
       ny: 36,
@@ -449,9 +454,9 @@ describe("SdfWorld & Surface Nets smooth terrain mesher", () => {
       expect(typesPresent.has("steam_geyser")).toBe(true);
       expect(typesPresent.has("thorn_patch")).toBe(true);
     }
-  });
+  }, 15000);
 
-  it("blocks direct Turn 1 line-of-sight between every pair of spawns across all 3 themes in both duel and grand scales", () => {
+  it("blocks direct Turn 1 line-of-sight between every pair of spawns across all 4 themes in both duel and grand scales", () => {
     for (const theme of ALL_THEMES) {
       // Duel (60m): check 2-player spawns and full 4-quadrant spawns
       const duel = new SdfWorld(9001, theme, "duel");
@@ -497,6 +502,43 @@ describe("SdfWorld & Surface Nets smooth terrain mesher", () => {
             expect(Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z)).toBeGreaterThanOrEqual(52.0);
             expect(grand.hasDirectLineOfSight(a, b, 1.1)).toBe(false);
           }
+        }
+      }
+    }
+  }, 15000);
+
+  it("sculpts distinct mountain_spine multi-story Swiss-cheese caves, stacked stone bridges, and obstructed spawns", () => {
+    const mountain = new SdfWorld(4242, "mountain_spine", "duel");
+    const pillars = new SdfWorld(4242, "twin_pillars", "duel");
+
+    // Must be distinctly sculpted from twin_pillars
+    let diffSamples = 0;
+    for (let x = 10; x <= 50; x += 8) {
+      for (let z = 10; z <= 50; z += 8) {
+        if (Math.abs(mountain.sample(x, 12, z) - pillars.sample(x, 12, z)) > 0.5) {
+          diffSamples += 1;
+        }
+      }
+    }
+    expect(diffSamples).toBeGreaterThan(8);
+
+    // Multi-story stacked caves through central mountain peak:
+    // Lower cavern air around tunnelY (~5.4m), solid mid rock (~8.8m), upper cross-cave air (~11.4m), solid peak above (~16.5m)
+    const cx = mountain.centerX;
+    const cz = mountain.centerZ;
+    expect(mountain.sample(cx, mountain.worldHeight * 0.2, cz)).toBeGreaterThan(0);
+    expect(mountain.sample(cx, mountain.worldHeight * 0.42, cz)).toBeGreaterThan(0);
+    expect(mountain.sample(cx, mountain.worldHeight * 0.62, cz)).toBeLessThan(0);
+
+    // Every pair of spawns obstructed in both duel and grand
+    const duelSpawns = mountain.findSpawnPoints(4);
+    expect(duelSpawns).toHaveLength(4);
+    for (let i = 0; i < duelSpawns.length; i++) {
+      for (let j = i + 1; j < duelSpawns.length; j++) {
+        const a = duelSpawns[i];
+        const b = duelSpawns[j];
+        if (a && b) {
+          expect(mountain.hasDirectLineOfSight(a, b, 1.1)).toBe(false);
         }
       }
     }

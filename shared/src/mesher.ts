@@ -46,6 +46,8 @@ function pickTerrainColor(
   worldY: number,
   worldZ: number,
   normalY: number,
+  theme: SdfWorld["theme"],
+  worldHeight: number,
 ): readonly [number, number, number] {
   // Deterministic world-space organic color variation for sculpted natural biomes
   const patch =
@@ -63,6 +65,16 @@ function pickTerrainColor(
     ];
   }
 
+  // Sunlit alpine snow-dusted summit caps on Mountain Spine high peaks
+  if (theme === "mountain_spine" && worldY > worldHeight * 0.56 && normalY > 0.52) {
+    const glint = patch * 0.025 + micro * 0.015;
+    return [
+      clamp01(0.89 + glint),
+      clamp01(0.93 + glint),
+      clamp01(0.97 + glint),
+    ];
+  }
+
   // Warm golden sandy cove shoreline near the waterline
   if (worldY <= 3.0 && normalY > 0.45) {
     const ripple = patch * 0.035 + micro * 0.02;
@@ -77,6 +89,14 @@ function pickTerrainColor(
   if (normalY > 0.66 && worldY > 3.0) {
     const altGlow = Math.min(0.06, Math.max(0, (worldY - 6.0) * 0.005));
     const warmCool = patch * 0.055 + micro * 0.022;
+    if (theme === "mountain_spine") {
+      // Crisp pine-alpine emerald meadow on Mountain Spine terraces
+      return [
+        clamp01(0.24 + warmCool * 0.9 + altGlow * 0.5),
+        clamp01(0.66 + warmCool * 0.45 + altGlow),
+        clamp01(0.30 - warmCool * 0.4 + altGlow * 0.4),
+      ];
+    }
     return [
       clamp01(0.28 + warmCool * 1.1 + altGlow * 0.6),
       clamp01(0.72 + warmCool * 0.45 + altGlow),
@@ -94,11 +114,18 @@ function pickTerrainColor(
     ];
   }
 
-  // Warm stratified terracotta/sandstone cliff bands with sedimentary modulation
+  // Stratified cliff bands (cool granite/slate on Mountain Spine, warm sandstone elsewhere)
   const strata =
     Math.sin(worldY * 1.4 + patch * 0.35) * 0.065 +
     Math.sin(worldY * 3.1 + micro * 0.25) * 0.025;
   const cliffTone = patch * 0.035;
+  if (theme === "mountain_spine") {
+    return [
+      clamp01(0.52 + strata * 0.8 + cliffTone),
+      clamp01(0.56 + strata * 0.78 + cliffTone),
+      clamp01(0.62 + strata * 0.72 + cliffTone),
+    ];
+  }
   return [
     clamp01(0.77 + strata + cliffTone),
     clamp01(0.48 + strata * 0.78 + cliffTone * 0.6),
@@ -297,7 +324,14 @@ export function meshChunkSurfaceNets(
         }
 
         const normal = world.sampleNormal(wx, wy, wz);
-        const rgb = pickTerrainColor(wx, wy, wz, normal.y);
+        const rgb = pickTerrainColor(
+          wx,
+          wy,
+          wz,
+          normal.y,
+          world.theme,
+          world.worldHeight,
+        );
 
         const vertIdx = positions.length / 3;
         positions.push(wx, wy, wz);

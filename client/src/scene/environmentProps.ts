@@ -5,6 +5,7 @@ import {
   type SdfWorld,
   type Vec3,
 } from "@critter/shared";
+import { loadPropModel, type PropLandmarkKind } from "./modelLoader.js";
 
 const ZERO_MATRIX = new THREE.Matrix4().makeScale(0, 0, 0);
 
@@ -19,6 +20,7 @@ interface TrackedPropAnchor {
   visible: boolean;
   bindings: InstancedBinding[];
   landmarkGroup?: THREE.Group;
+  glbKind?: PropLandmarkKind;
 }
 
 interface HazardVisual {
@@ -39,25 +41,76 @@ export interface EnvironmentPropCounts {
   activeHazards: number;
 }
 
-function disposeMaterial(material: THREE.Material | THREE.Material[]): void {
-  if (Array.isArray(material)) {
-    for (const item of material) {
-      item.dispose();
+function disposeObjectTree(root: THREE.Object3D): void {
+  const geos = new Set<THREE.BufferGeometry>();
+  const mats = new Set<THREE.Material>();
+  const addMat = (material: THREE.Material | THREE.Material[]): void => {
+    if (Array.isArray(material)) {
+      for (const item of material) {
+        mats.add(item);
+      }
+      return;
     }
-    return;
+    mats.add(material);
+  };
+
+  const walk = (node: THREE.Object3D): void => {
+    if (node.userData.isCachedGlbClone === true) {
+      // Cached GLB templates own their shared GPU buffers; never dispose them per-instance
+      return;
+    }
+    if (node instanceof THREE.InstancedMesh || node instanceof THREE.Mesh) {
+      geos.add(node.geometry);
+      addMat(node.material);
+    }
+    for (const child of node.children) {
+      walk(child);
+    }
+  };
+  walk(root);
+
+  for (const g of geos) {
+    g.dispose();
   }
-  material.dispose();
+  for (const m of mats) {
+    m.dispose();
+  }
 }
 
-function disposeObjectTree(root: THREE.Object3D): void {
-  root.traverse((obj) => {
-    if (obj instanceof THREE.InstancedMesh) {
-      obj.geometry.dispose();
-      disposeMaterial(obj.material);
-    } else if (obj instanceof THREE.Mesh) {
-      obj.geometry.dispose();
-      disposeMaterial(obj.material);
+/**
+ * Replace a landmark group's procedural fallback children with a loaded GLB prop clone,
+ * cleanly disposing the superseded procedural meshes while protecting cached GLB buffers.
+ */
+export function attachLandmarkGlb(
+  landmarkGroup: THREE.Group,
+  glbClone: THREE.Group,
+): void {
+  for (let i = landmarkGroup.children.length - 1; i >= 0; i--) {
+    const child = landmarkGroup.children[i];
+    if (!child) continue;
+    landmarkGroup.remove(child);
+    disposeObjectTree(child);
+  }
+  landmarkGroup.add(glbClone);
+}
+
+/** Kick off an async GLB prop load for a landmark group with stale-load protection. */
+export function loadLandmarkGlbIntoGroup(
+  kind: PropLandmarkKind,
+  landmarkGroup: THREE.Group,
+  isStillValid: () => boolean,
+): void {
+  void loadPropModel(kind).then((clone) => {
+    if (!clone) {
+      return;
     }
+    if (!isStillValid()) {
+      if (clone.userData.isCachedGlbClone !== true) {
+        disposeObjectTree(clone);
+      }
+      return;
+    }
+    attachLandmarkGlb(landmarkGroup, clone);
   });
 }
 
@@ -189,17 +242,34 @@ export class EnvironmentProps {
 
     spots.sort((a, b) => b.order - a.order);
 
-    // 1. Pick carved stone ruins & lantern posts first so trees don't overlap them
-    const landmarkSpots: Array<{ pos: Vec3; kind: "ruin" | "lantern"; rotY: number }> = [];
-    for (const spot of spots) {
+    // 1. Pick scenic ridge & bridge-head landmarks (Blender GLB watchtower, ruin_arch, gnarled_pine + glowing lanterns)
+    const landmarkSpots: Array<{
+      pos: Vec3;
+      kind: "lantern" | PropLandmarkKind;
+      rotY: number;
+    }> = [];
+    const landmarkKindCycle: ReadonlyArray<"lantern" | PropLandmarkKind> = [
+      "watchtower",
+      "ruin_arch",
+      "gnarled_pine",
+      "lantern",
+    ];
+    // Prefer higher scenic ridges & bridge heads for the hero set-piece landmarks
+    const ridgeFirst = [...spots].sort(
+      (a, b) => b.pos.y - a.pos.y + (b.order - a.order) * 3.5,
+    );
+    for (const spot of ridgeFirst) {
       if (landmarkSpots.length >= maxLandmarks) break;
       if (spot.normalY < 0.72 || spot.pos.y < 3.2) continue;
       if (!isClearOfAvoid(spot.pos, 3.3)) continue;
       if (!isClearOfList(spot.pos, placedLandmarks, isGrand ? 8.6 : 6.2)) continue;
       placedLandmarks.push(spot.pos);
+      const kind =
+        landmarkKindCycle[landmarkSpots.length % landmarkKindCycle.length] ??
+        "ruin_arch";
       landmarkSpots.push({
         pos: spot.pos,
-        kind: landmarkSpots.length % 2 === 0 ? "lantern" : "ruin",
+        kind,
         rotY: rng() * Math.PI * 2,
       });
     }
@@ -373,6 +443,9 @@ export class EnvironmentProps {
         }
         if (anchor.landmarkGroup) {
           anchor.landmarkGroup.visible = false;
+          this.sceneryGroup.remove(anchor.landmarkGroup);
+          disposeObjectTree(anchor.landmarkGroup);
+          anchor.landmarkGroup.clear();
         }
       }
     }
@@ -818,7 +891,11 @@ export class EnvironmentProps {
   }
 
   private buildLandmarks(
-    spots: ReadonlyArray<{ pos: Vec3; kind: "ruin" | "lantern"; rotY: number }>,
+    spots: ReadonlyArray<{
+      pos: Vec3;
+      kind: "ruin" | "lantern" | PropLandmarkKind;
+      rotY: number;
+    }>,
   ): void {
     for (let i = 0; i < spots.length; i++) {
       const sp = spots[i];
@@ -829,48 +906,10 @@ export class EnvironmentProps {
       group.position.set(sp.pos.x, sp.pos.y, sp.pos.z);
       group.rotation.y = sp.rotY;
 
-      if (sp.kind === "ruin") {
-        // Ancient carved stone ruin column (strictly cylindrical/torus sculpted forms)
-        const stoneMat = new THREE.MeshStandardMaterial({
-          color: 0xc2b7a3,
-          roughness: 0.88,
-          metalness: 0.04,
-          flatShading: true,
-        });
-        const base = new THREE.Mesh(
-          new THREE.CylinderGeometry(0.46, 0.56, 0.34, 8),
-          stoneMat,
-        );
-        base.position.y = 0.14;
-        base.castShadow = true;
-        base.receiveShadow = true;
+      let glbKind: PropLandmarkKind | undefined;
 
-        const shaft = new THREE.Mesh(
-          new THREE.CylinderGeometry(0.28, 0.35, 2.05, 8),
-          stoneMat.clone(),
-        );
-        shaft.position.y = 1.24;
-        shaft.castShadow = true;
-        shaft.receiveShadow = true;
-
-        const collar = new THREE.Mesh(
-          new THREE.TorusGeometry(0.32, 0.06, 7, 16),
-          stoneMat.clone(),
-        );
-        collar.rotation.x = Math.PI * 0.5;
-        collar.position.y = 2.1;
-
-        const cap = new THREE.Mesh(
-          new THREE.CylinderGeometry(0.44, 0.3, 0.26, 8),
-          stoneMat.clone(),
-        );
-        cap.position.y = 2.34;
-        cap.rotation.z = 0.08;
-        cap.castShadow = true;
-
-        group.add(base, shaft, collar, cap);
-      } else {
-        // Warm glowing island lantern post
+      if (sp.kind === "lantern") {
+        // Warm glowing island lantern post (shared wood/iron materials)
         const woodMat = new THREE.MeshStandardMaterial({
           color: 0x6b472e,
           roughness: 0.86,
@@ -904,14 +943,14 @@ export class EnvironmentProps {
 
         const arm = new THREE.Mesh(
           new THREE.CylinderGeometry(0.036, 0.044, 0.65, 6),
-          ironMat.clone(),
+          ironMat,
         );
         arm.position.set(0.24, 2.22, 0);
         arm.rotation.z = -Math.PI * 0.38;
 
         const roof = new THREE.Mesh(
           new THREE.ConeGeometry(0.22, 0.2, 6),
-          ironMat.clone(),
+          ironMat,
         );
         roof.position.set(0.48, 2.18, 0);
 
@@ -922,16 +961,143 @@ export class EnvironmentProps {
         crystal.position.set(0.48, 1.98, 0);
 
         group.add(post, footing, arm, roof, crystal);
+      } else if (sp.kind === "watchtower") {
+        glbKind = "watchtower";
+        // Sculpted procedural lookout tower fallback (replaced asynchronously by watchtower.glb)
+        const timberMat = new THREE.MeshStandardMaterial({
+          color: 0x7c5335,
+          roughness: 0.88,
+          metalness: 0.04,
+          flatShading: true,
+        });
+        const roofMat = new THREE.MeshStandardMaterial({
+          color: 0x9b3c2d,
+          roughness: 0.82,
+          metalness: 0.05,
+          flatShading: true,
+        });
+        const base = new THREE.Mesh(
+          new THREE.CylinderGeometry(0.62, 0.78, 2.6, 7),
+          timberMat,
+        );
+        base.position.y = 1.3;
+        base.castShadow = true;
+        base.receiveShadow = true;
+
+        const deck = new THREE.Mesh(
+          new THREE.CylinderGeometry(0.95, 0.82, 0.35, 8),
+          timberMat,
+        );
+        deck.position.y = 2.75;
+        deck.castShadow = true;
+
+        const roof = new THREE.Mesh(
+          new THREE.ConeGeometry(1.15, 1.15, 8),
+          roofMat,
+        );
+        roof.position.y = 3.55;
+        roof.castShadow = true;
+
+        group.add(base, deck, roof);
+      } else if (sp.kind === "gnarled_pine") {
+        glbKind = "gnarled_pine";
+        // Sculpted gnarled cliff pine fallback (replaced asynchronously by gnarled_pine.glb)
+        const barkMat = new THREE.MeshStandardMaterial({
+          color: 0x5c3e2a,
+          roughness: 0.92,
+          metalness: 0.02,
+          flatShading: true,
+        });
+        const needleMat = new THREE.MeshStandardMaterial({
+          color: 0x2f6d43,
+          roughness: 0.84,
+          metalness: 0.02,
+          flatShading: true,
+        });
+        const trunk = new THREE.Mesh(
+          new THREE.CylinderGeometry(0.16, 0.34, 2.1, 7),
+          barkMat,
+        );
+        trunk.position.y = 1.0;
+        trunk.rotation.z = 0.14;
+        trunk.castShadow = true;
+
+        const canopyA = new THREE.Mesh(
+          new THREE.ConeGeometry(1.35, 1.75, 8),
+          needleMat,
+        );
+        canopyA.position.set(0.18, 2.25, 0);
+        canopyA.castShadow = true;
+
+        const canopyB = new THREE.Mesh(
+          new THREE.ConeGeometry(0.92, 1.35, 7),
+          needleMat,
+        );
+        canopyB.position.set(0.28, 3.2, 0);
+        canopyB.castShadow = true;
+
+        group.add(trunk, canopyA, canopyB);
+      } else {
+        glbKind = "ruin_arch";
+        // Ancient carved stone ruin fallback (replaced asynchronously by ruin_arch.glb)
+        const stoneMat = new THREE.MeshStandardMaterial({
+          color: 0xc2b7a3,
+          roughness: 0.88,
+          metalness: 0.04,
+          flatShading: true,
+        });
+        const base = new THREE.Mesh(
+          new THREE.CylinderGeometry(0.46, 0.56, 0.34, 8),
+          stoneMat,
+        );
+        base.position.y = 0.14;
+        base.castShadow = true;
+        base.receiveShadow = true;
+
+        const shaft = new THREE.Mesh(
+          new THREE.CylinderGeometry(0.28, 0.35, 2.05, 8),
+          stoneMat,
+        );
+        shaft.position.y = 1.24;
+        shaft.castShadow = true;
+        shaft.receiveShadow = true;
+
+        const collar = new THREE.Mesh(
+          new THREE.TorusGeometry(0.32, 0.06, 7, 16),
+          stoneMat,
+        );
+        collar.rotation.x = Math.PI * 0.5;
+        collar.position.y = 2.1;
+
+        const cap = new THREE.Mesh(
+          new THREE.CylinderGeometry(0.44, 0.3, 0.26, 8),
+          stoneMat,
+        );
+        cap.position.y = 2.34;
+        cap.rotation.z = 0.08;
+        cap.castShadow = true;
+
+        group.add(base, shaft, collar, cap);
       }
 
       this.sceneryGroup.add(group);
-      this.anchors.push({
+      const anchor: TrackedPropAnchor = {
         category: "landmark",
         pos: { ...sp.pos },
         visible: true,
         bindings: [],
         landmarkGroup: group,
-      });
+        ...(glbKind ? { glbKind } : {}),
+      };
+      this.anchors.push(anchor);
+
+      if (glbKind) {
+        loadLandmarkGlbIntoGroup(
+          glbKind,
+          group,
+          () => anchor.visible && group.parent === this.sceneryGroup,
+        );
+      }
     }
   }
 

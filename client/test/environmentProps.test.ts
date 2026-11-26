@@ -1,7 +1,10 @@
 import * as THREE from "three";
 import { describe, expect, it, vi } from "vitest";
 import { SdfWorld, type HazardState } from "@critter/shared";
-import { EnvironmentProps } from "../src/scene/environmentProps.js";
+import {
+  EnvironmentProps,
+  attachLandmarkGlb,
+} from "../src/scene/environmentProps.js";
 import {
   computeWorldSceneMetrics,
   createOceanShaderMaterial,
@@ -253,5 +256,73 @@ describe("EnvironmentProps lush scenery & interactive hazard visuals", () => {
     expect(mat.vertexShader).toContain("uTime");
     expect(mat.fragmentShader).toContain("uFoamColor");
     mat.dispose();
+  });
+
+  it("places watchtower, ruin_arch, and gnarled_pine landmarks on mountain_spine, swaps procedural fallbacks for cached GLB clones, and prunes cleanly on carve", () => {
+    const world = new SdfWorld(4242, "mountain_spine");
+    const spawns = world.findSpawnPoints(4);
+    const props = new EnvironmentProps(world, 1.5, spawns);
+
+    const watchtowerGroup = props.group.getObjectByName("watchtower_0");
+    const archGroup = props.group.getObjectByName("ruin_arch_1");
+    const pineGroup = props.group.getObjectByName("gnarled_pine_2");
+    expect(watchtowerGroup).toBeInstanceOf(THREE.Group);
+    expect(archGroup).toBeInstanceOf(THREE.Group);
+    expect(pineGroup).toBeInstanceOf(THREE.Group);
+
+    // Strictly zero BoxGeometry in procedural fallbacks
+    for (const mesh of collectAllMeshes(props.group)) {
+      expect(mesh.geometry.type).not.toBe("BoxGeometry");
+    }
+
+    if (watchtowerGroup instanceof THREE.Group) {
+      const fallbackSpies = collectAllMeshes(watchtowerGroup).map((m) =>
+        vi.spyOn(m.geometry, "dispose"),
+      );
+      expect(fallbackSpies.length).toBeGreaterThan(0);
+
+      // Attach a cached GLB clone -> disposes procedural fallback, protects cached template on prune/dispose
+      const cachedTemplateGeo = new THREE.CylinderGeometry(0.5, 0.6, 3.0, 8);
+      const cachedTemplateMat = new THREE.MeshStandardMaterial({ color: 0x8b6b4d });
+      const templateGeoSpy = vi.spyOn(cachedTemplateGeo, "dispose");
+      const templateMatSpy = vi.spyOn(cachedTemplateMat, "dispose");
+
+      const glbClone = new THREE.Group();
+      glbClone.name = "glb_prop_watchtower";
+      glbClone.userData.isCachedGlbClone = true;
+      glbClone.add(new THREE.Mesh(cachedTemplateGeo, cachedTemplateMat));
+
+      attachLandmarkGlb(watchtowerGroup, glbClone);
+      for (const spy of fallbackSpies) {
+        expect(spy).toHaveBeenCalledTimes(1);
+      }
+      expect(watchtowerGroup.getObjectByName("glb_prop_watchtower")).toBe(glbClone);
+
+      // Carve right under the watchtower -> pruned cleanly & detached without corrupting cached template
+      world.applyCarve({
+        shape: "sphere",
+        center: {
+          x: watchtowerGroup.position.x,
+          y: watchtowerGroup.position.y - 0.5,
+          z: watchtowerGroup.position.z,
+        },
+        radius: 4.0,
+      });
+      const pruned = props.pruneAfterCarve(world, 1.5);
+      expect(pruned).toBeGreaterThanOrEqual(1);
+      expect(watchtowerGroup.visible).toBe(false);
+      expect(watchtowerGroup.parent).toBeNull();
+      expect(templateGeoSpy).not.toHaveBeenCalled();
+      expect(templateMatSpy).not.toHaveBeenCalled();
+
+      props.dispose();
+      expect(templateGeoSpy).not.toHaveBeenCalled();
+      expect(templateMatSpy).not.toHaveBeenCalled();
+
+      cachedTemplateGeo.dispose();
+      cachedTemplateMat.dispose();
+    } else {
+      props.dispose();
+    }
   });
 });

@@ -389,4 +389,82 @@ describe("CritterRig & TerrainRenderer", () => {
     vfx.setDronePing(null);
     vfx.dispose();
   });
+
+  it("color-codes evo_dna (cyan), med_berry (emerald + cross), and super_gadget (gold) crates and manages taut grapple tether cleanly", () => {
+    const vfx = new VfxSystem();
+    vfx.syncEvoPods(
+      [
+        {
+          id: "dna-1",
+          position: { x: 10, y: 10, z: 10 },
+          collected: false,
+          spawnedAtTurn: 2,
+          parachuting: false,
+          kind: "evo_dna",
+        },
+        {
+          id: "med-1",
+          position: { x: 18, y: 10, z: 10 },
+          collected: false,
+          spawnedAtTurn: 4,
+          parachuting: true,
+          kind: "med_berry",
+        },
+        {
+          id: "sup-1",
+          position: { x: 26, y: 10, z: 10 },
+          collected: false,
+          spawnedAtTurn: 6,
+          parachuting: false,
+          kind: "super_gadget",
+        },
+      ],
+      1.0,
+    );
+
+    const podGroup = vfx.group.getObjectByName("vfx_evo_pods");
+    expect(podGroup?.children.length).toBe(3);
+
+    const dnaObj = podGroup?.getObjectByName("evo_pod_dna-1");
+    const medObj = podGroup?.getObjectByName("evo_pod_med-1");
+    const supObj = podGroup?.getObjectByName("evo_pod_sup-1");
+    expect(dnaObj).toBeDefined();
+    expect(medObj).toBeDefined();
+    expect(supObj).toBeDefined();
+
+    // Med-Berry crate must include a sculpted non-box cross emblem
+    const crossObj = medObj?.getObjectByName("med_berry_cross");
+    expect(crossObj).toBeDefined();
+
+    // Verify strictly zero BoxGeometry across all 3 crate visuals
+    for (const m of collectMeshes(vfx.group)) {
+      expect(m.geometry.type).not.toBe("BoxGeometry");
+    }
+
+    // Verify distinct crate beacon colors (Cyan, Emerald, Gold)
+    const getBeaconHex = (root: THREE.Object3D | undefined): number => {
+      const b = root?.getObjectByName("evo_pod_beacon");
+      if (b instanceof THREE.Mesh && b.material instanceof THREE.MeshBasicMaterial) {
+        return b.material.color.getHex();
+      }
+      return -1;
+    };
+    const dnaHex = getBeaconHex(dnaObj);
+    const medHex = getBeaconHex(medObj);
+    const supHex = getBeaconHex(supObj);
+    expect(dnaHex).toBeGreaterThan(0);
+    expect(medHex).toBeGreaterThan(0);
+    expect(supHex).toBeGreaterThan(0);
+    expect(new Set([dnaHex, medHex, supHex]).size).toBe(3);
+
+    // Live taut grapple tether updates and disposes cleanly
+    vfx.setGrappleTether("p1", { x: 10, y: 8, z: 10 }, { x: 16, y: 14, z: 12 });
+    const tether = vfx.group.getObjectByName("grapple_tether_p1");
+    expect(tether).toBeDefined();
+    vfx.setGrappleTether("p1", { x: 13, y: 11, z: 11 }, { x: 16, y: 14, z: 12 });
+    vfx.setGrappleTether("p1", null);
+    expect(vfx.group.getObjectByName("grapple_tether_p1")).toBeUndefined();
+
+    vfx.dispose();
+  });
 });

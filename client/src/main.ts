@@ -90,6 +90,13 @@ interface ScheduledImpact extends ImpactEvent {
   triggered: boolean;
 }
 
+interface ShotHitPopup {
+  critterId: string;
+  damage: number;
+  shieldAbsorbed: boolean;
+  newPosition: Vec3;
+}
+
 interface ShotPlayback {
   gadgetId: GadgetId;
   path: Vec3[];
@@ -99,6 +106,9 @@ interface ShotPlayback {
   impacts: ScheduledImpact[];
   drownedPositions: Vec3[];
   splashesDone: boolean;
+  hits?: ShotHitPopup[];
+  hitsPopupsDone?: boolean;
+  hitStopSec?: number;
 }
 
 function getWsUrl(): string {
@@ -270,8 +280,18 @@ class CritterSiegeApp {
   private lastSyncedPos = new THREE.Vector3(WORLD_CENTER_X, 10, WORLD_CENTER_Z);
   private lastSyncedYaw = 0;
 
-  // Shot Cam animation & audio feedback state
+  // Shot Cam animation, ghost aim memory, grapple reel-up glide & audio feedback state
   private shotPlayback: ShotPlayback | null = null;
+  private lastLocalShotAim: {
+    gadgetId: GadgetId;
+    yaw: number;
+    pitch: number;
+    power: number;
+  } | null = null;
+  private readonly grappleGlides = new Map<
+    string,
+    { from: Vec3; to: Vec3; elapsedSec: number; durationSec: number }
+  >();
   private lastChargeTickMs = 0;
   private lastCountdownSec = -1;
   private quickStartMoved = false;
@@ -620,6 +640,13 @@ class CritterSiegeApp {
     this.rafId = requestAnimationFrame((now) => this.loop(now));
   }
 
+  private clearGrappleGlides(): void {
+    for (const id of this.grappleGlides.keys()) {
+      this.vfx.setGrappleTether(id, null);
+    }
+    this.grappleGlides.clear();
+  }
+
   private launchSandboxMatch(): void {
     this.audio.playUiClick();
     const p = this.progression.getProfile();
@@ -628,6 +655,8 @@ class CritterSiegeApp {
     this.dronePing = null;
     this.quickStartMoved = false;
     this.quickStartFired = false;
+    this.lastLocalShotAim = null;
+    this.clearGrappleGlides();
     this.vfx.setDronePing(null);
     this.shotPlayback = null;
     this.cameraRig.setShotCamActive(false);
@@ -656,6 +685,8 @@ class CritterSiegeApp {
     this.matchState = null;
     this.onlineLobby = null;
     this.shotPlayback = null;
+    this.lastLocalShotAim = null;
+    this.clearGrappleGlides();
     this.dronePing = null;
     this.essenceBreakdown = null;
     this.vfx.setDronePing(null);
@@ -771,6 +802,8 @@ class CritterSiegeApp {
       this.dronePing = null;
       this.vfx.setDronePing(null);
       this.shotPlayback = null;
+      this.lastLocalShotAim = null;
+      this.clearGrappleGlides();
       this.cameraRig.setShotCamActive(false);
       this.localTurnKey = "";
       this.lastCountdownSec = -1;
@@ -793,13 +826,18 @@ class CritterSiegeApp {
         state.activePlayerId === localId &&
         localCritter.alive &&
         (state.phase === "ACTIVE" || state.phase === "RETREAT");
+      const localGliding = localId !== null && this.grappleGlides.has(localId);
 
       const distSq =
         (this.localPos.x - localCritter.position.x) ** 2 +
         (this.localPos.y - localCritter.position.y) ** 2 +
         (this.localPos.z - localCritter.position.z) ** 2;
 
-      if (!isControlling || turnKey !== this.localTurnKey || distSq > 2.8 * 2.8) {
+      if (
+        !isControlling ||
+        turnKey !== this.localTurnKey ||
+        (!localGliding && distSq > 2.8 * 2.8)
+      ) {
         this.localPos.set(
           localCritter.position.x,
           localCritter.position.y,
@@ -876,31 +914,55 @@ class CritterSiegeApp {
             impacts: sim.impacts.map((imp) => ({ ...imp, triggered: false })),
             drownedPositions,
             splashesDone: false,
+            hits: sim.hits.map((h) => ({
+              critterId: h.critterId,
+              damage: h.damage,
+              shieldAbsorbed: h.shieldAbsorbed,
+              newPosition: { ...h.newPosition },
+            })),
+            hitsPopupsDone: false,
+            hitStopSec: 0,
           };
           this.cameraRig.setShotCamActive(true);
           break;
         }
         case "VINE_GRAPPLED": {
+          this.grappleGlides.set(ev.playerId, {
+            from: { ...ev.from },
+            to: { ...ev.to },
+            elapsedSec: 0,
+            durationSec: 0.42,
+          });
           this.vfx.spawnGrappleBeam(ev.from, ev.to);
+          this.vfx.setGrappleTether(ev.playerId, ev.from, ev.to);
           if (ev.playerId !== localId) {
             this.audio.playLaunch("vine_grapple");
           } else {
-            this.localPos.set(ev.to.x, ev.to.y, ev.to.z);
+            this.localPos.set(ev.from.x, ev.from.y, ev.from.z);
             this.localVel.set(0, 0, 0);
-            this.localGrounded = true;
+            this.localGrounded = false;
             this.localTimeSinceGroundedSec = 0;
             this.backflipUsedThisJump = false;
-            this.lastSyncedPos.copy(this.localPos);
+            this.lastSyncedPos.set(ev.to.x, ev.to.y, ev.to.z);
           }
           break;
         }
         case "WATER_RESCUED": {
+          if (this.grappleGlides.has(ev.playerId)) {
+            this.grappleGlides.delete(ev.playerId);
+            this.vfx.setGrappleTether(ev.playerId, null);
+          }
           this.vfx.spawnSplash({
             x: ev.position.x,
             y: this.matchState?.waterLevel ?? 1.8,
             z: ev.position.z,
           });
           this.audio.playSplash();
+          this.spawnWorldPopup(
+            { x: ev.position.x, y: ev.position.y + 1.4, z: ev.position.z },
+            `RESCUE! -${Math.round(ev.damage)}`,
+            "damage",
+          );
           const rescued = this.matchState?.critters.find(
             (c) => c.id === ev.playerId,
           );
@@ -923,14 +985,31 @@ class CritterSiegeApp {
           if (ev.hazardType === "blast_barrel") {
             this.vfx.spawnBarrelExplosion(ev.position, 2.8);
             this.audio.playExplosion(2.8);
+            this.cameraRig.triggerShake(0.9, 0.38);
+            this.spawnWorldPopup(
+              { x: ev.position.x, y: ev.position.y + 1.5, z: ev.position.z },
+              "CHAIN BLAST!",
+              "event",
+            );
             this.hud.showToast("BOOM! Blast Barrel chain detonation!", "error");
           } else if (ev.hazardType === "spark_mine") {
             this.vfx.spawnBarrelExplosion(ev.position, 2.2);
             this.audio.playExplosion(2.2);
+            this.cameraRig.triggerShake(0.7, 0.32);
+            this.spawnWorldPopup(
+              { x: ev.position.x, y: ev.position.y + 1.4, z: ev.position.z },
+              "ZAP! -24",
+              "damage",
+            );
             this.hud.showToast("ZAP! Spark Mine proximity blast!", "error");
           } else if (ev.hazardType === "steam_geyser") {
             this.vfx.spawnGeyserBurst(ev.position);
             this.audio.playLaunch("vine_grapple");
+            this.spawnWorldPopup(
+              { x: ev.position.x, y: ev.position.y + 1.6, z: ev.position.z },
+              "GEYSER!",
+              "shield",
+            );
             if (localId && ev.affectedCritterIds.includes(localId)) {
               this.localGrounded = false;
               this.localVel.y = this.activeWorld.mapScale === "grand" ? 13.5 : 10.5;
@@ -939,12 +1018,24 @@ class CritterSiegeApp {
           } else if (ev.hazardType === "thorn_patch") {
             this.vfx.spawnExplosion(ev.position, 0.85, false);
             this.audio.playLaunch("quake_club");
+            this.spawnWorldPopup(
+              { x: ev.position.x, y: ev.position.y + 1.3, z: ev.position.z },
+              "THORNS! -12",
+              "damage",
+            );
             this.hud.showToast("OUCH! Bramble Thorn snag (-12 HP)!", "error");
           }
           break;
         }
         case "EVO_POD_SPAWNED": {
-          this.hud.showTurnBanner("EVO POD DROPPED!", "Grab it to evolve!", "pod");
+          const kind = ev.pod.kind ?? "evo_dna";
+          if (kind === "med_berry") {
+            this.hud.showTurnBanner("MED-BERRY DROPPED!", "Grab it for +55 HP!", "pod");
+          } else if (kind === "super_gadget") {
+            this.hud.showTurnBanner("SUPER CRATE DROPPED!", "Rare Ordnance +25 Evo!", "pod");
+          } else {
+            this.hud.showTurnBanner("EVO POD DROPPED!", "Grab it to evolve!", "pod");
+          }
           break;
         }
         case "EVO_POD_COLLECTED": {
@@ -952,14 +1043,44 @@ class CritterSiegeApp {
           const collector = this.matchState?.critters.find(
             (c) => c.id === ev.playerId,
           );
+          const kind = ev.podKind ?? "evo_dna";
           const bonusName = ev.bonusGadget
-            ? ` + ${GADGET_CATALOG[ev.bonusGadget].name}`
-            : "";
+            ? GADGET_CATALOG[ev.bonusGadget].name
+            : null;
           if (collector) {
-            this.hud.showToast(
-              `${collector.name} grabbed an Evo Pod${bonusName}!`,
-              "success",
-            );
+            const popupPos: Vec3 = {
+              x: collector.position.x,
+              y: collector.position.y + 1.65,
+              z: collector.position.z,
+            };
+            if (kind === "med_berry") {
+              const healed = Math.round(ev.healedHp ?? 55);
+              this.spawnWorldPopup(
+                popupPos,
+                healed > 0 ? `+${healed} HP!` : "MAX HP!",
+                "heal",
+              );
+              this.hud.showToast(
+                `${collector.name} grabbed a Med-Berry Crate (+${healed} HP)!`,
+                "success",
+              );
+            } else if (kind === "super_gadget") {
+              this.spawnWorldPopup(
+                popupPos,
+                bonusName ? `+${bonusName.toUpperCase()}!` : "SUPER CRATE!",
+                "event",
+              );
+              this.hud.showToast(
+                `${collector.name} grabbed a Super Crate${bonusName ? ` + ${bonusName}` : ""}!`,
+                "success",
+              );
+            } else {
+              this.spawnWorldPopup(popupPos, "+50 EVO!", "shield");
+              this.hud.showToast(
+                `${collector.name} grabbed an Evo Pod${bonusName ? ` + ${bonusName}` : ""}!`,
+                "success",
+              );
+            }
           }
           break;
         }
@@ -988,6 +1109,32 @@ class CritterSiegeApp {
           break;
       }
     }
+  }
+
+  private spawnWorldPopup(
+    worldPos: Vec3,
+    text: string,
+    tone: "damage" | "heal" | "shield" | "event",
+  ): void {
+    const projected = new THREE.Vector3(worldPos.x, worldPos.y, worldPos.z).project(
+      this.cameraRig.camera,
+    );
+    if (
+      !Number.isFinite(projected.x) ||
+      !Number.isFinite(projected.y) ||
+      !Number.isFinite(projected.z) ||
+      projected.z < -1 ||
+      projected.z > 1 ||
+      Math.abs(projected.x) > 1.15 ||
+      Math.abs(projected.y) > 1.15
+    ) {
+      return;
+    }
+    const width = Math.max(1, window.innerWidth);
+    const height = Math.max(1, window.innerHeight);
+    const screenX = (projected.x * 0.5 + 0.5) * width;
+    const screenY = (-projected.y * 0.5 + 0.5) * height;
+    this.hud.spawnFloatingPopup(text, screenX, screenY, tone);
   }
 
   private flushPendingCarves(state: MatchState): void {
@@ -1072,6 +1219,14 @@ class CritterSiegeApp {
     );
 
     const dir = computeAimDirection(moveSnap.yaw, moveSnap.pitch);
+    if (gadgetDef.turnEnding && this.selectedGadget !== "quake_club") {
+      this.lastLocalShotAim = {
+        gadgetId: this.selectedGadget,
+        yaw: moveSnap.yaw,
+        pitch: moveSnap.pitch,
+        power,
+      };
+    }
     this.quickStartFired = true;
     this.gameClient.sendFire(
       this.selectedGadget,
@@ -1295,8 +1450,57 @@ class CritterSiegeApp {
     // Update Shot Cam projectile flight animation
     const shotPos = this.advanceShotPlayback(dtSec, state);
 
+    // Advance smooth 0.42s Vine Grapple reel-up / cliff-rappel glides along live taut 3D ropes
+    const activeGlidePositions = new Map<string, Vec3>();
+    if (this.grappleGlides.size > 0) {
+      const completedGlides: string[] = [];
+      for (const [id, glide] of this.grappleGlides.entries()) {
+        glide.elapsedSec += dtSec;
+        const rawT = Math.min(1, glide.elapsedSec / Math.max(0.05, glide.durationSec));
+        const u = rawT * rawT * (3 - 2 * rawT);
+        const dist = Math.hypot(
+          glide.to.x - glide.from.x,
+          glide.to.y - glide.from.y,
+          glide.to.z - glide.from.z,
+        );
+        const arcLift = Math.sin(rawT * Math.PI) * Math.min(1.1, dist * 0.08);
+        const curPos: Vec3 = {
+          x: glide.from.x + (glide.to.x - glide.from.x) * u,
+          y: glide.from.y + (glide.to.y - glide.from.y) * u + arcLift,
+          z: glide.from.z + (glide.to.z - glide.from.z) * u,
+        };
+        activeGlidePositions.set(id, curPos);
+        if (id === localId) {
+          this.localPos.set(curPos.x, curPos.y, curPos.z);
+        }
+        if (rawT >= 1) {
+          completedGlides.push(id);
+          this.vfx.setGrappleTether(id, null);
+          if (id === localId) {
+            this.localPos.set(glide.to.x, glide.to.y, glide.to.z);
+            this.localVel.set(0, 0, 0);
+            this.localGrounded = true;
+            this.localTimeSinceGroundedSec = 0;
+            this.backflipUsedThisJump = false;
+            this.lastSyncedPos.copy(this.localPos);
+          }
+        } else {
+          this.vfx.setGrappleTether(
+            id,
+            { x: curPos.x, y: curPos.y + 0.55, z: curPos.z },
+            glide.to,
+          );
+        }
+      }
+      for (const id of completedGlides) {
+        this.grappleGlides.delete(id);
+      }
+    }
+
+    const localIsGliding = localId !== null && activeGlidePositions.has(localId);
+
     // Smooth local critter kinematics (WASD + Auto-Hop + Double-Tap Space Backflip) + 15 Hz sync
-    if (canMove && localCritter && !isDroneMode) {
+    if (canMove && localCritter && !isDroneMode && !localIsGliding) {
       this.stepLocalCritterMovement(
         dtSec,
         nowMs,
@@ -1326,7 +1530,7 @@ class CritterSiegeApp {
       canMove && localCritter
         ? { x: this.localPos.x, y: this.localPos.y, z: this.localPos.z }
         : focusCritter
-          ? focusCritter.position
+          ? activeGlidePositions.get(focusCritter.id) ?? focusCritter.position
           : { x: this.activeWorld.centerX, y: 9, z: this.activeWorld.centerZ };
     const viewerYaw = canMove ? moveInput.yaw : focusCritter?.yaw ?? 0;
 
@@ -1350,10 +1554,17 @@ class CritterSiegeApp {
       if (!rig) continue;
 
       const isLocalControlled = canMove && c.id === localId;
+      const glidePos = activeGlidePositions.get(c.id);
       let moving = false;
       let vy = 0;
 
-      if (isLocalControlled) {
+      if (glidePos) {
+        const prevY = rig.root.position.y;
+        rig.root.position.set(glidePos.x, glidePos.y, glidePos.z);
+        rig.root.rotation.y = isLocalControlled ? moveInput.yaw : c.yaw;
+        moving = true;
+        vy = (glidePos.y - prevY) / Math.max(0.016, dtSec);
+      } else if (isLocalControlled) {
         rig.root.position.copy(this.localPos);
         rig.root.rotation.y = moveInput.yaw;
         moving =
@@ -1403,7 +1614,7 @@ class CritterSiegeApp {
       );
     }
 
-    // Update live 3D Trajectory Preview during local aiming
+    // Update live 3D Trajectory Preview (+ Last-Shot Ghost Aim Marker) during local aiming
     const gadgetDef = GADGET_CATALOG[this.selectedGadget];
     const showArc =
       canFire &&
@@ -1416,15 +1627,28 @@ class CritterSiegeApp {
     if (showArc && localCritter) {
       const stats = computeCritterStats(localCritter.species, localCritter.equipped);
       const aimDir = computeAimDirection(moveInput.yaw, moveInput.pitch);
+      const aimOrigin: Vec3 = {
+        x: this.localPos.x,
+        y: this.localPos.y + 0.6,
+        z: this.localPos.z,
+      };
+      const ghostParams = this.lastLocalShotAim
+        ? {
+            gadgetId: this.lastLocalShotAim.gadgetId,
+            origin: aimOrigin,
+            direction: computeAimDirection(
+              this.lastLocalShotAim.yaw,
+              this.lastLocalShotAim.pitch,
+            ),
+            power: this.lastLocalShotAim.power,
+            ...(this.dronePing ? { droneTarget: this.dronePing } : {}),
+          }
+        : null;
       this.trajectoryPreview.update(
         this.activeWorld,
         {
           gadgetId: this.selectedGadget,
-          origin: {
-            x: this.localPos.x,
-            y: this.localPos.y + 0.6,
-            z: this.localPos.z,
-          },
+          origin: aimOrigin,
           direction: aimDir,
           power: moveInput.charging ? moveInput.chargePower : 0.58,
           ...(this.dronePing ? { droneTarget: this.dronePing } : {}),
@@ -1432,6 +1656,7 @@ class CritterSiegeApp {
         state.wind,
         stats.extendedTrajectory,
         true,
+        ghostParams,
       );
     } else {
       this.trajectoryPreview.update(
@@ -1445,6 +1670,7 @@ class CritterSiegeApp {
         state.wind,
         false,
         false,
+        null,
       );
     }
 
@@ -1488,7 +1714,12 @@ class CritterSiegeApp {
       return null;
     }
 
-    pb.elapsedSec += dtSec;
+    if ((pb.hitStopSec ?? 0) > 0) {
+      pb.hitStopSec = Math.max(0, (pb.hitStopSec ?? 0) - dtSec);
+    } else {
+      pb.elapsedSec += dtSec;
+    }
+
     const t = Math.max(0, Math.min(1, pb.elapsedSec / pb.durationSec));
     const idxFloat = t * Math.max(0, pb.path.length - 1);
     const i0 = Math.floor(idxFloat);
@@ -1513,6 +1744,32 @@ class CritterSiegeApp {
       GADGET_COLORS[pb.gadgetId],
     );
 
+    const emitHitPopups = (): void => {
+      if (pb.hitsPopupsDone || !pb.hits || pb.hits.length === 0) {
+        return;
+      }
+      pb.hitsPopupsDone = true;
+      for (const hit of pb.hits) {
+        const rig = this.critterRigs.get(hit.critterId);
+        const anchor = rig
+          ? {
+              x: rig.root.position.x,
+              y: rig.root.position.y + 1.5,
+              z: rig.root.position.z,
+            }
+          : {
+              x: hit.newPosition.x,
+              y: hit.newPosition.y + 1.5,
+              z: hit.newPosition.z,
+            };
+        if (hit.shieldAbsorbed) {
+          this.spawnWorldPopup(anchor, "SHIELD!", "shield");
+        } else if (hit.damage > 0) {
+          this.spawnWorldPopup(anchor, `-${Math.round(hit.damage)}`, "damage");
+        }
+      }
+    };
+
     for (const imp of pb.impacts) {
       if (!imp.triggered && pb.elapsedSec >= imp.time) {
         imp.triggered = true;
@@ -1521,6 +1778,14 @@ class CritterSiegeApp {
           imp.carveOp?.radius ?? Math.max(1.2, imp.damageRadius * 0.65);
         this.vfx.spawnExplosion(imp.position, blastRadius, Boolean(imp.isPull));
         this.audio.playExplosion(blastRadius);
+        this.cameraRig.triggerShake(
+          Math.min(1.15, 0.25 + blastRadius * 0.22),
+          0.34,
+        );
+        if (blastRadius >= 1.8) {
+          pb.hitStopSec = Math.max(pb.hitStopSec ?? 0, 0.055);
+        }
+        emitHitPopups();
       }
     }
 
@@ -1534,8 +1799,13 @@ class CritterSiegeApp {
             imp.carveOp?.radius ?? Math.max(1.2, imp.damageRadius * 0.65);
           this.vfx.spawnExplosion(imp.position, blastRadius, Boolean(imp.isPull));
           this.audio.playExplosion(blastRadius);
+          this.cameraRig.triggerShake(
+            Math.min(1.15, 0.25 + blastRadius * 0.22),
+            0.34,
+          );
         }
       }
+      emitHitPopups();
       for (const dp of pb.drownedPositions) {
         this.vfx.spawnSplash({ x: dp.x, y: state.waterLevel, z: dp.z });
         this.audio.playSplash();
@@ -1546,6 +1816,7 @@ class CritterSiegeApp {
       pb.elapsedSec >= pb.durationSec + pb.holdAfterSec ||
       state.phase !== "RESOLVING"
     ) {
+      emitHitPopups();
       this.flushPendingCarves(state);
       this.vfx.setProjectileVisual(null);
       this.shotPlayback = null;

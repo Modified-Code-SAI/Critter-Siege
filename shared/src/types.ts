@@ -49,7 +49,11 @@ export type GadgetId =
   | "shock_magnet";
 
 /** Sculpted SDF island biome themes. */
-export type ThemeId = "emerald_spire" | "canyon_arch" | "twin_pillars";
+export type ThemeId =
+  | "emerald_spire"
+  | "canyon_arch"
+  | "twin_pillars"
+  | "mountain_spine";
 
 /** Supported PvP match formats. */
 export type GameMode = "ffa" | "2v2";
@@ -266,13 +270,17 @@ export interface HazardState {
   armed?: boolean;
 }
 
-/** Parachuting or landed Evolution Pod pickup state. */
+/** Risk-reward air-drop crate archetype. */
+export type EvoPodKind = "evo_dna" | "med_berry" | "super_gadget";
+
+/** Parachuting or landed Evolution Pod / supply crate pickup state. */
 export interface EvoPodState {
   id: string;
   position: Vec3;
   collected: boolean;
   spawnedAtTurn: number;
   parachuting: boolean;
+  kind?: EvoPodKind;
 }
 
 /** Detailed hardpoint card offered in a mutation draft (including swap info when full). */
@@ -420,6 +428,8 @@ export type EngineEvent =
       playerId: string;
       podId: string;
       bonusGadget: GadgetId | null;
+      podKind?: EvoPodKind;
+      healedHp?: number;
     }
   | {
       type: "MUTATION_EQUIPPED";

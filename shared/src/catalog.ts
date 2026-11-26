@@ -25,6 +25,7 @@ export const THEME_IDS: readonly ThemeId[] = [
   "emerald_spire",
   "canyon_arch",
   "twin_pillars",
+  "mountain_spine",
 ] as const;
 
 /** Complete catalog of starter and Siege-Essence-unlockable species. */

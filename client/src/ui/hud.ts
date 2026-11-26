@@ -135,6 +135,7 @@ const THEME_META: ReadonlyArray<{ id: ThemeId; shortLabel: string; label: string
   { id: "emerald_spire", shortLabel: "Emerald", label: "Emerald Spire" },
   { id: "canyon_arch", shortLabel: "Canyon", label: "Canyon Arch" },
   { id: "twin_pillars", shortLabel: "Pillars", label: "Twin Pillars" },
+  { id: "mountain_spine", shortLabel: "Spine", label: "Mountain Spine" },
 ];
 
 const MAP_SCALE_META: ReadonlyArray<{ id: MapScaleChoice; label: string; title: string }> = [
@@ -795,6 +796,36 @@ export class HudController {
       this.toastEl.classList.add("cs-hidden");
       this.toastTimer = null;
     }, 3000);
+  }
+
+  /**
+   * Spawn a crisp rising animated floating damage or event popup projected from
+   * 3D world space onto screen pixels (`-32`, `+55 HP!`, `SHIELD!`, `CHAIN BLAST!`).
+   */
+  public spawnFloatingPopup(
+    text: string,
+    screenX: number,
+    screenY: number,
+    tone: "damage" | "heal" | "shield" | "event" = "damage",
+  ): void {
+    if (!Number.isFinite(screenX) || !Number.isFinite(screenY) || text.length === 0) {
+      return;
+    }
+    let layer = this.gameLayer.querySelector<HTMLDivElement>(".cs-popup-layer");
+    if (!layer) {
+      layer = document.createElement("div");
+      layer.className = "cs-popup-layer";
+      this.gameLayer.appendChild(layer);
+    }
+    const popup = document.createElement("div");
+    popup.className = `cs-float-popup cs-float-${tone}`;
+    popup.textContent = text;
+    popup.style.left = `${Math.round(screenX)}px`;
+    popup.style.top = `${Math.round(screenY)}px`;
+    layer.appendChild(popup);
+    setTimeout(() => {
+      popup.remove();
+    }, 1250);
   }
 
   /** Show a brief bold animated center turn/event banner with optional 3D species portrait. */

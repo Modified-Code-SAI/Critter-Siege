@@ -1269,6 +1269,12 @@ export class MatchEngine {
   private collectPodsInRange(critter: CritterState): EngineEvent[] {
     const events: EngineEvent[] = [];
     const magnet = SPECIES_CATALOG[critter.species].podMagnetRadius;
+    const superGadgetPool: readonly GadgetId[] = [
+      "gravity_mine",
+      "shock_magnet",
+      "spore_burst",
+      "burrow_bore",
+    ];
 
     for (const pod of this.evoPods) {
       if (pod.collected) continue;
@@ -1280,6 +1286,46 @@ export class MatchEngine {
       if (dist <= magnet) {
         pod.collected = true;
         critter.podsCollected += 1;
+        const kind = pod.kind ?? "evo_dna";
+
+        if (kind === "med_berry") {
+          const prevHp = critter.hp;
+          critter.hp = Math.min(critter.maxHp, critter.hp + 55);
+          const healedHp = critter.hp - prevHp;
+          events.push({
+            type: "EVO_POD_COLLECTED",
+            playerId: critter.id,
+            podId: pod.id,
+            bonusGadget: null,
+            podKind: "med_berry",
+            healedHp,
+          });
+          continue;
+        }
+
+        if (kind === "super_gadget") {
+          critter.evoCharge = Math.min(100, critter.evoCharge + 25);
+          if (critter.evoCharge >= 100) {
+            critter.pendingEvoDraft = true;
+          }
+          const bonusGadget =
+            superGadgetPool[Math.floor(this.rng() * superGadgetPool.length)] ??
+            "gravity_mine";
+          const prev = critter.gadgetCharges[bonusGadget];
+          if (prev !== null) {
+            critter.gadgetCharges[bonusGadget] = prev + 1;
+          }
+          events.push({
+            type: "EVO_POD_COLLECTED",
+            playerId: critter.id,
+            podId: pod.id,
+            bonusGadget,
+            podKind: "super_gadget",
+            healedHp: 0,
+          });
+          continue;
+        }
+
         critter.evoCharge = Math.min(100, critter.evoCharge + 50);
         if (critter.evoCharge >= 100) {
           critter.pendingEvoDraft = true;
@@ -1301,6 +1347,8 @@ export class MatchEngine {
           playerId: critter.id,
           podId: pod.id,
           bonusGadget,
+          podKind: "evo_dna",
+          healedHp: 0,
         });
       }
     }
@@ -1543,12 +1591,15 @@ export class MatchEngine {
       return null;
     }
     this.podCounter += 1;
+    const podCycle = ["evo_dna", "med_berry", "super_gadget"] as const;
+    const kind = podCycle[(this.podCounter - 1) % podCycle.length] ?? "evo_dna";
     const pod: EvoPodState = {
       id: `pod-r${this.round}-t${this.turnNumber}-${this.podCounter}`,
       position: { x: chosen.x, y: chosen.y + 0.35, z: chosen.z },
       collected: false,
       spawnedAtTurn: this.turnNumber,
       parachuting: true,
+      kind,
     };
     this.evoPods.push(pod);
     return pod;

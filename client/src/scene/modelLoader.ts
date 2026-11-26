@@ -155,6 +155,113 @@ export async function loadSpeciesModel(
   return cloneNormalizedTemplate(template);
 }
 
+/** Handcrafted Blender 5.2.4 LTS set-piece landmark prop identifiers. */
+export type PropLandmarkKind = "watchtower" | "ruin_arch" | "gnarled_pine";
+
+const PROP_GLB_URLS: Readonly<Record<PropLandmarkKind, string>> = {
+  watchtower: "/models/props/watchtower.glb",
+  ruin_arch: "/models/props/ruin_arch.glb",
+  gnarled_pine: "/models/props/gnarled_pine.glb",
+};
+
+const propTemplateCache = new Map<PropLandmarkKind, Promise<THREE.Group | null>>();
+const resolvedPropTemplates = new Map<PropLandmarkKind, THREE.Group>();
+
+/** Return the static Vite public URL for a handcrafted Blender landmark prop GLB. */
+export function getPropModelUrl(kind: PropLandmarkKind): string {
+  return PROP_GLB_URLS[kind];
+}
+
+/**
+ * Normalize a loaded Blender prop glTF scene into a grounded (`min.y === 0`),
+ * shadow-casting THREE.Group tuned for Critter Siege's sunlit island lighting.
+ */
+export function normalizePropGlbModel(
+  sceneRoot: THREE.Object3D,
+  kind: PropLandmarkKind,
+): THREE.Group {
+  const wrapper = new THREE.Group();
+  wrapper.name = `glb_prop_${kind}`;
+
+  sceneRoot.traverse((obj) => {
+    if (obj instanceof THREE.Mesh) {
+      obj.castShadow = true;
+      obj.receiveShadow = true;
+      obj.frustumCulled = true;
+      if (Array.isArray(obj.material)) {
+        for (const mat of obj.material) {
+          tuneGlbMaterial(mat);
+        }
+      } else {
+        tuneGlbMaterial(obj.material);
+      }
+    }
+  });
+
+  wrapper.add(sceneRoot);
+  wrapper.updateMatrixWorld(true);
+
+  const box = new THREE.Box3().setFromObject(wrapper);
+  if (
+    Number.isFinite(box.min.y) &&
+    Number.isFinite(box.max.y) &&
+    Math.abs(box.min.y) > 0.002 &&
+    Math.abs(box.min.y) < 12
+  ) {
+    sceneRoot.position.y -= box.min.y;
+    wrapper.updateMatrixWorld(true);
+  }
+
+  return wrapper;
+}
+
+/**
+ * Load and cache a Blender `.glb` landmark prop (`watchtower`, `ruin_arch`, `gnarled_pine`).
+ * Returns a ready-to-attach cloned THREE.Group, or `null` in headless Node / offline environments.
+ */
+export async function loadPropModel(
+  kind: PropLandmarkKind,
+): Promise<THREE.Group | null> {
+  if (typeof window === "undefined" || typeof fetch === "undefined") {
+    return null;
+  }
+
+  let pending = propTemplateCache.get(kind);
+  if (!pending) {
+    const loader = getLoader();
+    pending = loader
+      .loadAsync(PROP_GLB_URLS[kind])
+      .then((gltf) => {
+        const normalized = normalizePropGlbModel(gltf.scene, kind);
+        resolvedPropTemplates.set(kind, normalized);
+        return normalized;
+      })
+      .catch(() => null);
+    propTemplateCache.set(kind, pending);
+  }
+
+  const template = await pending;
+  if (!template) {
+    return null;
+  }
+  return cloneNormalizedTemplate(template);
+}
+
+/** Warm the browser cache for all 3 Blender GLB landmark props in the background. */
+export function preloadAllPropModels(): void {
+  if (typeof window === "undefined" || typeof fetch === "undefined") {
+    return;
+  }
+  const propList: readonly PropLandmarkKind[] = [
+    "watchtower",
+    "ruin_arch",
+    "gnarled_pine",
+  ];
+  for (const kind of propList) {
+    void loadPropModel(kind);
+  }
+}
+
 /** Warm the browser cache for all 4 sculpted GLB hero critters in the background. */
 export function preloadAllSpeciesModels(): void {
   if (typeof window === "undefined" || typeof fetch === "undefined") {
@@ -171,11 +278,17 @@ export function preloadAllSpeciesModels(): void {
   }
 }
 
-/** Clear and GPU-dispose all cached GLB templates (primarily for cleanup & tests). */
+/** Clear and GPU-dispose all cached species & landmark prop GLB templates. */
 export function clearModelCache(): void {
   for (const template of resolvedTemplates.values()) {
     disposeTemplateTree(template);
   }
   resolvedTemplates.clear();
   templateCache.clear();
+
+  for (const template of resolvedPropTemplates.values()) {
+    disposeTemplateTree(template);
+  }
+  resolvedPropTemplates.clear();
+  propTemplateCache.clear();
 }

@@ -693,16 +693,21 @@ describe("Authoritative MatchEngine turn state machine & review edge cases", () 
     const ev1 = advanceAndWalkTo(engine, "p1", { ...pod1.position });
     expect(ev1.some((e) => e.type === "EVO_POD_COLLECTED")).toBe(true);
 
-    // Ensure a 2nd uncollected Evo Pod has spawned
-    for (let guard = 0; guard < 10; guard++) {
+    // Ensure a 2nd uncollected evo_dna Pod has spawned (cycling past med_berry & super_gadget)
+    for (let guard = 0; guard < 16; guard++) {
       const s = engine.getSnapshot();
-      if (s.activePlayerId === "p1" && s.evoPods.some((p) => !p.collected)) {
+      if (
+        s.activePlayerId === "p1" &&
+        s.evoPods.some((p) => !p.collected && (p.kind ?? "evo_dna") === "evo_dna")
+      ) {
         break;
       }
       engine.tick(29);
     }
 
-    const pod2 = engine.getSnapshot().evoPods.find((p) => !p.collected);
+    const pod2 = engine
+      .getSnapshot()
+      .evoPods.find((p) => !p.collected && (p.kind ?? "evo_dna") === "evo_dna");
     expect(pod2).toBeDefined();
     if (!pod2) return;
 
@@ -1722,5 +1727,95 @@ describe("Authoritative MatchEngine turn state machine & review edge cases", () 
         ).toBeCloseTo(7.0 * 1.45, 2);
       }
     }
+  });
+
+  it("cycles air-drop crates across evo_dna, med_berry (+55 HP heal clamped to maxHp), and super_gadget (rare gadget +25 Evo)", () => {
+    const engine = new MatchEngine(
+      makeBaseConfig({
+        seed: 7070,
+        theme: "mountain_spine",
+      }),
+    );
+
+    // Spawn 3 consecutive air-drop crates on Turns 2, 4, and 6
+    const seenKinds: string[] = [];
+    for (let guard = 0; guard < 12 && seenKinds.length < 3; guard++) {
+      const evs = engine.tick(29);
+      for (const ev of evs) {
+        if (ev.type === "EVO_POD_SPAWNED") {
+          seenKinds.push(ev.pod.kind ?? "missing");
+        }
+      }
+    }
+    expect(seenKinds).toEqual(["evo_dna", "med_berry", "super_gadget"]);
+
+    const pods = engine.getSnapshot().evoPods;
+    const medPod = pods.find((p) => p.kind === "med_berry");
+    const superPod = pods.find((p) => p.kind === "super_gadget");
+    expect(medPod).toBeDefined();
+    expect(superPod).toBeDefined();
+    if (!medPod || !superPod) return;
+
+    // Damage p1 cleanly by ~75 HP via 3 vertical fall drops (25 dmg each) so +55 HP heals strictly without capping early
+    for (let guard = 0; guard < 6 && engine.getSnapshot().activePlayerId !== "p1"; guard++) {
+      engine.tick(29);
+    }
+    const p1BeforeDrop = engine.getSnapshot().critters.find((c) => c.id === "p1");
+    expect(p1BeforeDrop).toBeDefined();
+    if (!p1BeforeDrop) return;
+    const basePos = { ...p1BeforeDrop.position };
+    for (let d = 0; d < 3; d++) {
+      engine.applyMove("p1", { x: basePos.x, y: basePos.y + 15.0, z: basePos.z }, 0, 0);
+      engine.applyMove("p1", basePos, 0, 0);
+    }
+
+    const p1Hurt = engine.getSnapshot().critters.find((c) => c.id === "p1");
+    expect(p1Hurt).toBeDefined();
+    if (!p1Hurt) return;
+    const hpBeforeHeal = p1Hurt.hp;
+    expect(hpBeforeHeal).toBeLessThanOrEqual(p1Hurt.maxHp - 60);
+
+    // Collect med_berry -> restores +55 HP (clamped to maxHp)
+    const medEvs = advanceAndWalkTo(engine, "p1", { ...medPod.position });
+    const medCollected = medEvs.find(
+      (e) => e.type === "EVO_POD_COLLECTED" && e.podId === medPod.id,
+    );
+    expect(medCollected).toBeDefined();
+    if (medCollected && medCollected.type === "EVO_POD_COLLECTED") {
+      expect(medCollected.podKind).toBe("med_berry");
+      expect(medCollected.healedHp).toBe(55);
+      expect(medCollected.bonusGadget).toBeNull();
+    }
+    const p1AfterMed = engine.getSnapshot().critters.find((c) => c.id === "p1");
+    expect(p1AfterMed?.hp).toBe(Math.min(p1Hurt.maxHp, hpBeforeHeal + 55));
+
+    // Collect super_gadget -> grants +1 rare gadget charge + +25 Evo Charge
+    const evoBeforeSuper = p1AfterMed?.evoCharge ?? 0;
+    const superEvs = advanceAndWalkTo(engine, "p1", { ...superPod.position });
+    const superCollected = superEvs.find(
+      (e) => e.type === "EVO_POD_COLLECTED" && e.podId === superPod.id,
+    );
+    expect(superCollected).toBeDefined();
+    const rarePool = new Set([
+      "gravity_mine",
+      "shock_magnet",
+      "spore_burst",
+      "burrow_bore",
+    ]);
+    if (superCollected && superCollected.type === "EVO_POD_COLLECTED") {
+      expect(superCollected.podKind).toBe("super_gadget");
+      expect(superCollected.bonusGadget).not.toBeNull();
+      if (superCollected.bonusGadget) {
+        expect(rarePool.has(superCollected.bonusGadget)).toBe(true);
+      }
+    }
+    const bonusEvoFromOtherPods = superEvs.reduce((sum, ev) => {
+      if (ev.type !== "EVO_POD_COLLECTED" || ev.podId === superPod.id) return sum;
+      return sum + (ev.podKind === "evo_dna" ? 50 : ev.podKind === "super_gadget" ? 25 : 0);
+    }, 0);
+    const p1AfterSuper = engine.getSnapshot().critters.find((c) => c.id === "p1");
+    expect(p1AfterSuper?.evoCharge).toBe(
+      Math.min(100, evoBeforeSuper + bonusEvoFromOtherPods + 25),
+    );
   });
 });

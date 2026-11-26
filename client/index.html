@@ -448,6 +448,8 @@
       .cs-chip-group {
         display: inline-flex;
         align-items: center;
+        flex-wrap: wrap;
+        justify-content: flex-end;
         gap: 4px;
       }
 
@@ -1637,6 +1639,65 @@
       .cs-toast-error {
         border-color: rgba(251, 113, 133, 0.82);
         color: #fecdd3;
+      }
+
+      /* ── 3D-Projected Floating Damage & Tactical Event Popups ────────── */
+      .cs-popup-layer {
+        position: fixed;
+        inset: 0;
+        pointer-events: none;
+        overflow: hidden;
+        z-index: 32;
+      }
+
+      .cs-float-popup {
+        position: absolute;
+        transform: translate(-50%, -50%);
+        font-size: 22px;
+        font-weight: 900;
+        letter-spacing: 0.03em;
+        white-space: nowrap;
+        text-shadow: 0 3px 10px rgba(4, 10, 22, 0.92),
+          0 0 2px rgba(4, 10, 22, 0.98);
+        animation: csFloatRise 1.22s cubic-bezier(0.18, 0.88, 0.28, 1) forwards;
+        will-change: transform, opacity;
+      }
+
+      .cs-float-damage {
+        color: #ff6b81;
+      }
+
+      .cs-float-heal {
+        color: #34d399;
+        font-size: 24px;
+      }
+
+      .cs-float-shield {
+        color: #4df4ff;
+      }
+
+      .cs-float-event {
+        color: #fde047;
+        font-size: 20px;
+      }
+
+      @keyframes csFloatRise {
+        0% {
+          opacity: 0;
+          transform: translate(-50%, -18%) scale(0.76);
+        }
+        16% {
+          opacity: 1;
+          transform: translate(-50%, -68%) scale(1.12);
+        }
+        75% {
+          opacity: 1;
+          transform: translate(-50%, -128%) scale(1.0);
+        }
+        100% {
+          opacity: 0;
+          transform: translate(-50%, -165%) scale(0.92);
+        }
       }
 
       /* ── Real 3D Portraits, Big Power Bar, HOLD TO FIRE & ? Quick Controls ── */

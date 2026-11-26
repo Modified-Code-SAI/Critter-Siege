@@ -1125,6 +1125,414 @@ function evaluateThemeSdf(
     return d + organicNoise;
   }
 
+  if (theme === "mountain_spine") {
+    // 'mountain_spine' (Swiss Cheese Multi-Story Mountain Corridor):
+    // Winding narrow alpine spine with steep ocean flank drop-offs, staggered terraced
+    // mountain perches, multi-story stacked caves, 2 stacked stone bridges, and thick
+    // destructible rock peaks between every player.
+    const ledgeBotR = 0.2 * halfSpan;
+    const ledgeTopR = 0.32 * halfSpan;
+    const nwLedge = sdTaperedPlateau(
+      x,
+      y,
+      z,
+      wx(-0.6 + j.northShift * 0.025),
+      wz(-0.59),
+      bottomY,
+      spawnTopY - 0.1 + j.westHeight * 0.35,
+      ledgeBotR,
+      ledgeTopR,
+      bevel * 0.85,
+    );
+    const neLedge = sdTaperedPlateau(
+      x,
+      y,
+      z,
+      wx(0.6 + j.southShift * 0.025),
+      wz(-0.58),
+      bottomY,
+      spawnTopY + 0.55 + j.eastHeight * 0.35,
+      ledgeBotR,
+      ledgeTopR,
+      bevel * 0.85,
+    );
+    const swLedge = sdTaperedPlateau(
+      x,
+      y,
+      z,
+      wx(-0.6 - j.southShift * 0.02),
+      wz(0.58),
+      bottomY,
+      spawnTopY + 0.4 + j.eastHeight * 0.3,
+      ledgeBotR,
+      ledgeTopR,
+      bevel * 0.85,
+    );
+    const seLedge = sdTaperedPlateau(
+      x,
+      y,
+      z,
+      wx(0.6 - j.northShift * 0.02),
+      wz(0.59),
+      bottomY,
+      spawnTopY + 0.15 + j.westHeight * 0.3,
+      ledgeBotR,
+      ledgeTopR,
+      bevel * 0.85,
+    );
+
+    // Narrow terraced alpine switchbacks hugging the inner gorge
+    const lowTerraceY = Math.max(bottomY + 1.35, worldHeight * 0.14);
+    const midTerraceY = worldHeight * 0.26;
+    const nwTerrace = sdTaperedPlateau(
+      x,
+      y,
+      z,
+      wx(-0.35),
+      wz(-0.32),
+      bottomY - 0.1,
+      lowTerraceY,
+      0.13 * halfSpan,
+      0.18 * halfSpan,
+      bevel * 0.65,
+    );
+    const seTerrace = sdTaperedPlateau(
+      x,
+      y,
+      z,
+      wx(0.35),
+      wz(0.32),
+      bottomY - 0.1,
+      lowTerraceY,
+      0.13 * halfSpan,
+      0.18 * halfSpan,
+      bevel * 0.65,
+    );
+    const neTerrace = sdTaperedPlateau(
+      x,
+      y,
+      z,
+      wx(0.34),
+      wz(-0.36),
+      bottomY,
+      midTerraceY,
+      0.12 * halfSpan,
+      0.17 * halfSpan,
+      bevel * 0.7,
+    );
+    const swTerrace = sdTaperedPlateau(
+      x,
+      y,
+      z,
+      wx(-0.34),
+      wz(0.36),
+      bottomY,
+      midTerraceY,
+      0.12 * halfSpan,
+      0.17 * halfSpan,
+      bevel * 0.7,
+    );
+
+    // Towering Central Alpine Summit Crag + Winding S-Curve Spine Shoulders
+    const summitPeak = sdTaperedPlateau(
+      x,
+      y,
+      z,
+      cx,
+      cz,
+      bottomY,
+      Math.min(worldHeight - 2.6 * hScale, centralPeakY + 1.25 * hScale + j.archBoost * 0.25),
+      0.21 * halfSpan,
+      0.24 * halfSpan,
+      bevel * 0.9,
+    );
+    const westShoulder = sdTaperedPlateau(
+      x,
+      y,
+      z,
+      wx(-0.24),
+      wz(0.16),
+      bottomY,
+      centralPeakY + 0.3 * hScale + j.westHeight * 0.25,
+      0.15 * halfSpan,
+      0.19 * halfSpan,
+      bevel * 0.85,
+    );
+    const eastShoulder = sdTaperedPlateau(
+      x,
+      y,
+      z,
+      wx(0.24),
+      wz(-0.16),
+      bottomY,
+      centralPeakY + 0.45 * hScale + j.eastHeight * 0.25,
+      0.15 * halfSpan,
+      0.19 * halfSpan,
+      bevel * 0.85,
+    );
+
+    // Thick winding spine ridge linking the shoulders across the central summit
+    const spineCoreWall = sdBastionWall(
+      x,
+      y,
+      z,
+      wx(-0.28),
+      wz(0.18),
+      wx(0.28),
+      wz(-0.18),
+      wallBottomY,
+      centralPeakY + 0.4 * hScale,
+      wallBaseThick * 1.18,
+      wallTopThick * 1.1,
+      wallBevel,
+      0.1,
+    );
+
+    // 4 Towering Full-Width Destructible Mountain Ridge Barriers extending to sheer coastal cliffs
+    const ridgeTop = wallTopY + 0.65 * hScale;
+    const northRidge = sdBastionWall(
+      x,
+      y,
+      z,
+      cx,
+      wz(-0.08),
+      cx,
+      wz(-1.07),
+      wallBottomY,
+      ridgeTop + j.westHeight * 0.2,
+      wallBaseThick * 1.08,
+      wallTopThick * 1.02,
+      wallBevel,
+      0.18,
+    );
+    const southRidge = sdBastionWall(
+      x,
+      y,
+      z,
+      cx,
+      wz(0.08),
+      cx,
+      wz(1.07),
+      wallBottomY,
+      ridgeTop + j.eastHeight * 0.2,
+      wallBaseThick * 1.08,
+      wallTopThick * 1.02,
+      wallBevel,
+      0.18,
+    );
+    const westRidge = sdBastionWall(
+      x,
+      y,
+      z,
+      wx(-0.08),
+      cz,
+      wx(-1.07),
+      cz,
+      wallBottomY,
+      ridgeTop + j.eastHeight * 0.2,
+      wallBaseThick * 1.08,
+      wallTopThick * 1.02,
+      wallBevel,
+      0.18,
+    );
+    const eastRidge = sdBastionWall(
+      x,
+      y,
+      z,
+      wx(0.08),
+      cz,
+      wx(1.07),
+      cz,
+      wallBottomY,
+      ridgeTop + j.westHeight * 0.2,
+      wallBaseThick * 1.08,
+      wallTopThick * 1.02,
+      wallBevel,
+      0.18,
+    );
+
+    // 2 Stacked Stone Bridges: Lower canyon arch (SW <-> NE) + High sky-bridge (NW <-> SE)
+    const bridgeW = isGrand ? 3.7 : 2.05;
+    const bridgeT = isGrand ? 2.0 : 1.2;
+    const lowerBridge = sdStoneArch(
+      x,
+      y,
+      z,
+      wx(-0.52),
+      wz(0.48),
+      wx(0.52),
+      wz(-0.48),
+      spawnTopY - 0.1,
+      worldHeight * 0.34,
+      bridgeW,
+      bridgeT,
+    );
+    const upperBridge = sdStoneArch(
+      x,
+      y,
+      z,
+      wx(-0.54),
+      wz(-0.5),
+      wx(0.54),
+      wz(0.5),
+      spawnTopY + 1.2 * hScale,
+      centralPeakY - 0.45 * hScale,
+      bridgeW * 0.94,
+      bridgeT,
+    );
+
+    let d = smin(nwLedge, neLedge, unionK * 0.9);
+    d = smin(d, swLedge, unionK * 0.9);
+    d = smin(d, seLedge, unionK * 0.9);
+    d = smin(d, nwTerrace, unionK * 0.7);
+    d = smin(d, seTerrace, unionK * 0.7);
+    d = smin(d, neTerrace, unionK * 0.7);
+    d = smin(d, swTerrace, unionK * 0.7);
+    d = smin(d, summitPeak, unionK * 0.85);
+    d = smin(d, westShoulder, unionK * 0.8);
+    d = smin(d, eastShoulder, unionK * 0.8);
+    d = smin(d, spineCoreWall, unionK * 0.75);
+    d = smin(d, northRidge, unionK * 0.65);
+    d = smin(d, southRidge, unionK * 0.65);
+    d = smin(d, westRidge, unionK * 0.65);
+    d = smin(d, eastRidge, unionK * 0.65);
+    d = smin(d, lowerBridge, unionK * 0.5);
+    d = smin(d, upperBridge, unionK * 0.5);
+
+    // Multi-story "Swiss Cheese" Stacked Caves carved straight through the alpine spine!
+    // Story 1: Lower East-West cavern tunnel at tunnelY (0.20 * worldHeight)
+    const lowerCaveR = isGrand ? 3.55 : 2.15;
+    const lowerCave =
+      distToSegment(
+        x,
+        y,
+        z,
+        wx(-0.42),
+        tunnelY,
+        cz,
+        wx(0.42),
+        tunnelY,
+        cz,
+      ) - lowerCaveR;
+    d = smax(d, -lowerCave, isGrand ? 0.95 : 0.6);
+
+    // Story 2: Upper North-South cross-cave gallery at 0.42 * worldHeight (leaving solid summit overhead!)
+    const upperCaveY = worldHeight * 0.42;
+    const upperCaveR = isGrand ? 3.05 : 1.85;
+    const upperCave =
+      distToSegment(
+        x,
+        y,
+        z,
+        cx,
+        upperCaveY,
+        wz(-0.38),
+        cx,
+        upperCaveY,
+        wz(0.38),
+      ) - upperCaveR;
+    d = smax(d, -upperCave, isGrand ? 0.85 : 0.55);
+
+    // Mid-level flank chambers hollowed inside the twin spine shoulders
+    const shoulderCaveY = worldHeight * 0.3;
+    const shoulderCaveR = isGrand ? 2.8 : 1.7;
+    const westShoulderCave =
+      distToSegment(
+        x,
+        y,
+        z,
+        wx(-0.38),
+        shoulderCaveY,
+        wz(0.06),
+        wx(-0.12),
+        shoulderCaveY,
+        wz(0.28),
+      ) - shoulderCaveR;
+    const eastShoulderCave =
+      distToSegment(
+        x,
+        y,
+        z,
+        wx(0.12),
+        shoulderCaveY,
+        wz(-0.28),
+        wx(0.38),
+        shoulderCaveY,
+        wz(-0.06),
+      ) - shoulderCaveR;
+    d = smax(d, -westShoulderCave, 0.55);
+    d = smax(d, -eastShoulderCave, 0.55);
+
+    // Carved lower arched mountain passes through the 4 dividing walls, sealed with destructible rock plugs
+    const mPassN =
+      distToSegment(
+        x,
+        y,
+        z,
+        wx(-0.2),
+        passY,
+        wz(-0.58),
+        wx(0.2),
+        passY,
+        wz(-0.58),
+      ) - passRadius;
+    const mPassS =
+      distToSegment(
+        x,
+        y,
+        z,
+        wx(-0.2),
+        passY,
+        wz(0.58),
+        wx(0.2),
+        passY,
+        wz(0.58),
+      ) - passRadius;
+    const mPassW =
+      distToSegment(
+        x,
+        y,
+        z,
+        wx(-0.58),
+        passY,
+        wz(-0.2),
+        wx(-0.58),
+        passY,
+        wz(0.2),
+      ) - passRadius;
+    const mPassE =
+      distToSegment(
+        x,
+        y,
+        z,
+        wx(0.58),
+        passY,
+        wz(-0.2),
+        wx(0.58),
+        passY,
+        wz(0.2),
+      ) - passRadius;
+
+    d = smax(d, -mPassN, 0.65);
+    d = smax(d, -mPassS, 0.65);
+    d = smax(d, -mPassW, 0.65);
+    d = smax(d, -mPassE, 0.65);
+    d = smin(d, evalGatePlugs(0.58), isGrand ? 0.5 : 0.35);
+
+    // Steep ocean flank drop-offs along the outer corners (preserving sheer coastal divider walls)
+    const radialNorm = Math.hypot(u, v);
+    const wallAxisRelief = Math.max(
+      0,
+      1 - Math.min(Math.abs(u), Math.abs(v)) / 0.16,
+    );
+    const flankSkirtStart = 0.89 + wallAxisRelief * 0.19;
+    const flankDrop =
+      wallBottomY - y + Math.max(0, radialNorm - flankSkirtStart) * halfSpan * 0.36;
+    d = smax(d, flankDrop, 0.8);
+
+    return d + organicNoise;
+  }
+
   // 'twin_pillars' (Sky Twin Citadels): 4 outer sky-atoll basins separated by towering
   // cliff battlement walls & sea-stacks, flanking twin cliff citadels joined by a sky-wall.
   const atollBotR = 0.21 * halfSpan;

@@ -599,4 +599,101 @@ describe("CameraRig", () => {
     audio.dispose();
     audio.playUiClick();
   });
+
+  it("renders translucent gold ghost trajectory arc alongside active cyan arc and disposes all geometries/materials cleanly", () => {
+    const world = new SdfWorld(606, "mountain_spine");
+    const preview = new TrajectoryPreview();
+
+    const origin: Vec3 = { x: 10, y: 11, z: 10 };
+    const activeDir: Vec3 = { x: 0.65, y: 0.75, z: 0.1 };
+    const ghostDir: Vec3 = { x: 0.55, y: 0.82, z: 0.15 };
+    const wind: Vec3 = { x: 1.2, y: 0, z: -0.6 };
+
+    // Without ghostParams -> ghost arc hidden
+    preview.update(
+      world,
+      { gadgetId: "gale_mortar", origin, direction: activeDir, power: 0.7 },
+      wind,
+      false,
+      true,
+    );
+    const ghostDots = preview.group.getObjectByName("trajectory_ghost_dots");
+    const ghostRing = preview.group.getObjectByName("trajectory_ghost_landing_ring");
+    expect(ghostDots).toBeInstanceOf(THREE.InstancedMesh);
+    expect(ghostRing).toBeInstanceOf(THREE.Mesh);
+    if (ghostDots instanceof THREE.InstancedMesh) {
+      expect(ghostDots.count).toBe(0);
+    }
+    expect(ghostRing?.visible).toBe(false);
+
+    // With ghostParams -> both active cyan arc and gold ghost arc + landing ring render
+    preview.update(
+      world,
+      { gadgetId: "gale_mortar", origin, direction: activeDir, power: 0.7 },
+      wind,
+      false,
+      true,
+      { gadgetId: "gale_mortar", origin, direction: ghostDir, power: 0.62 },
+    );
+    if (ghostDots instanceof THREE.InstancedMesh) {
+      expect(ghostDots.count).toBeGreaterThan(2);
+      expect(ghostDots.count).toBeLessThanOrEqual(40);
+      expect(ghostDots.material).toBeInstanceOf(THREE.MeshBasicMaterial);
+      if (ghostDots.material instanceof THREE.MeshBasicMaterial) {
+        expect(ghostDots.material.transparent).toBe(true);
+        expect(ghostDots.material.opacity).toBeLessThan(0.65);
+      }
+    }
+    expect(ghostRing?.visible).toBe(true);
+
+    // Spy on every mesh geometry & material dispose
+    const geoSpies: Array<ReturnType<typeof vi.spyOn>> = [];
+    const matSpies: Array<ReturnType<typeof vi.spyOn>> = [];
+    preview.group.traverse((obj) => {
+      if (obj instanceof THREE.Mesh) {
+        geoSpies.push(vi.spyOn(obj.geometry, "dispose"));
+        if (!Array.isArray(obj.material)) {
+          matSpies.push(vi.spyOn(obj.material, "dispose"));
+        }
+      }
+    });
+    expect(geoSpies.length).toBeGreaterThanOrEqual(4);
+    expect(matSpies.length).toBeGreaterThanOrEqual(4);
+
+    preview.dispose();
+    for (const spy of geoSpies) {
+      expect(spy).toHaveBeenCalledTimes(1);
+    }
+    for (const spy of matSpies) {
+      expect(spy).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it("applies decaying camera screen-shake during Shot Cam and settles back cleanly", () => {
+    const world = new SdfWorld(707, "emerald_spire");
+    const rigA = new CameraRig(16 / 9);
+    const rigB = new CameraRig(16 / 9);
+
+    const shotCtx = makeContext(world, {
+      phase: "RESOLVING",
+      shotPos: { x: 25, y: 14, z: 25 },
+      dtSec: 0.05,
+    });
+    for (let i = 0; i < 8; i++) {
+      rigA.update(shotCtx);
+      rigB.update(shotCtx);
+    }
+
+    rigB.triggerShake(0.9, 0.3);
+    rigA.update(shotCtx);
+    rigB.update(shotCtx);
+    expect(rigA.camera.position.distanceTo(rigB.camera.position)).toBeGreaterThan(0.05);
+
+    // After shake duration elapses, camera settles cleanly back to baseline
+    for (let i = 0; i < 12; i++) {
+      rigA.update(shotCtx);
+      rigB.update(shotCtx);
+    }
+    expect(rigA.camera.position.distanceTo(rigB.camera.position)).toBeLessThan(0.001);
+  });
 });

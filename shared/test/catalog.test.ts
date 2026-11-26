@@ -452,10 +452,12 @@ describe("WebSocket client message parser", () => {
     expect(
       parseClientMessage({
         type: "LOBBY_CONFIG",
+        theme: "mountain_spine",
         mapScale: "auto",
       }),
     ).toEqual({
       type: "LOBBY_CONFIG",
+      theme: "mountain_spine",
       mapScale: "auto",
     });
 
