@@ -262,11 +262,18 @@ function chooseMoveTarget(
 ): Vec3 {
   const hazards = state.hazards ?? [];
   const isGrand = world.mapScale === "grand";
-  const walkReach = isGrand ? 10.5 : 6.5;
+  const staminaFrac = clamp(bot.moveStamina / 100, 0, 1);
+  const maxTurnDist =
+    bot.maxMoveDistance > 0 ? bot.maxMoveDistance : isGrand ? 20.0 : 14.0;
+  const remainingStaminaDist = staminaFrac * maxTurnDist;
+  if (remainingStaminaDist < 0.5) {
+    return { ...bot.position };
+  }
+  const walkReach = Math.min(isGrand ? 10.5 : 6.5, remainingStaminaDist);
 
   // 1. Opportunistically grab nearby uncollected Evo Pods safely above water
   let bestPodPos: Vec3 | null = null;
-  let bestPodDist = isGrand ? 20.0 : 12.0;
+  let bestPodDist = Math.min(isGrand ? 20.0 : 12.0, remainingStaminaDist + 2.0);
   for (const pod of state.evoPods) {
     if (pod.collected || pod.position.y <= state.waterLevel + 1.0) {
       continue;
@@ -287,7 +294,7 @@ function chooseMoveTarget(
       bot.position,
       bestPodPos.x,
       bestPodPos.z,
-      walkReach + 1.0,
+      Math.min(walkReach + 1.0, remainingStaminaDist),
       state.waterLevel,
       hazards,
     );
@@ -301,12 +308,12 @@ function chooseMoveTarget(
     }
   }
 
-  // 2. Retreat inward/uphill if near rising water or outer sudden-death crumble zone
+  // 2. Retreat inward/uphill if near rising water or outer sudden-death crumble zone (Cycle 9+)
   const radialFromCenter = Math.hypot(
     bot.position.x - world.centerX,
     bot.position.z - world.centerZ,
   );
-  const suddenDeathWarnTurn = isGrand ? 7 : 5;
+  const suddenDeathWarnTurn = Math.max(1, state.critters.length) * 8;
   const safeInnerRadius = isGrand ? 56.0 : 22.5;
   if (
     bot.position.y < state.waterLevel + 2.2 ||

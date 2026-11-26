@@ -299,6 +299,7 @@ describe("CritterRig & TerrainRenderer", () => {
     vfx.spawnExplosion({ x: 10, y: 6, z: 12 }, 2.2, false);
     vfx.spawnBarrelExplosion({ x: 24, y: 10, z: 26 }, 2.8);
     vfx.spawnGeyserBurst({ x: 18, y: 4, z: 22 });
+    vfx.spawnGrappleBeam({ x: 8, y: 6, z: 8 }, { x: 16, y: 12, z: 10 });
     vfx.spawnSplash({ x: 4, y: 2, z: 12 });
     vfx.updateWindRibbons({ x: 2.5, y: 0, z: -1.0 }, 0.05);
     vfx.setProjectileVisual({ x: 11, y: 8, z: 12 }, 0xff9933);

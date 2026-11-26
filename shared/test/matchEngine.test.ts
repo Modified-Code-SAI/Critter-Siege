@@ -58,8 +58,10 @@ function makeDummyCritter(overrides: Partial<CritterState> & { id: string }): Cr
     velocity: { x: 0, y: 0, z: 0 },
     yaw: 0,
     pitch: 0,
-    hp: 100,
-    maxHp: 100,
+    hp: 240,
+    maxHp: 240,
+    moveStamina: 100,
+    maxMoveDistance: 14,
     alive: true,
     evoCharge: 0,
     pendingEvoDraft: false,
@@ -68,7 +70,7 @@ function makeDummyCritter(overrides: Partial<CritterState> & { id: string }): Cr
     gadgetCharges: {
       gale_mortar: null,
       quake_club: null,
-      vine_grapple: 2,
+      vine_grapple: 6,
       spore_burst: 2,
       burrow_bore: 2,
       seeker_firefly: 1,
@@ -84,10 +86,59 @@ function makeDummyCritter(overrides: Partial<CritterState> & { id: string }): Cr
     droneNudgeUsedThisTurn: false,
     retreatBurrowUsedThisTurn: false,
     skyBomberDropUsedThisTurn: false,
+    grappleUsedThisTurn: false,
     colorIndex: 0,
     color: "#e67e22",
     ...overrides,
   };
+}
+
+function advanceAndWalkTo(
+  engine: MatchEngine,
+  playerId: string,
+  target: { x: number; y: number; z: number },
+  maxTicks = 30,
+  stopWhen?: (events: ReturnType<MatchEngine["applyMove"]>) => boolean,
+): ReturnType<MatchEngine["applyMove"]> {
+  const collected: ReturnType<MatchEngine["applyMove"]> = [];
+  for (let i = 0; i < maxTicks; i++) {
+    const snap = engine.getSnapshot();
+    const tickSec = snap.mapScale === "grand" ? 36 : 29;
+    if (snap.phase === "MATCH_OVER" || snap.phase === "ROUND_DRAFT") {
+      break;
+    }
+    if (snap.phase === "DRAFT_IF_READY") {
+      for (const d of snap.pendingDrafts) {
+        const opt = d.options[0];
+        if (opt) engine.applyMutationPick(d.playerId, opt);
+      }
+      continue;
+    }
+    if (snap.activePlayerId !== playerId || snap.phase !== "ACTIVE") {
+      engine.tick(tickSec);
+      continue;
+    }
+    const me = snap.critters.find((c) => c.id === playerId);
+    if (!me || !me.alive) break;
+    const dist = Math.hypot(target.x - me.position.x, target.z - me.position.z);
+    if (dist <= 0.15) {
+      const evs = engine.applyMove(playerId, target, 0, 0);
+      collected.push(...evs);
+      break;
+    }
+    const evs = engine.applyMove(playerId, target, 0, 0);
+    collected.push(...evs);
+    if (stopWhen && stopWhen(evs)) {
+      break;
+    }
+    const after = engine.getSnapshot().critters.find((c) => c.id === playerId);
+    if (!after || !after.alive) break;
+    if (Math.hypot(target.x - after.position.x, target.z - after.position.z) <= 0.15) {
+      break;
+    }
+    engine.tick(tickSec);
+  }
+  return collected;
 }
 
 describe("Ballistics & gadget simulation (physics.ts)", () => {
@@ -382,7 +433,9 @@ describe("Authoritative MatchEngine turn state machine & review edge cases", () 
     expect(afterGrapple.phase).toBe("ACTIVE");
     expect(afterGrapple.activePlayerId).toBe("p1");
     const movedP1 = afterGrapple.critters.find((c) => c.id === "p1");
-    expect(movedP1?.gadgetCharges.vine_grapple).toBe(1);
+    expect(movedP1?.gadgetCharges.vine_grapple).toBe(5);
+    expect(movedP1?.grappleUsedThisTurn).toBe(true);
+    expect(movedP1?.moveStamina).toBe(100);
     if (movedP1) {
       const movedDist = Math.hypot(
         movedP1.position.x - p1.position.x,
@@ -409,12 +462,14 @@ describe("Authoritative MatchEngine turn state machine & review edge cases", () 
     expect(retreat.phase).toBe("RETREAT");
     expect(retreat.phaseTimeRemainingSec).toBe(6);
     expect(retreat.activePlayerId).toBe("p1");
+    expect(retreat.critters.find((c) => c.id === "p1")?.moveStamina).toBe(40);
 
     // Retreat timer expiring transitions to next player's ACTIVE turn
     engine.tick(6.1);
     const nextTurn = engine.getSnapshot();
     expect(nextTurn.phase).toBe("ACTIVE");
     expect(nextTurn.activePlayerId).toBe("p2");
+    expect(nextTurn.critters.find((c) => c.id === "p2")?.moveStamina).toBe(100);
   });
 
   it("Review Focus #2 (Self-KO): firing straight down to KO self skips RETREAT and awards 0 KO points", () => {
@@ -431,14 +486,26 @@ describe("Authoritative MatchEngine turn state machine & review edge cases", () 
     expect(engine.getSnapshot().mapScale).toBe("grand");
     expect(engine.getSnapshot().phaseTimeRemainingSec).toBe(35);
 
-    // Chip p1 down via self-blasts straight down at own feet until self-KO
+    // Chip p1 down via vertical drops & self-blasts straight down at own feet until self-KO
     let selfKoResolved = false;
-    for (let attempt = 0; attempt < 20; attempt++) {
+    for (let attempt = 0; attempt < 36; attempt++) {
       const snap = engine.getSnapshot();
       if (snap.activePlayerId !== "p1") {
         // Advance other players' turns by timing out ACTIVE (35s on grand)
         engine.tick(36);
         continue;
+      }
+
+      const p1Curr = snap.critters.find((c) => c.id === "p1");
+      if (p1Curr && p1Curr.hp > 60) {
+        // Chip down with purely vertical fall drops (0 moveStamina spent) so self-blast KOs cleanly
+        const base = { ...p1Curr.position };
+        for (let drop = 0; drop < 8; drop++) {
+          const cur = engine.getSnapshot().critters.find((c) => c.id === "p1");
+          if (!cur || !cur.alive || cur.hp <= 25) break;
+          engine.applyMove("p1", { x: base.x, y: base.y + 15.0, z: base.z }, 0, 0);
+          engine.applyMove("p1", base, 0, 0);
+        }
       }
 
       engine.applyFire("p1", {
@@ -495,51 +562,70 @@ describe("Authoritative MatchEngine turn state machine & review edge cases", () 
     expect(a2Pos).toBeDefined();
     if (!a2Pos) return;
 
-    // Move A1 adjacent to A2 and KO A2 via friendly fire before Sudden Death crumbles the rim
+    // Advance A1 toward A2 across turns (respecting stamina & 1/turn grapple) and KO A2 via friendly fire
     let a2Ko = false;
-    for (let guard = 0; guard < 18 && !a2Ko; guard++) {
+    for (let guard = 0; guard < 28 && !a2Ko; guard++) {
       const snap = engine.getSnapshot();
       const active = snap.activePlayerId;
       if (active === "A2") {
-        // Chip A2 down so A1's friendly-fire Quake Club strike finishes A2 cleanly on Turn 5
+        // Chip A2 down cleanly via vertical drops so A1's Quake Club finishes A2 on arrival
         const a2Curr = snap.critters.find((c) => c.id === "A2");
-        if (a2Curr && a2Curr.hp > 50) {
+        if (a2Curr && a2Curr.hp > 20) {
           const base = { ...a2Curr.position };
-          engine.applyMove("A2", { x: base.x, y: base.y + 15.0, z: base.z }, 0, 0);
-          engine.applyMove("A2", base, 0, 0);
-          engine.applyFire("A2", {
-            gadgetId: "gale_mortar",
-            direction: { x: 0, y: -1, z: 0 },
-            power: 0.25,
-          });
-          engine.completeResolving();
-          if (engine.getSnapshot().phase === "RETREAT") {
-            engine.tick(6.1);
+          for (let d = 0; d < 9; d++) {
+            const cur = engine.getSnapshot().critters.find((c) => c.id === "A2");
+            if (!cur || !cur.alive || cur.hp <= 15) break;
+            engine.applyMove("A2", { x: base.x, y: base.y + 15.0, z: base.z }, 0, 0);
+            engine.applyMove("A2", base, 0, 0);
           }
+          engine.tick(36);
           continue;
         }
       }
       if (active === "A1") {
+        const a1Curr = snap.critters.find((c) => c.id === "A1");
         const a2Curr = snap.critters.find((c) => c.id === "A2");
-        if (a2Curr && a2Curr.alive) {
+        if (a1Curr && a2Curr && a2Curr.alive) {
           const inwardSign = a2Curr.position.x < engine.world.centerX ? 1 : -1;
           const safeX = a2Curr.position.x - inwardSign * 1.5;
           const safeY = engine.world.getSurfaceY(safeX, a2Curr.position.z) ?? a2Curr.position.y;
-          engine.applyMove("A1", { x: safeX, y: safeY, z: a2Curr.position.z }, 0, 0);
-          engine.applyFire("A1", {
-            gadgetId: "quake_club",
-            direction: { x: inwardSign, y: 0.1, z: 0 },
-            power: 1.0,
-          });
-          engine.completeResolving();
-          if (engine.getSnapshot().phase === "RETREAT") {
-            engine.tick(6.1);
+          const goal = { x: safeX, y: safeY, z: a2Curr.position.z };
+          // Grapple toward teammate (free!) then walk remaining stamina distance
+          const dx = goal.x - a1Curr.position.x;
+          const dz = goal.z - a1Curr.position.z;
+          if (Math.hypot(dx, dz) > 20) {
+            engine.applyUtility("A1", {
+              gadgetId: "vine_grapple",
+              direction: { x: dx, y: 0.1, z: dz },
+              target: goal,
+            });
           }
-          const post = engine.getSnapshot();
-          if (!post.critters.find((c) => c.id === "A2")?.alive) {
-            a2Ko = true;
+          engine.applyMove("A1", goal, 0, 0);
+
+          const a1AfterMove = engine.getSnapshot().critters.find((c) => c.id === "A1");
+          if (
+            a1AfterMove &&
+            Math.hypot(
+              a1AfterMove.position.x - a2Curr.position.x,
+              a1AfterMove.position.z - a2Curr.position.z,
+            ) <= 2.4 &&
+            a2Curr.hp <= 24
+          ) {
+            engine.applyFire("A1", {
+              gadgetId: "quake_club",
+              direction: { x: inwardSign, y: 0.1, z: 0 },
+              power: 1.0,
+            });
+            engine.completeResolving();
+            if (engine.getSnapshot().phase === "RETREAT") {
+              engine.tick(6.1);
+            }
+            const post = engine.getSnapshot();
+            if (!post.critters.find((c) => c.id === "A2")?.alive) {
+              a2Ko = true;
+            }
+            continue;
           }
-          continue;
         }
       }
       engine.tick(36);
@@ -599,30 +685,50 @@ describe("Authoritative MatchEngine turn state machine & review edge cases", () 
     // Advance turns so Evo Pods spawn on Turn 2 & Turn 4 (28s on Duel)
     engine.tick(29); // Turn 2 -> p2, spawns Pod #1
     expect(engine.getSnapshot().evoPods.length).toBeGreaterThanOrEqual(1);
-    engine.tick(29); // Turn 3 -> p1
-    engine.tick(29); // Turn 4 -> p2, spawns Pod #2
-    engine.tick(29); // Turn 5 -> p1 (now >= 2 uncollected pods exist!)
-
-    const beforeCollect = engine.getSnapshot();
-    expect(beforeCollect.activePlayerId).toBe("p1");
-    expect(beforeCollect.phase).toBe("ACTIVE");
-    const uncollected = beforeCollect.evoPods.filter((p) => !p.collected);
-    expect(uncollected.length).toBeGreaterThanOrEqual(2);
-
-    const pod1 = uncollected[0];
-    const pod2 = uncollected[1];
+    const pod1 = engine.getSnapshot().evoPods[0];
     expect(pod1).toBeDefined();
-    expect(pod2).toBeDefined();
-    if (!pod1 || !pod2) return;
+    if (!pod1) return;
 
-    // Tick 2s into ACTIVE turn so timer is 26s
+    // Walk p1 to Pod #1 (+50% Evo Charge) cleanly respecting stamina budget
+    const ev1 = advanceAndWalkTo(engine, "p1", { ...pod1.position });
+    expect(ev1.some((e) => e.type === "EVO_POD_COLLECTED")).toBe(true);
+
+    // Ensure a 2nd uncollected Evo Pod has spawned
+    for (let guard = 0; guard < 10; guard++) {
+      const s = engine.getSnapshot();
+      if (s.activePlayerId === "p1" && s.evoPods.some((p) => !p.collected)) {
+        break;
+      }
+      engine.tick(29);
+    }
+
+    const pod2 = engine.getSnapshot().evoPods.find((p) => !p.collected);
+    expect(pod2).toBeDefined();
+    if (!pod2) return;
+
+    // Walk close enough to Pod #2 so the final pickup happens on an ACTIVE turn whose timer we inspect
+    for (let guard = 0; guard < 10; guard++) {
+      const s = engine.getSnapshot();
+      if (s.activePlayerId !== "p1") {
+        engine.tick(29);
+        continue;
+      }
+      const p1 = s.critters.find((c) => c.id === "p1");
+      if (!p1) break;
+      if (Math.hypot(pod2.position.x - p1.position.x, pod2.position.z - p1.position.z) <= p1.maxMoveDistance) {
+        break;
+      }
+      engine.applyMove("p1", { ...pod2.position }, 0, 0);
+      engine.tick(29);
+    }
+
+    // Tick 2s into ACTIVE turn so timer is 26s, then collect Pod #2 (+50% -> 100% Evo)
+    expect(engine.getSnapshot().activePlayerId).toBe("p1");
+    expect(engine.getSnapshot().phase).toBe("ACTIVE");
     engine.tick(2.0);
     expect(engine.getSnapshot().phaseTimeRemainingSec).toBeCloseTo(26.0, 2);
 
-    // Collect Pod 1 (+50% charge) and Pod 2 (+50% -> 100% charge) during ACTIVE
-    const ev1 = engine.applyMove("p1", { ...pod1.position }, 0, 0);
     const ev2 = engine.applyMove("p1", { ...pod2.position }, 0, 0);
-    expect(ev1.some((e) => e.type === "EVO_POD_COLLECTED")).toBe(true);
     expect(ev2.some((e) => e.type === "EVO_POD_COLLECTED")).toBe(true);
 
     // MUST NOT interrupt ACTIVE phase or timer!
@@ -677,7 +783,7 @@ describe("Authoritative MatchEngine turn state machine & review edge cases", () 
     let podsCollectedThisRound = 0;
     let lastRoundSeen = 1;
 
-    for (let step = 0; step < 80 && !sawSwapDraft; step++) {
+    for (let step = 0; step < 160 && !sawSwapDraft; step++) {
       const snap = fullEngine.getSnapshot();
       if (snap.phase === "MATCH_OVER") break;
       if (snap.round !== lastRoundSeen) {
@@ -736,12 +842,34 @@ describe("Authoritative MatchEngine turn state machine & review edge cases", () 
       }
 
       if (snap.phase === "ACTIVE" && snap.activePlayerId === "p1") {
-        const pods = snap.evoPods.filter((p) => !p.collected);
-        for (const pod of pods) {
-          if (fullEngine.getSnapshot().critters.find((c) => c.id === "p1")?.alive) {
-            const evs = fullEngine.applyMove("p1", { ...pod.position }, 0, 0);
-            if (evs.some((e) => e.type === "EVO_POD_COLLECTED")) {
-              podsCollectedThisRound += 1;
+        const p1 = snap.critters.find((c) => c.id === "p1");
+        const uncollected = snap.evoPods.filter((p) => !p.collected);
+        if (p1 && p1.alive && uncollected.length > 0) {
+          // Pick nearest uncollected Evo Pod and move/grapple toward it
+          uncollected.sort(
+            (a, b) =>
+              Math.hypot(a.position.x - p1.position.x, a.position.z - p1.position.z) -
+              Math.hypot(b.position.x - p1.position.x, b.position.z - p1.position.z),
+          );
+          const nearest = uncollected[0];
+          if (nearest) {
+            const dx = nearest.position.x - p1.position.x;
+            const dz = nearest.position.z - p1.position.z;
+            if (Math.hypot(dx, dz) > 12 && (p1.gadgetCharges.vine_grapple ?? 0) > 0) {
+              const uEvs = fullEngine.applyUtility("p1", {
+                gadgetId: "vine_grapple",
+                direction: { x: dx, y: 0.1, z: dz },
+                target: { ...nearest.position },
+              });
+              if (uEvs.some((e) => e.type === "EVO_POD_COLLECTED")) {
+                podsCollectedThisRound += 1;
+              }
+            }
+            if (fullEngine.getSnapshot().critters.find((c) => c.id === "p1")?.alive) {
+              const evs = fullEngine.applyMove("p1", { ...nearest.position }, 0, 0);
+              if (evs.some((e) => e.type === "EVO_POD_COLLECTED")) {
+                podsCollectedThisRound += 1;
+              }
             }
           }
         }
@@ -751,12 +879,17 @@ describe("Authoritative MatchEngine turn state machine & review edge cases", () 
         podsCollectedThisRound >= 2 &&
         snap.round < 3
       ) {
-        fullEngine.applyMove(
-          "p2",
-          { x: WORLD_CENTER_X, y: snap.waterLevel - 0.5, z: WORLD_CENTER_Z },
-          0,
-          0,
-        );
+        // KO p2 via purely vertical drops (0 moveStamina spent) to enter ROUND_DRAFT
+        const p2 = snap.critters.find((c) => c.id === "p2");
+        if (p2) {
+          const base = { ...p2.position };
+          for (let d = 0; d < 16; d++) {
+            const cur = fullEngine.getSnapshot().critters.find((c) => c.id === "p2");
+            if (!cur || !cur.alive) break;
+            fullEngine.applyMove("p2", { x: base.x, y: base.y + 15.0, z: base.z }, 0, 0);
+            fullEngine.applyMove("p2", base, 0, 0);
+          }
+        }
         continue;
       }
       fullEngine.tick(29);
@@ -767,20 +900,38 @@ describe("Authoritative MatchEngine turn state machine & review edge cases", () 
     expect(sawTrailingReroll).toBe(true);
   });
 
-  it("raises water +0.65m/turn from Turn 8+ on Grand (Turn 6+ on Duel), drowns submerged critters, enforces 1-per-turn drone wind nudge, and plans valid bot aim", () => {
-    // 2p Duel: Sudden Death starts on Turn 6+
+  it("guarantees 8 turns per player (Water Rescue Parachute -35 HP in Cycles 1-8), raises water +0.65m/turn from Cycle 9+ Sudden Death, drowns lethally in Cycle 9+, enforces 1-per-turn drone wind nudge, and plans valid bot aim", () => {
+    // 2p Duel: Cycles 1-8 = Turns 1..16 (water stays calm + water contact rescues for -35 HP!); Cycle 9 = Turn 17
     const duelEngine = new MatchEngine(makeBaseConfig());
     const duelStartWater = duelEngine.getSnapshot().waterLevel;
-    for (let t = 2; t <= 5; t++) {
+    const duelP1Init = duelEngine.getSnapshot().critters.find((c) => c.id === "p1");
+    expect(duelP1Init).toBeDefined();
+    if (!duelP1Init) return;
+
+    // Cycle 1 early water plunge -> Parachute Rescue (-35 HP, survives on dry ground!)
+    const rescueEvs = duelEngine.applyMove(
+      "p1",
+      { x: duelP1Init.position.x, y: duelStartWater - 0.3, z: duelP1Init.position.z },
+      0,
+      0,
+    );
+    expect(rescueEvs.some((e) => e.type === "WATER_RESCUED")).toBe(true);
+    const afterRescue = duelEngine.getSnapshot().critters.find((c) => c.id === "p1");
+    expect(afterRescue?.alive).toBe(true);
+    expect(afterRescue?.hp).toBe(duelP1Init.hp - 35);
+    expect((afterRescue?.position.y ?? 0)).toBeGreaterThan(duelStartWater + 1.0);
+
+    for (let t = 2; t <= 16; t++) {
       duelEngine.tick(29);
+      expect(duelEngine.getSnapshot().turnNumber).toBe(t);
       expect(duelEngine.getSnapshot().waterLevel).toBe(duelStartWater);
     }
-    const duelT6Events = duelEngine.tick(29);
-    expect(duelEngine.getSnapshot().turnNumber).toBe(6);
+    const duelCycle9Events = duelEngine.tick(29);
+    expect(duelEngine.getSnapshot().turnNumber).toBe(17);
     expect(duelEngine.getSnapshot().waterLevel).toBeCloseTo(duelStartWater + 0.65, 4);
-    expect(duelT6Events.some((e) => e.type === "WATER_ROSE")).toBe(true);
+    expect(duelCycle9Events.some((e) => e.type === "WATER_ROSE")).toBe(true);
 
-    // 3p Grand: Sudden Death starts on Turn 8+
+    // 3p Grand: Cycles 1-8 = Turns 1..24; Sudden Death begins at Cycle 9 (Turn 25)
     const engine = new MatchEngine(
       makeBaseConfig({
         players: [
@@ -793,28 +944,31 @@ describe("Authoritative MatchEngine turn state machine & review edge cases", () 
 
     expect(engine.getSnapshot().mapScale).toBe("grand");
     const startWater = engine.getSnapshot().waterLevel;
-    // Turns 1 -> 7: water stays constant on Grand (144m)
-    for (let t = 2; t <= 7; t++) {
+    // Turns 1 -> 24 (Cycles 1..8): water stays constant on 3p Grand
+    for (let t = 2; t <= 24; t++) {
       engine.tick(36);
       expect(engine.getSnapshot().turnNumber).toBe(t);
       expect(engine.getSnapshot().waterLevel).toBe(startWater);
     }
 
-    // Turn 7 -> 8: water rises +0.65m and emits WATER_ROSE
-    const turn8Events = engine.tick(36);
-    expect(engine.getSnapshot().turnNumber).toBe(8);
+    // Turn 24 -> 25 (Cycle 9): water rises +0.65m and emits WATER_ROSE
+    const cycle9Events = engine.tick(36);
+    expect(engine.getSnapshot().turnNumber).toBe(25);
     expect(engine.getSnapshot().waterLevel).toBeCloseTo(startWater + 0.65, 4);
-    expect(turn8Events.some((e) => e.type === "WATER_ROSE")).toBe(true);
+    expect(cycle9Events.some((e) => e.type === "WATER_ROSE")).toBe(true);
 
-    // Advance to p1's turn and drown active critter (p1) by moving below waterLevel
+    // Advance to p1's turn in Cycle 9+ and drown p1 lethally by plunging straight below waterLevel
     for (let i = 0; i < 3 && engine.getSnapshot().activePlayerId !== "p1"; i++) {
       engine.tick(36);
     }
     const snapP1 = engine.getSnapshot();
     expect(snapP1.activePlayerId).toBe("p1");
+    const p1Pos = snapP1.critters.find((c) => c.id === "p1")?.position;
+    expect(p1Pos).toBeDefined();
+    if (!p1Pos) return;
     engine.applyMove(
       "p1",
-      { x: engine.world.centerX, y: snapP1.waterLevel - 0.2, z: engine.world.centerZ },
+      { x: p1Pos.x, y: snapP1.waterLevel - 0.2, z: p1Pos.z },
       0,
       0,
     );
@@ -860,7 +1014,8 @@ describe("Authoritative MatchEngine turn state machine & review edge cases", () 
       id: "enemy",
       species: "norway_rat",
       position: { x: s0.x, y: s0.y, z: s0.z },
-      hp: 100,
+      hp: 230,
+      maxHp: 230,
     });
 
     // Twin Shoulder Pod adds secondary mini-dart blast on direct hit
@@ -937,7 +1092,7 @@ describe("Authoritative MatchEngine turn state machine & review edge cases", () 
     }
   });
 
-  it("drowns an outer-edge critter when Turn 8+ grand cliff crumble leaves open ocean below and handles vine_grapple water plunge", () => {
+  it("drowns an outer-edge critter when Cycle 9+ grand cliff crumble leaves open ocean below and handles Cycle 9+ vine_grapple water plunge", () => {
     const engine = new MatchEngine(
       makeBaseConfig({
         players: [
@@ -950,26 +1105,27 @@ describe("Authoritative MatchEngine turn state machine & review edge cases", () 
 
     expect(engine.getSnapshot().mapScale).toBe("grand");
 
-    // Move p1 out onto the far outer rim (radius > 66m from center 72,72) high above waterLevel
-    engine.applyMove("p1", { x: 141.5, y: 12.0, z: engine.world.centerZ }, 0, 0);
+    // Walk p1 outward onto the far rim (radius > 66m from center 72,72) across turns respecting stamina
+    const rimGoal = { x: 141.5, y: 12.0, z: engine.world.centerZ };
+    advanceAndWalkTo(engine, "p1", rimGoal, 20);
     expect(engine.getSnapshot().critters.find((c) => c.id === "p1")?.alive).toBe(true);
 
-    // Advance Turns 1 -> 8 so crumbleOuterRing(66.0) erodes the rim under p1 (surfY === null)
-    for (let t = 2; t <= 8; t++) {
+    // Advance to Cycle 9 (Turn 25 in 3p Grand) so crumbleOuterRing(66.0) erodes the rim under p1 (surfY === null)
+    while (engine.getSnapshot().turnNumber < 25) {
       engine.tick(36);
     }
 
-    const snap8 = engine.getSnapshot();
-    const p1AfterCrumble = snap8.critters.find((c) => c.id === "p1");
+    const snap25 = engine.getSnapshot();
+    const p1AfterCrumble = snap25.critters.find((c) => c.id === "p1");
     expect(p1AfterCrumble?.alive).toBe(false);
     expect(p1AfterCrumble?.hp).toBe(0);
-    expect(p1AfterCrumble?.position.y).toBeLessThanOrEqual(snap8.waterLevel);
+    expect(p1AfterCrumble?.position.y).toBeLessThanOrEqual(snap25.waterLevel);
 
-    // Verify vine_grapple targeting below waterLevel drowns the active critter cleanly
-    const activeId = snap8.activePlayerId;
+    // Verify vine_grapple targeting below waterLevel during Cycle 9+ Sudden Death drowns lethally
+    const activeId = snap25.activePlayerId;
     expect(activeId).not.toBeNull();
     if (!activeId) return;
-    const activeCritter = snap8.critters.find((c) => c.id === activeId);
+    const activeCritter = snap25.critters.find((c) => c.id === activeId);
     expect(activeCritter).toBeDefined();
     if (!activeCritter) return;
 
@@ -978,7 +1134,7 @@ describe("Authoritative MatchEngine turn state machine & review edge cases", () 
       direction: { x: 0, y: -1, z: 0 },
       target: {
         x: activeCritter.position.x,
-        y: snap8.waterLevel - 0.5,
+        y: snap25.waterLevel - 0.5,
         z: activeCritter.position.z,
       },
     });
@@ -1009,7 +1165,13 @@ describe("Authoritative MatchEngine turn state machine & review edge cases", () 
     if (!barrel || !geyser || !thorn) return;
 
     // 1. Stepping onto a Thermal Steam Geyser catapults critter skyward and emits HAZARD_TRIGGERED
-    const geyserEvents = engine.applyMove("p1", { ...geyser.position }, 0, 0);
+    const geyserEvents = advanceAndWalkTo(
+      engine,
+      "p1",
+      { ...geyser.position },
+      16,
+      (evs) => evs.some((e) => e.type === "HAZARD_TRIGGERED" && e.hazardType === "steam_geyser"),
+    );
     const geyserEv = geyserEvents.find(
       (e) => e.type === "HAZARD_TRIGGERED" && e.hazardType === "steam_geyser",
     );
@@ -1025,8 +1187,14 @@ describe("Authoritative MatchEngine turn state machine & review edge cases", () 
     }
 
     // 2. Stepping into a Bramble Thorn Patch deals 12 damage + nudge, with 1-per-turn cooldown
-    const hpBeforeThorn = p1AfterGeyser?.hp ?? 100;
-    const thornEvents1 = engine.applyMove("p1", { ...thorn.position }, 0, 0);
+    const hpBeforeThorn = p1AfterGeyser?.hp ?? 240;
+    const thornEvents1 = advanceAndWalkTo(
+      engine,
+      "p1",
+      { ...thorn.position },
+      16,
+      (evs) => evs.some((e) => e.type === "HAZARD_TRIGGERED" && e.hazardType === "thorn_patch"),
+    );
     const thornEv1 = thornEvents1.find(
       (e) => e.type === "HAZARD_TRIGGERED" && e.hazardType === "thorn_patch",
     );
@@ -1069,9 +1237,9 @@ describe("Authoritative MatchEngine turn state machine & review edge cases", () 
       y: barrel.position.y + 0.2,
       z: barrel.position.z,
     };
-    engine.applyMove("p1", shooterPos, 0, 0);
+    advanceAndWalkTo(engine, "p1", shooterPos);
     const hpBeforeBarrel =
-      engine.getSnapshot().critters.find((c) => c.id === "p1")?.hp ?? 100;
+      engine.getSnapshot().critters.find((c) => c.id === "p1")?.hp ?? 240;
 
     const fireEvents = engine.applyFire("p1", {
       gadgetId: "gale_mortar",
@@ -1106,7 +1274,7 @@ describe("Authoritative MatchEngine turn state machine & review edge cases", () 
     }
   });
 
-  it("scales grand matches with 35s turns, 26m/3-charge vine grapple, x1.35 blast carves, and explicit mapScale overrides", () => {
+  it("scales grand matches with 35s turns, 26m/6-charge vine grapple, x1.35 blast carves, and explicit mapScale overrides", () => {
     // Explicit 'grand' override on a 2-player match
     const grandEngine = new MatchEngine(
       makeBaseConfig({
@@ -1121,7 +1289,7 @@ describe("Authoritative MatchEngine turn state machine & review edge cases", () 
     expect(grandEngine.world.worldDepth).toBe(144);
 
     const p1 = grandSnap.critters.find((c) => c.id === "p1");
-    expect(p1?.gadgetCharges.vine_grapple).toBe(3);
+    expect(p1?.gadgetCharges.vine_grapple).toBe(6);
 
     if (p1) {
       // 26m grand Vine Grapple reach
@@ -1138,7 +1306,7 @@ describe("Authoritative MatchEngine turn state machine & review edge cases", () 
         },
       });
       const moved = grandEngine.getSnapshot().critters.find((c) => c.id === "p1");
-      expect(moved?.gadgetCharges.vine_grapple).toBe(2);
+      expect(moved?.gadgetCharges.vine_grapple).toBe(5);
       if (moved) {
         const horizMoved = Math.hypot(
           moved.position.x - p1.position.x,
@@ -1188,24 +1356,30 @@ describe("Authoritative MatchEngine turn state machine & review edge cases", () 
     );
 
     const init = engine.getSnapshot();
-    const mine = (init.hazards ?? []).find((h) => h.type === "spark_mine");
+    const p1Before = init.critters.find((c) => c.id === "p1");
+    expect(p1Before).toBeDefined();
+    if (!p1Before) return;
+
+    const mines = (init.hazards ?? []).filter((h) => h.type === "spark_mine");
+    mines.sort(
+      (a, b) =>
+        Math.hypot(a.position.x - p1Before.position.x, a.position.z - p1Before.position.z) -
+        Math.hypot(b.position.x - p1Before.position.x, b.position.z - p1Before.position.z),
+    );
+    const mine = mines[0];
     expect(mine).toBeDefined();
     if (!mine) return;
     expect(mine.active).toBe(true);
     expect(mine.radius).toBe(2.4);
 
-    const p1Before = init.critters.find((c) => c.id === "p1");
-    expect(p1Before).toBeDefined();
-    if (!p1Before) return;
-    const hpBefore = p1Before.hp;
-
-    // Step within 2.4m of the active spark_mine -> arms & detonates!
+    // Walk within 2.4m of the active spark_mine -> arms & detonates!
     const stepPos = {
       x: mine.position.x + 1.2,
       y: mine.position.y,
       z: mine.position.z,
     };
-    const events = engine.applyMove("p1", stepPos, 0, 0);
+    const hpBefore = p1Before.hp;
+    const events = advanceAndWalkTo(engine, "p1", stepPos);
 
     const triggerEv = events.find(
       (e) => e.type === "HAZARD_TRIGGERED" && e.hazardType === "spark_mine",
@@ -1335,6 +1509,218 @@ describe("Authoritative MatchEngine turn state machine & review edge cases", () 
     if (normalHit && springHit) {
       expect(normalHit.damage).toBeGreaterThanOrEqual(14);
       expect(springHit.damage).toBe(Math.round(normalHit.damage * 0.5));
+    }
+  });
+
+  it("caps per-turn walking distance to moveStamina budget (14m Duel / 20m Grand), allows aiming/firing/free grapple+rappel at 0%, grants fresh Retreat dash burst (+45% Armadillo), and refills on next ACTIVE turn", () => {
+    // 1. Duel (60m): Mole = 14m, Norway Rat = 14 * 1.18 = 16.52m, Armadillo Retreat = 5 * 1.45 = 7.25m
+    const duelEngine = new MatchEngine(
+      makeBaseConfig({
+        seed: 4444,
+        theme: "emerald_spire",
+        players: [
+          { id: "p1", name: "Milo", species: "mole", team: 0 },
+          { id: "p2", name: "Remy", species: "norway_rat", team: 1 },
+        ],
+      }),
+    );
+
+    const duelInit = duelEngine.getSnapshot();
+    const p1Start = duelInit.critters.find((c) => c.id === "p1");
+    const p2Start = duelInit.critters.find((c) => c.id === "p2");
+    expect(p1Start?.moveStamina).toBe(100);
+    expect(p1Start?.maxMoveDistance).toBeCloseTo(14.0, 3);
+    expect(p2Start?.maxMoveDistance).toBeCloseTo(14.0 * 1.18, 3);
+    if (!p1Start) return;
+
+    // Attempt to walk 60m in a single ACTIVE turn -> cleanly capped at exactly 14m, stamina hits 0
+    const toCenterX = duelEngine.world.centerX - p1Start.position.x;
+    const toCenterZ = duelEngine.world.centerZ - p1Start.position.z;
+    const norm = Math.hypot(toCenterX, toCenterZ) || 1;
+    const dirX = toCenterX / norm;
+    const dirZ = toCenterZ / norm;
+
+    duelEngine.applyMove(
+      "p1",
+      {
+        x: p1Start.position.x + dirX * 60.0,
+        y: p1Start.position.y,
+        z: p1Start.position.z + dirZ * 60.0,
+      },
+      0.5,
+      0.2,
+    );
+
+    const afterCap = duelEngine.getSnapshot().critters.find((c) => c.id === "p1");
+    expect(afterCap).toBeDefined();
+    if (!afterCap) return;
+    const movedHoriz = Math.hypot(
+      afterCap.position.x - p1Start.position.x,
+      afterCap.position.z - p1Start.position.z,
+    );
+    expect(movedHoriz).toBeCloseTo(14.0, 2);
+    expect(afterCap.moveStamina).toBe(0);
+
+    // Further horizontal walk at 0% stamina is clamped, while yaw/pitch aiming still updates!
+    duelEngine.applyMove(
+      "p1",
+      {
+        x: afterCap.position.x + 10.0,
+        y: afterCap.position.y,
+        z: afterCap.position.z + 10.0,
+      },
+      1.35,
+      -0.25,
+    );
+    const afterZeroAttempt = duelEngine.getSnapshot().critters.find((c) => c.id === "p1");
+    expect(afterZeroAttempt?.position.x).toBeCloseTo(afterCap.position.x, 4);
+    expect(afterZeroAttempt?.position.z).toBeCloseTo(afterCap.position.z, 4);
+    expect(afterZeroAttempt?.yaw).toBeCloseTo(1.35, 4);
+    expect(afterZeroAttempt?.pitch).toBeCloseTo(-0.25, 4);
+    expect(afterZeroAttempt?.moveStamina).toBe(0);
+
+    // At 0% stamina, Vine Grapple (rappel down 6m without fall damage!) STILL works for FREE and emits VINE_GRAPPLED
+    const hpBeforeRappel = afterCap.hp;
+    const rappelTarget = {
+      x: afterCap.position.x + dirX * 5.0,
+      y: Math.max(duelInit.waterLevel + 1.2, afterCap.position.y - 4.0),
+      z: afterCap.position.z + dirZ * 5.0,
+    };
+    const grappleEvs = duelEngine.applyUtility("p1", {
+      gadgetId: "vine_grapple",
+      direction: { x: dirX, y: -0.5, z: dirZ },
+      target: rappelTarget,
+    });
+    expect(grappleEvs.some((e) => e.type === "VINE_GRAPPLED")).toBe(true);
+    const afterGrapple = duelEngine.getSnapshot().critters.find((c) => c.id === "p1");
+    expect(afterGrapple?.moveStamina).toBe(0);
+    expect(afterGrapple?.gadgetCharges.vine_grapple).toBe(5);
+    expect(afterGrapple?.grappleUsedThisTurn).toBe(true);
+    expect(afterGrapple?.hp).toBe(hpBeforeRappel);
+
+    // Second Vine Grapple in the same turn is blocked (once-per-turn cap)
+    const secondGrappleEvs = duelEngine.applyUtility("p1", {
+      gadgetId: "vine_grapple",
+      direction: { x: dirX, y: 0.2, z: dirZ },
+      target: { x: p1Start.position.x, y: p1Start.position.y, z: p1Start.position.z },
+    });
+    expect(secondGrappleEvs).toHaveLength(0);
+    expect(
+      duelEngine.getSnapshot().critters.find((c) => c.id === "p1")?.gadgetCharges.vine_grapple,
+    ).toBe(5);
+
+    // At 0% stamina, critter can STILL fire and enters RETREAT with fresh 40% (5m) retreat dash burst!
+    const fireEvs = duelEngine.applyFire("p1", {
+      gadgetId: "gale_mortar",
+      direction: { x: dirX, y: 0.85, z: dirZ },
+      power: 0.4,
+    });
+    expect(fireEvs.some((e) => e.type === "SHOT_RESOLVED")).toBe(true);
+    duelEngine.completeResolving();
+
+    const retreatSnap = duelEngine.getSnapshot();
+    expect(retreatSnap.phase).toBe("RETREAT");
+    const p1RetreatStart = retreatSnap.critters.find((c) => c.id === "p1");
+    expect(p1RetreatStart?.moveStamina).toBe(40);
+    if (!p1RetreatStart) return;
+
+    duelEngine.applyMove(
+      "p1",
+      {
+        x: p1RetreatStart.position.x - dirX * 20.0,
+        y: p1RetreatStart.position.y,
+        z: p1RetreatStart.position.z - dirZ * 20.0,
+      },
+      0,
+      0,
+    );
+    const p1AfterRetreat = duelEngine.getSnapshot().critters.find((c) => c.id === "p1");
+    expect(p1AfterRetreat?.moveStamina).toBe(0);
+    if (p1AfterRetreat) {
+      const retreatDist = Math.hypot(
+        p1AfterRetreat.position.x - p1RetreatStart.position.x,
+        p1AfterRetreat.position.z - p1RetreatStart.position.z,
+      );
+      expect(retreatDist).toBeCloseTo(5.0, 2);
+    }
+
+    // Advance through RETREAT + p2's turn -> p1's next ACTIVE turn refills moveStamina to 100 and resets grapple!
+    duelEngine.tick(6.5); // -> p2 ACTIVE
+    duelEngine.tick(29.0); // -> p1 ACTIVE
+    const p1NextTurn = duelEngine.getSnapshot().critters.find((c) => c.id === "p1");
+    expect(duelEngine.getSnapshot().activePlayerId).toBe("p1");
+    expect(p1NextTurn?.moveStamina).toBe(100);
+    expect(p1NextTurn?.grappleUsedThisTurn).toBe(false);
+
+    // 2. Grand (144m): Mole = 20m active budget; Armadillo gets +45% retreat burst (7 * 1.45 = 10.15m)
+    const grandEngine = new MatchEngine(
+      makeBaseConfig({
+        seed: 5555,
+        mapScale: "grand",
+        players: [
+          { id: "a1", name: "Roller", species: "armadillo", team: 0 },
+          { id: "b1", name: "Milo", species: "mole", team: 1 },
+        ],
+      }),
+    );
+    const a1Start = grandEngine.getSnapshot().critters.find((c) => c.id === "a1");
+    expect(a1Start?.maxMoveDistance).toBeCloseTo(20.0, 3);
+    if (!a1Start) return;
+
+    const gToX = grandEngine.world.centerX - a1Start.position.x;
+    const gToZ = grandEngine.world.centerZ - a1Start.position.z;
+    const gNorm = Math.hypot(gToX, gToZ) || 1;
+    grandEngine.applyMove(
+      "a1",
+      {
+        x: a1Start.position.x + (gToX / gNorm) * 60.0,
+        y: a1Start.position.y,
+        z: a1Start.position.z + (gToZ / gNorm) * 60.0,
+      },
+      0,
+      0,
+    );
+    const a1AfterWalk = grandEngine.getSnapshot().critters.find((c) => c.id === "a1");
+    expect(a1AfterWalk?.moveStamina).toBe(0);
+    if (a1AfterWalk) {
+      expect(
+        Math.hypot(
+          a1AfterWalk.position.x - a1Start.position.x,
+          a1AfterWalk.position.z - a1Start.position.z,
+        ),
+      ).toBeCloseTo(20.0, 2);
+    }
+
+    // Armadillo RETREAT burst on Grand = 7.0 * 1.45 = 10.15m
+    grandEngine.applyFire("a1", {
+      gadgetId: "gale_mortar",
+      direction: { x: gToX / gNorm, y: 0.85, z: gToZ / gNorm },
+      power: 0.4,
+    });
+    grandEngine.completeResolving();
+    const a1RetStart = grandEngine.getSnapshot().critters.find((c) => c.id === "a1");
+    expect(a1RetStart?.moveStamina).toBe(40);
+    if (a1RetStart) {
+      grandEngine.applyMove(
+        "a1",
+        {
+          x: a1RetStart.position.x - (gToX / gNorm) * 30.0,
+          y: a1RetStart.position.y,
+          z: a1RetStart.position.z - (gToZ / gNorm) * 30.0,
+        },
+        0,
+        0,
+      );
+      const a1RetEnd = grandEngine.getSnapshot().critters.find((c) => c.id === "a1");
+      expect(a1RetEnd?.moveStamina).toBe(0);
+      if (a1RetEnd) {
+        expect(
+          Math.hypot(
+            a1RetEnd.position.x - a1RetStart.position.x,
+            a1RetEnd.position.z - a1RetStart.position.z,
+          ),
+        ).toBeCloseTo(7.0 * 1.45, 2);
+      }
     }
   });
 });

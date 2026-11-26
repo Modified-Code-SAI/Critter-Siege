@@ -103,6 +103,7 @@ export interface HudFrameState {
   compass?: HudCompassState;
   pointerLocked?: boolean;
   canFire?: boolean;
+  localMoveStamina?: number;
 }
 
 /** Local lobby selection state managed between HudController and main.ts. */
@@ -172,19 +173,19 @@ const SPECIES_BADGE_META: Record<
 
 const MUTATION_STAT_CHIPS: Record<MutationId, readonly [string, string]> = {
   glider_wings: ["+35% Glide", "High Air Control"],
-  bramble_shell: ["+25 Armor", "Knockback Resist"],
-  spring_paws: ["+30% Jump", "Fast Sprint"],
-  anchor_talons: ["Slope Cling", "Brace Stability"],
+  bramble_shell: ["+50 Armor", "Knockback Resist"],
+  spring_paws: ["+30% Jump", "+20% Move Stamina"],
+  anchor_talons: ["+25 HP", "Slope Cling"],
   twin_pod: ["+1 Mini Dart", "Bonus Damage"],
   burrow_claws: ["+35% Carve", "[F] Foxhole"],
   optic_visor: ["Full Arc Sight", "+15% Accuracy"],
-  aegis_crest: ["+25 Shield/Rd", "Blast Guard"],
+  aegis_crest: ["+45 Shield/Rd", "Blast Guard"],
 };
 
 const GADGET_SHORT_TOOLTIP: Record<GadgetId, string> = {
   gale_mortar: "Gale Mortar — Wind-curved explosive crater shell",
   quake_club: "Quake Club — Close-range knockback smash",
-  vine_grapple: "Vine Grapple — Zip cleanly onto high cliffs",
+  vine_grapple: "Vine Grapple — Climb cliffs or rappel safely down (6/rd, 1/turn)",
   spore_burst: "Spore Burst — Triple cluster blast pods",
   burrow_bore: "Burrow Bore — Drills straight through rock walls",
   seeker_firefly: "Seeker Firefly — Homes onto your Drone Ping target",
@@ -599,12 +600,18 @@ export class HudController {
         </div>
         <div class="cs-hp-cluster">
           <div class="cs-hp-num-row">
-            <span class="cs-hp-big" data-ref="bl-hp-text">100</span>
+            <span class="cs-hp-big" data-ref="bl-hp-text">240</span>
             <span class="cs-bl-team cs-hidden" data-ref="bl-team">A</span>
             <span class="cs-bl-shield cs-hidden" data-ref="bl-shield">🛡</span>
           </div>
           <div class="cs-hp-track">
             <div class="cs-hp-fill" data-ref="bl-hp-fill"></div>
+          </div>
+          <div class="cs-move-row" title="Per-turn Walking Stamina (Grapple & Geysers are free!)">
+            <span class="cs-move-label">MOVE</span>
+            <div class="cs-move-track">
+              <div class="cs-move-fill" data-ref="bl-move-fill"></div>
+            </div>
           </div>
         </div>
       </div>
@@ -1036,6 +1043,19 @@ export class HudController {
       this.blHpFillEl.dataset.tier =
         hpPct > 55 ? "high" : hpPct > 25 ? "mid" : "low";
       this.blHpTextEl.textContent = `${Math.ceil(localCritter.hp)}`;
+
+      const moveFillEl = this.blHpFillEl
+        .closest(".cs-hp-cluster")
+        ?.querySelector<HTMLDivElement>('[data-ref="bl-move-fill"]');
+      if (moveFillEl) {
+        const movePct = Math.max(
+          0,
+          Math.min(100, frame.localMoveStamina ?? localCritter.moveStamina),
+        );
+        moveFillEl.style.width = `${movePct.toFixed(1)}%`;
+        moveFillEl.dataset.tier =
+          movePct > 35 ? "high" : movePct > 0 ? "low" : "empty";
+      }
 
       const evoFrac = localCritter.pendingEvoDraft
         ? 1

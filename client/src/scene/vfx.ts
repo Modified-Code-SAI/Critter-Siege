@@ -19,7 +19,7 @@ interface DynamicParticle {
   endScale: number;
   baseScaleVec: THREE.Vector3;
   baseOpacity: number;
-  kind: "shard" | "smoke" | "shockwave" | "flash" | "droplet" | "spark";
+  kind: "shard" | "smoke" | "shockwave" | "flash" | "droplet" | "spark" | "beam";
 }
 
 interface EvoPodVisual {
@@ -103,6 +103,7 @@ export class VfxSystem {
     flash: THREE.SphereGeometry;
     spark: THREE.OctahedronGeometry;
     ribbon: THREE.CylinderGeometry;
+    grappleBeam: THREE.CylinderGeometry;
   };
 
   private readonly particles: DynamicParticle[] = [];
@@ -151,6 +152,7 @@ export class VfxSystem {
       flash: new THREE.SphereGeometry(0.52, 12, 10),
       spark: new THREE.OctahedronGeometry(0.085, 0),
       ribbon: ribbonGeo,
+      grappleBeam: new THREE.CylinderGeometry(0.06, 0.06, 1.0, 8, 1, false),
     };
 
     // Build translucent sunlit wind-stream ribbons spanning the 60m archipelago sky
@@ -680,6 +682,138 @@ export class VfxSystem {
     }
   }
 
+  /** Spawn a glowing 3D emerald-cyan vine/rope tether beam between grapple origin and anchor. */
+  public spawnGrappleBeam(from: Vec3, to: Vec3): void {
+    const start = new THREE.Vector3(from.x, from.y + 0.55, from.z);
+    const end = new THREE.Vector3(to.x, to.y + 0.45, to.z);
+    const delta = end.clone().sub(start);
+    const dist = delta.length();
+    if (!Number.isFinite(dist) || dist < 0.1) {
+      return;
+    }
+
+    const dir = delta.clone().divideScalar(dist);
+    const mid = start.clone().addScaledVector(delta, 0.5);
+    const upY = new THREE.Vector3(0, 1, 0);
+    const quat = new THREE.Quaternion().setFromUnitVectors(upY, dir);
+
+    // Outer luminous emerald vine rope cylinder
+    const outerMat = new THREE.MeshBasicMaterial({
+      color: 0x34d399,
+      transparent: true,
+      opacity: 0.9,
+      depthWrite: false,
+    });
+    const outerMesh = new THREE.Mesh(this.sharedGeos.grappleBeam, outerMat);
+    outerMesh.position.copy(mid);
+    outerMesh.quaternion.copy(quat);
+    outerMesh.scale.set(1.25, dist, 1.25);
+    this.particleGroup.add(outerMesh);
+    this.particles.push({
+      mesh: outerMesh,
+      material: outerMat,
+      velocity: new THREE.Vector3(0, 0, 0),
+      spin: new THREE.Vector3(0, 0, 0),
+      gravity: 0,
+      age: 0,
+      maxAge: 0.68,
+      startScale: 1.25,
+      endScale: 0.2,
+      baseScaleVec: new THREE.Vector3(1, dist, 1),
+      baseOpacity: 0.9,
+      kind: "beam",
+    });
+
+    // Bright inner cyan-white energy core
+    const coreMat = new THREE.MeshBasicMaterial({
+      color: 0xd1fae5,
+      transparent: true,
+      opacity: 0.95,
+      depthWrite: false,
+    });
+    const coreMesh = new THREE.Mesh(this.sharedGeos.grappleBeam, coreMat);
+    coreMesh.position.copy(mid);
+    coreMesh.quaternion.copy(quat);
+    coreMesh.scale.set(0.45, dist, 0.45);
+    this.particleGroup.add(coreMesh);
+    this.particles.push({
+      mesh: coreMesh,
+      material: coreMat,
+      velocity: new THREE.Vector3(0, 0, 0),
+      spin: new THREE.Vector3(0, 0, 0),
+      gravity: 0,
+      age: 0,
+      maxAge: 0.54,
+      startScale: 0.45,
+      endScale: 0.08,
+      baseScaleVec: new THREE.Vector3(1, dist, 1),
+      baseOpacity: 0.95,
+      kind: "beam",
+    });
+
+    // Glowing anchor burst rings at origin & destination
+    for (const pt of [start, end]) {
+      const ringMat = new THREE.MeshBasicMaterial({
+        color: 0x6ee7b7,
+        transparent: true,
+        opacity: 0.92,
+        depthWrite: false,
+      });
+      const ringMesh = new THREE.Mesh(this.sharedGeos.shockRing, ringMat);
+      ringMesh.position.copy(pt);
+      ringMesh.rotation.x = Math.PI * 0.5;
+      this.particleGroup.add(ringMesh);
+      this.particles.push({
+        mesh: ringMesh,
+        material: ringMat,
+        velocity: new THREE.Vector3(0, 0.2, 0),
+        spin: new THREE.Vector3(0, 0, 0),
+        gravity: 0,
+        age: 0,
+        maxAge: 0.45,
+        startScale: 0.35,
+        endScale: 1.45,
+        baseScaleVec: new THREE.Vector3(1, 1, 1),
+        baseOpacity: 0.92,
+        kind: "shockwave",
+      });
+    }
+
+    // Trailing emerald rope sparks spaced cleanly along the tether line
+    const sparkCount = Math.min(10, Math.max(4, Math.floor(dist / 2.2)));
+    for (let i = 0; i < sparkCount; i++) {
+      const frac = (i + 0.5) / sparkCount;
+      const pt = start.clone().addScaledVector(delta, frac);
+      const sparkMat = new THREE.MeshBasicMaterial({
+        color: i % 2 === 0 ? 0x34d399 : 0x5eead4,
+        transparent: true,
+        opacity: 0.92,
+        depthWrite: false,
+      });
+      const sparkMesh = new THREE.Mesh(this.sharedGeos.spark, sparkMat);
+      sparkMesh.position.copy(pt);
+      this.particleGroup.add(sparkMesh);
+      this.particles.push({
+        mesh: sparkMesh,
+        material: sparkMat,
+        velocity: new THREE.Vector3(
+          (this.nextRand() - 0.5) * 1.4,
+          0.6 + this.nextRand() * 1.2,
+          (this.nextRand() - 0.5) * 1.4,
+        ),
+        spin: new THREE.Vector3(6, 7, 5),
+        gravity: 3.2,
+        age: 0,
+        maxAge: 0.45 + this.nextRand() * 0.25,
+        startScale: 1.15,
+        endScale: 0.1,
+        baseScaleVec: new THREE.Vector3(1, 1, 1),
+        baseOpacity: 0.92,
+        kind: "spark",
+      });
+    }
+  }
+
   /** Synchronize glowing cyan Evo Pods and parachutes with authoritative match state. */
   public syncEvoPods(
     pods: readonly EvoPodState[],
@@ -880,11 +1014,19 @@ export class VfxSystem {
       p.mesh.rotation.z += p.spin.z * safeDt;
 
       const s = p.startScale + (p.endScale - p.startScale) * frac;
-      p.mesh.scale.set(
-        p.baseScaleVec.x * s,
-        p.baseScaleVec.y * s,
-        p.baseScaleVec.z * s,
-      );
+      if (p.kind === "beam") {
+        p.mesh.scale.set(
+          p.baseScaleVec.x * s,
+          p.baseScaleVec.y,
+          p.baseScaleVec.z * s,
+        );
+      } else {
+        p.mesh.scale.set(
+          p.baseScaleVec.x * s,
+          p.baseScaleVec.y * s,
+          p.baseScaleVec.z * s,
+        );
+      }
 
       if (
         p.material instanceof THREE.MeshBasicMaterial ||
@@ -942,6 +1084,7 @@ export class VfxSystem {
     this.sharedGeos.flash.dispose();
     this.sharedGeos.spark.dispose();
     this.sharedGeos.ribbon.dispose();
+    this.sharedGeos.grappleBeam.dispose();
   }
 
   private spawnProjectileSpark(position: Vec3, color: number): void {

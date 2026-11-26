@@ -544,4 +544,79 @@ describe("SdfWorld & Surface Nets smooth terrain mesher", () => {
     expect(maxWorldZ).toBeGreaterThan(110);
     expect(elapsedMs).toBeLessThan(2000);
   });
+
+  it("enforces multi-turn spawn spacing (>= 54m on grand), seals dividing bastion gate passes with destructible plugs, and places Blast Barrels near gate seams", () => {
+    for (const theme of ALL_THEMES) {
+      for (const scale of ["duel", "grand"] as const) {
+        const world = new SdfWorld(9001, theme, scale);
+        const isGrand = scale === "grand";
+        const spawns = world.findSpawnPoints(4);
+        expect(spawns).toHaveLength(4);
+
+        // Grand (144m): every spawn pair must be >= 54m apart (> 2 * 26m -> strictly 3+ turns on foot)
+        let minDist = Infinity;
+        for (let i = 0; i < spawns.length; i++) {
+          for (let j = i + 1; j < spawns.length; j++) {
+            const a = spawns[i];
+            const b = spawns[j];
+            if (a && b) {
+              const d = Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
+              if (d < minDist) minDist = d;
+              expect(world.hasDirectLineOfSight(a, b, 1.1)).toBe(false);
+            }
+          }
+        }
+        expect(minDist).toBeGreaterThanOrEqual(isGrand ? 54.0 : 24.0);
+
+        const halfSpan = world.worldWidth * 0.44;
+        const passOffset = theme === "canyon_arch" ? 0.62 : 0.58;
+        const passY = world.worldHeight * 0.165;
+        const gateCenters = [
+          { x: world.centerX, y: passY, z: world.centerZ - passOffset * halfSpan },
+          { x: world.centerX, y: passY, z: world.centerZ + passOffset * halfSpan },
+          { x: world.centerX - passOffset * halfSpan, y: passY, z: world.centerZ },
+          { x: world.centerX + passOffset * halfSpan, y: passY, z: world.centerZ },
+        ];
+
+        // Each gate pass must be sealed by a solid rock gate plug prior to blasting
+        for (const g of gateCenters) {
+          expect(world.isSolid(g.x, g.y, g.z)).toBe(true);
+        }
+
+        // Outer shoreline ends of the 4 dividing walls must remain sealed (no flat coastal walk-around)
+        const coastalY = world.worldHeight * 0.18;
+        const coastDist = 0.96 * halfSpan;
+        expect(world.isSolid(world.centerX, coastalY, world.centerZ - coastDist)).toBe(true);
+        expect(world.isSolid(world.centerX, coastalY, world.centerZ + coastDist)).toBe(true);
+        expect(world.isSolid(world.centerX - coastDist, coastalY, world.centerZ)).toBe(true);
+        expect(world.isSolid(world.centerX + coastDist, coastalY, world.centerZ)).toBe(true);
+
+        // At least 1 Blast Barrel placed near each of the 4 gate seams
+        const hazards = world.findHazardPoints(spawns);
+        const barrels = hazards.filter((h) => h.type === "blast_barrel");
+        expect(barrels.length).toBeGreaterThanOrEqual(4);
+        const maxGateBarrelDist = isGrand ? 16.0 : 9.0;
+        for (const g of gateCenters) {
+          const hasNearbyBarrel = barrels.some(
+            (b) => Math.hypot(b.position.x - g.x, b.position.z - g.z) <= maxGateBarrelDist,
+          );
+          expect(hasNearbyBarrel).toBe(true);
+        }
+
+        // Single Gale Mortar blast cleanly breaches the thin destructible gate plug!
+        const probeGate = gateCenters[0];
+        if (probeGate) {
+          const mortarRadius = isGrand ? 3.2 * 1.35 : 3.2;
+          world.applyCarve({
+            center: { x: probeGate.x, y: probeGate.y, z: probeGate.z },
+            radius: mortarRadius,
+            shape: "sphere",
+          });
+          expect(world.isSolid(probeGate.x, probeGate.y, probeGate.z)).toBe(false);
+          expect(world.isSolid(probeGate.x - 1.4, probeGate.y, probeGate.z)).toBe(false);
+          expect(world.isSolid(probeGate.x + 1.4, probeGate.y, probeGate.z)).toBe(false);
+        }
+      }
+    }
+  }, 15000);
 });

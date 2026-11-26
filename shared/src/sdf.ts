@@ -372,10 +372,93 @@ function evaluateThemeSdf(
   const passY = worldHeight * 0.165;
   const passRadius = isGrand ? 2.55 : 1.55;
   const unionK = isGrand ? 3.4 : 1.7;
+  const wallBottomY = Math.max(0.5, bottomY - 0.7);
+  const plugBaseHalfThick = isGrand ? 1.85 : 1.48;
+  const plugTopHalfThick = isGrand ? 1.55 : 1.24;
+  const plugBevel = isGrand ? 0.55 : 0.42;
+  const plugSpan = passRadius * 1.25;
+  const plugTopY = passY + (isGrand ? 4.1 : 3.3);
 
   // Helper converting normalized (nu, nv) into world (x, z)
   const wx = (nu: number): number => cx + nu * halfSpan;
   const wz = (nv: number): number => cz + nv * halfSpan;
+
+  const evalGatePlugs = (passOffset: number): number => {
+    const bound = plugBaseHalfThick + 2.5;
+    const dxCenter = Math.abs(x - cx);
+    const dzCenter = Math.abs(z - cz);
+    if (y > plugTopY + 2.5 || (dxCenter > bound && dzCenter > bound)) {
+      return 10.0;
+    }
+    let best = 10.0;
+    if (dxCenter <= bound) {
+      const nPlug = sdBastionWall(
+        x,
+        y,
+        z,
+        cx,
+        wz(-passOffset) - plugSpan,
+        cx,
+        wz(-passOffset) + plugSpan,
+        wallBottomY,
+        plugTopY,
+        plugBaseHalfThick,
+        plugTopHalfThick,
+        plugBevel,
+        0.06,
+      );
+      const sPlug = sdBastionWall(
+        x,
+        y,
+        z,
+        cx,
+        wz(passOffset) - plugSpan,
+        cx,
+        wz(passOffset) + plugSpan,
+        wallBottomY,
+        plugTopY,
+        plugBaseHalfThick,
+        plugTopHalfThick,
+        plugBevel,
+        0.06,
+      );
+      best = Math.min(best, nPlug, sPlug);
+    }
+    if (dzCenter <= bound) {
+      const wPlug = sdBastionWall(
+        x,
+        y,
+        z,
+        wx(-passOffset) - plugSpan,
+        cz,
+        wx(-passOffset) + plugSpan,
+        cz,
+        wallBottomY,
+        plugTopY,
+        plugBaseHalfThick,
+        plugTopHalfThick,
+        plugBevel,
+        0.06,
+      );
+      const ePlug = sdBastionWall(
+        x,
+        y,
+        z,
+        wx(passOffset) - plugSpan,
+        cz,
+        wx(passOffset) + plugSpan,
+        cz,
+        wallBottomY,
+        plugTopY,
+        plugBaseHalfThick,
+        plugTopHalfThick,
+        plugBevel,
+        0.06,
+      );
+      best = Math.min(best, wPlug, ePlug);
+    }
+    return best;
+  };
 
   if (theme === "emerald_spire") {
     // 1. 4 sheltered quadrant emerald fort basins (NE, SW, NW, SE)
@@ -508,16 +591,17 @@ function evaluateThemeSdf(
       bevel * 0.65,
     );
 
-    // 4. 4 tall radiating destructible bastion walls directly dividing NW/NE/SW/SE basins
+    // 4. 4 tall full-width radiating destructible bastion walls directly dividing NW/NE/SW/SE basins
+    //    Extended past the outer shoreline into sheer coastal cliffs (zero coastal walk-around)
     const northWall = sdBastionWall(
       x,
       y,
       z,
       cx,
-      wz(-0.15),
+      wz(-0.08),
       cx,
-      wz(-0.95),
-      bottomY,
+      wz(-1.07),
+      wallBottomY,
       wallTopY + j.westHeight * 0.25,
       wallBaseThick,
       wallTopThick,
@@ -528,10 +612,10 @@ function evaluateThemeSdf(
       y,
       z,
       cx,
-      wz(0.15),
+      wz(0.08),
       cx,
-      wz(0.95),
-      bottomY,
+      wz(1.07),
+      wallBottomY,
       wallTopY + j.eastHeight * 0.25,
       wallBaseThick,
       wallTopThick,
@@ -541,11 +625,11 @@ function evaluateThemeSdf(
       x,
       y,
       z,
-      wx(-0.15),
+      wx(-0.08),
       cz,
-      wx(-0.95),
+      wx(-1.07),
       cz,
-      bottomY,
+      wallBottomY,
       wallTopY + j.eastHeight * 0.2,
       wallBaseThick,
       wallTopThick,
@@ -555,11 +639,11 @@ function evaluateThemeSdf(
       x,
       y,
       z,
-      wx(0.15),
+      wx(0.08),
       cz,
-      wx(0.95),
+      wx(1.07),
       cz,
-      bottomY,
+      wallBottomY,
       wallTopY + j.westHeight * 0.2,
       wallBaseThick,
       wallTopThick,
@@ -628,7 +712,7 @@ function evaluateThemeSdf(
       ) - spireTunnelR;
     d = smax(d, -spireTunnel, isGrand ? 1.1 : 0.65);
 
-    // 7. Carved lower arched passes through the 4 radiating walls (well below spawn eye line!)
+    // 7. Carved lower arched passes through the 4 radiating walls, sealed by thin destructible rock gate plugs
     const nPass =
       distToSegment(
         x,
@@ -682,11 +766,17 @@ function evaluateThemeSdf(
     d = smax(d, -sPass, 0.65);
     d = smax(d, -wPass, 0.65);
     d = smax(d, -ePass, 0.65);
+    d = smin(d, evalGatePlugs(0.58), isGrand ? 0.5 : 0.35);
 
-    // Subtle floating-island skirt taper near outer archipelago rim
+    // Subtle floating-island skirt taper near outer archipelago rim (preserving sheer coastal bastion walls)
     const radialNorm = Math.hypot(u, v);
+    const wallAxisRelief = Math.max(
+      0,
+      1 - Math.min(Math.abs(u), Math.abs(v)) / 0.18,
+    );
+    const skirtStart = 0.94 + wallAxisRelief * 0.14;
     const skirtCut =
-      bottomY - y + Math.max(0, radialNorm - 0.94) * halfSpan * 0.28;
+      wallBottomY - y + Math.max(0, radialNorm - skirtStart) * halfSpan * 0.28;
     d = smax(d, skirtCut, 0.85);
     return d + organicNoise;
   }
@@ -824,17 +914,17 @@ function evaluateThemeSdf(
       bevel,
     );
 
-    // 4 Towering Redrock Stone Gatehouse Walls + flanking buttress pinnacles
+    // 4 Towering Full-Width Redrock Stone Gatehouse Walls extending out into sheer coastal cliffs
     const gateTop = wallTopY + 0.35;
     const northGate = sdBastionWall(
       x,
       y,
       z,
       cx,
-      wz(-0.15),
+      wz(-0.08),
       cx,
-      wz(-0.96),
-      bottomY,
+      wz(-1.07),
+      wallBottomY,
       gateTop,
       wallBaseThick * 1.06,
       wallTopThick * 1.02,
@@ -846,10 +936,10 @@ function evaluateThemeSdf(
       y,
       z,
       cx,
-      wz(0.15),
+      wz(0.08),
       cx,
-      wz(0.96),
-      bottomY,
+      wz(1.07),
+      wallBottomY,
       gateTop,
       wallBaseThick * 1.06,
       wallTopThick * 1.02,
@@ -860,11 +950,11 @@ function evaluateThemeSdf(
       x,
       y,
       z,
-      wx(-0.15),
+      wx(-0.08),
       cz,
-      wx(-0.96),
+      wx(-1.07),
       cz,
-      bottomY,
+      wallBottomY,
       gateTop,
       wallBaseThick * 1.06,
       wallTopThick * 1.02,
@@ -875,11 +965,11 @@ function evaluateThemeSdf(
       x,
       y,
       z,
-      wx(0.15),
+      wx(0.08),
       cz,
-      wx(0.96),
+      wx(1.07),
       cz,
-      bottomY,
+      wallBottomY,
       gateTop,
       wallBaseThick * 1.06,
       wallTopThick * 1.02,
@@ -947,7 +1037,7 @@ function evaluateThemeSdf(
       ) - canyonCaveR;
     d = smax(d, -caveEW, isGrand ? 1.0 : 0.65);
 
-    // Carved lower stone gatehouse doorways beneath the 4 dividing walls
+    // Carved lower stone gatehouse doorways beneath the 4 dividing walls, sealed with destructible plugs
     const gDoorN =
       distToSegment(
         x,
@@ -1001,6 +1091,7 @@ function evaluateThemeSdf(
     d = smax(d, -gDoorS, 0.7);
     d = smax(d, -gDoorW, 0.7);
     d = smax(d, -gDoorE, 0.7);
+    d = smin(d, evalGatePlugs(0.62), isGrand ? 0.5 : 0.35);
 
     // Sheltered carved canyon wall alcoves inside the inner mesa flanks
     const alcoveRX = 0.12 * halfSpan;
@@ -1128,17 +1219,17 @@ function evaluateThemeSdf(
     0.12,
   );
 
-  // 4 Tall Radiating Cliff Battlement Walls dividing the 4 outer atolls
+  // 4 Tall Full-Width Radiating Cliff Battlement Walls extending past the shoreline into sheer cliffs
   const battlementTop = wallTopY + 0.15;
   const nBattlement = sdBastionWall(
     x,
     y,
     z,
     cx,
-    wz(-0.12),
+    wz(-0.08),
     cx,
-    wz(-0.95),
-    bottomY,
+    wz(-1.07),
+    wallBottomY,
     battlementTop,
     wallBaseThick,
     wallTopThick,
@@ -1149,10 +1240,10 @@ function evaluateThemeSdf(
     y,
     z,
     cx,
-    wz(0.12),
+    wz(0.08),
     cx,
-    wz(0.95),
-    bottomY,
+    wz(1.07),
+    wallBottomY,
     battlementTop,
     wallBaseThick,
     wallTopThick,
@@ -1162,11 +1253,11 @@ function evaluateThemeSdf(
     x,
     y,
     z,
-    wx(-0.16),
+    wx(-0.08),
     cz,
-    wx(-0.95),
+    wx(-1.07),
     cz,
-    bottomY,
+    wallBottomY,
     battlementTop,
     wallBaseThick,
     wallTopThick,
@@ -1176,11 +1267,11 @@ function evaluateThemeSdf(
     x,
     y,
     z,
-    wx(0.16),
+    wx(0.08),
     cz,
-    wx(0.95),
+    wx(1.07),
     cz,
-    bottomY,
+    wallBottomY,
     battlementTop,
     wallBaseThick,
     wallTopThick,
@@ -1371,6 +1462,7 @@ function evaluateThemeSdf(
   d = smax(d, -bPassS, 0.65);
   d = smax(d, -bPassW, 0.65);
   d = smax(d, -bPassE, 0.65);
+  d = smin(d, evalGatePlugs(0.58), isGrand ? 0.5 : 0.35);
 
   // Dramatic underside hollows beneath the overhanging coastal ledges
   const underNE = sdEllipsoid(
@@ -1734,9 +1826,9 @@ export class SdfWorld {
     const rng = createSeededRng(this.seed ^ 0x51a9c3);
     const isGrand = this.mapScale === "grand";
     const halfSpan = this.worldWidth * 0.44;
-    const minSep = isGrand ? 52.0 : 24.0;
+    const minSep = isGrand ? 54.5 : 24.5;
     const minBasinRadial = halfSpan * 0.55;
-    const maxSafeRadial = isGrand ? 60.5 : 25.2;
+    const maxSafeRadial = isGrand ? 55.5 : 24.5;
     const maxBasinY = isGrand ? 21.0 : 12.2;
     const minBasinY = isGrand ? 11.0 : 7.0;
     const margin = isGrand ? 9.0 : 5.0;
@@ -2095,18 +2187,38 @@ export class SdfWorld {
 
     const spacingMult = isGrand ? 1.55 : 1.0;
 
-    // 1. Blast Barrels (radius 1.4) tucked near dividing wall seams + chain partners
-    const barrelPool = candidates.filter((c) => c.isWallSeam);
-    const primaryBarrelCount = isGrand ? 4 : 2;
-    pickFromPool(
-      barrelPool,
-      "blast_barrel",
-      1.4,
-      primaryBarrelCount,
-      7.2 * spacingMult,
-    );
+    // 1. Blast Barrels (radius 1.4): guarantee 1 volatile barrel tucked near each of the 4 destructible gate seams
+    const passOffset = this.theme === "canyon_arch" ? 0.62 : 0.58;
+    const gateSeamAnchors: ReadonlyArray<readonly [number, number]> = [
+      [this.centerX, this.centerZ - passOffset * halfSpan],
+      [this.centerX, this.centerZ + passOffset * halfSpan],
+      [this.centerX - passOffset * halfSpan, this.centerZ],
+      [this.centerX + passOffset * halfSpan, this.centerZ],
+    ];
+    for (const [gx, gz] of gateSeamAnchors) {
+      let bestGateCand: HazardCandidate | null = null;
+      let bestGateScore = Infinity;
+      for (const cand of candidates) {
+        if (!farEnough(cand.pos, isGrand ? 5.0 : 3.6)) continue;
+        const dSeam = Math.hypot(cand.pos.x - gx, cand.pos.z - gz);
+        const score = dSeam - (cand.isWallSeam ? 1.2 : 0);
+        if (score < bestGateScore) {
+          bestGateScore = score;
+          bestGateCand = cand;
+        }
+      }
+      if (bestGateCand) {
+        placed.push({
+          type: "blast_barrel",
+          position: { ...bestGateCand.pos },
+          radius: 1.4,
+        });
+      }
+    }
 
-    const partnerCount = isGrand ? 2 : 1;
+    // Add chain-detonation partner barrels on Grand (2 extra -> 6 total barrels)
+    const barrelPool = candidates.filter((c) => c.isWallSeam);
+    const partnerCount = isGrand ? 2 : 0;
     const primaryBarrels = placed.filter((h) => h.type === "blast_barrel");
     for (let pIdx = 0; pIdx < partnerCount; pIdx++) {
       const anchorBarrel = primaryBarrels[pIdx];
@@ -2161,7 +2273,7 @@ export class SdfWorld {
       geyserPool,
       "steam_geyser",
       1.7,
-      isGrand ? 4 : 3,
+      isGrand ? 4 : 2,
       6.2 * spacingMult,
     );
 

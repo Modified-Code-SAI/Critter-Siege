@@ -264,6 +264,8 @@ class CritterSiegeApp {
   private localTimeSinceGroundedSec = 0;
   private backflipUsedThisJump = false;
   private localTurnKey = "";
+  private localMoveStamina = 100;
+  private staminaSpentToastShown = false;
   private lastMoveSyncMs = 0;
   private lastSyncedPos = new THREE.Vector3(WORLD_CENTER_X, 10, WORLD_CENTER_Z);
   private lastSyncedYaw = 0;
@@ -723,7 +725,7 @@ class CritterSiegeApp {
       this.input.exitPointerLock();
     }
 
-    const suddenDeathTurn = state.mapScale === "grand" ? 8 : 6;
+    const suddenDeathTurn = Math.max(1, state.critters.length) * 8 + 1;
     const worldKey = `${state.matchId}:${state.seed}:${state.round}:${state.theme}:${state.mapScale}`;
     if (worldKey !== this.activeWorldKey) {
       this.activeWorldKey = worldKey;
@@ -808,9 +810,11 @@ class CritterSiegeApp {
         this.localTimeSinceGroundedSec = 0;
         this.backflipUsedThisJump = false;
         this.lastSyncedPos.copy(this.localPos);
+        this.localMoveStamina = localCritter.moveStamina;
 
         if (isControlling && turnKey !== this.localTurnKey) {
           this.localTurnKey = turnKey;
+          this.staminaSpentToastShown = false;
           if (state.phase === "ACTIVE") {
             this.hud.showTurnBanner(
               "YOUR TURN",
@@ -824,12 +828,14 @@ class CritterSiegeApp {
           } else if (state.phase === "RETREAT") {
             this.hud.showTurnBanner(
               "RETREAT! 6s",
-              "Run to cover!",
+              "Fresh dash burst — Run to cover!",
               "retreat",
               localCritter.species,
             );
           }
         }
+      } else if (isControlling && localCritter.moveStamina < this.localMoveStamina - 6) {
+        this.localMoveStamina = localCritter.moveStamina;
       }
 
       // Auto-fallback to Gale Mortar if currently selected gadget ran out of charges
@@ -872,6 +878,45 @@ class CritterSiegeApp {
             splashesDone: false,
           };
           this.cameraRig.setShotCamActive(true);
+          break;
+        }
+        case "VINE_GRAPPLED": {
+          this.vfx.spawnGrappleBeam(ev.from, ev.to);
+          if (ev.playerId !== localId) {
+            this.audio.playLaunch("vine_grapple");
+          } else {
+            this.localPos.set(ev.to.x, ev.to.y, ev.to.z);
+            this.localVel.set(0, 0, 0);
+            this.localGrounded = true;
+            this.localTimeSinceGroundedSec = 0;
+            this.backflipUsedThisJump = false;
+            this.lastSyncedPos.copy(this.localPos);
+          }
+          break;
+        }
+        case "WATER_RESCUED": {
+          this.vfx.spawnSplash({
+            x: ev.position.x,
+            y: this.matchState?.waterLevel ?? 1.8,
+            z: ev.position.z,
+          });
+          this.audio.playSplash();
+          const rescued = this.matchState?.critters.find(
+            (c) => c.id === ev.playerId,
+          );
+          const who = rescued ? rescued.name : "Critter";
+          this.hud.showToast(
+            `Parachute Rescue! ${who} pulled back ashore (-${Math.round(ev.damage)} HP)`,
+            "info",
+          );
+          if (ev.playerId === localId) {
+            this.localPos.set(ev.position.x, ev.position.y, ev.position.z);
+            this.localVel.set(0, 0, 0);
+            this.localGrounded = true;
+            this.localTimeSinceGroundedSec = 0;
+            this.backflipUsedThisJump = false;
+            this.lastSyncedPos.copy(this.localPos);
+          }
           break;
         }
         case "HAZARD_TRIGGERED": {
@@ -968,7 +1013,7 @@ class CritterSiegeApp {
     state: MatchState,
     rebuildNow: boolean,
   ): void {
-    const suddenDeathTurn = state.mapScale === "grand" ? 8 : 6;
+    const suddenDeathTurn = Math.max(1, state.critters.length) * 8 + 1;
     if (
       state.turnNumber < suddenDeathTurn ||
       state.turnNumber <= this.appliedCrumbleTurn
@@ -981,10 +1026,11 @@ class CritterSiegeApp {
       t <= state.turnNumber;
       t++
     ) {
+      const crumbleStep = t - suddenDeathTurn;
       const crumbleRadius =
         state.mapScale === "grand"
-          ? Math.max(22.0, 66.0 - (t - 8) * 3.0)
-          : Math.max(10.0, 27.5 - (t - 6) * 1.3);
+          ? Math.max(22.0, 66.0 - crumbleStep * 3.0)
+          : Math.max(10.0, 27.5 - crumbleStep * 1.3);
       for (const key of this.activeWorld.crumbleOuterRing(crumbleRadius)) {
         dirty.add(key);
       }
@@ -1041,11 +1087,28 @@ class CritterSiegeApp {
     if (!state || !localId || state.phase !== "ACTIVE" || state.activePlayerId !== localId) {
       return;
     }
+    const localCritter = state.critters.find((c) => c.id === localId);
+    if (!localCritter || !localCritter.alive) {
+      return;
+    }
 
     const utilityGadget: GadgetId =
       this.selectedGadget === "prism_wall" ? "prism_wall" : "vine_grapple";
 
+    if (utilityGadget === "vine_grapple" && localCritter.grappleUsedThisTurn) {
+      this.hud.showToast("Vine Grapple already used this turn!", "info");
+      return;
+    }
+
     const moveSnap = this.input.update(0);
+    // Sync current local position before grappling/placing cover
+    this.gameClient.sendMove(
+      { x: this.localPos.x, y: this.localPos.y, z: this.localPos.z },
+      moveSnap.yaw,
+      moveSnap.pitch,
+      { x: 0, y: 0, z: 0 },
+    );
+
     const dir = computeAimDirection(moveSnap.yaw, moveSnap.pitch);
     this.audio.playLaunch(utilityGadget);
     this.gameClient.sendUtility(utilityGadget, dir);
@@ -1293,7 +1356,9 @@ class CritterSiegeApp {
       if (isLocalControlled) {
         rig.root.position.copy(this.localPos);
         rig.root.rotation.y = moveInput.yaw;
-        moving = moveInput.forward !== 0 || moveInput.right !== 0;
+        moving =
+          this.localMoveStamina > 0 &&
+          (moveInput.forward !== 0 || moveInput.right !== 0);
         vy = this.localVel.y;
       } else {
         const lerpAlpha = 1 - Math.exp(-14 * dtSec);
@@ -1411,6 +1476,9 @@ class CritterSiegeApp {
       compass,
       pointerLocked: this.input.isPointerLocked(),
       canFire,
+      localMoveStamina: isMyTurn
+        ? this.localMoveStamina
+        : localCritter?.moveStamina,
     });
   }
 
@@ -1502,8 +1570,22 @@ class CritterSiegeApp {
     pitch: number,
   ): void {
     const stats = computeCritterStats(critter.species, critter.equipped);
-    const speedMult = state.phase === "RETREAT" ? stats.retreatRollBoost : 1.0;
+    const isRetreat = state.phase === "RETREAT";
+    const speedMult = isRetreat ? stats.retreatRollBoost : 1.0;
     const moveSpeed = stats.moveSpeed * speedMult;
+
+    const baseBudget =
+      state.mapScale === "grand"
+        ? isRetreat
+          ? 7.0
+          : 20.0
+        : isRetreat
+          ? 5.0
+          : 14.0;
+    const speciesMult = critter.species === "norway_rat" ? 1.18 : 1.0;
+    const mutMult = critter.equipped.legs === "spring_paws" ? 1.2 : 1.0;
+    const budgetDist = Math.max(1.0, baseBudget * speciesMult * mutMult * speedMult);
+    const staminaScale = isRetreat ? 40 : 100;
 
     if (this.localGrounded) {
       this.localTimeSinceGroundedSec = 0;
@@ -1514,17 +1596,25 @@ class CritterSiegeApp {
     let moveX = 0;
     let moveZ = 0;
     if (forward !== 0 || right !== 0) {
-      const fwdX = Math.sin(yaw);
-      const fwdZ = Math.cos(yaw);
-      const rightX = -Math.cos(yaw);
-      const rightZ = Math.sin(yaw);
-      moveX = fwdX * forward + rightX * right;
-      moveZ = fwdZ * forward + rightZ * right;
-      const len = Math.hypot(moveX, moveZ);
-      if (len > 1e-4) {
-        const control = this.localGrounded ? 1.0 : Math.max(0.45, stats.airControl);
-        moveX = (moveX / len) * moveSpeed * control;
-        moveZ = (moveZ / len) * moveSpeed * control;
+      if (this.localMoveStamina > 0) {
+        const fwdX = Math.sin(yaw);
+        const fwdZ = Math.cos(yaw);
+        const rightX = -Math.cos(yaw);
+        const rightZ = Math.sin(yaw);
+        moveX = fwdX * forward + rightX * right;
+        moveZ = fwdZ * forward + rightZ * right;
+        const len = Math.hypot(moveX, moveZ);
+        if (len > 1e-4) {
+          const control = this.localGrounded ? 1.0 : Math.max(0.45, stats.airControl);
+          moveX = (moveX / len) * moveSpeed * control;
+          moveZ = (moveZ / len) * moveSpeed * control;
+        }
+      } else if (state.phase === "ACTIVE" && !this.staminaSpentToastShown) {
+        this.staminaSpentToastShown = true;
+        this.hud.showToast(
+          "Move stamina spent — Aim, Grapple, or Fire!",
+          "info",
+        );
       }
     }
 
@@ -1532,14 +1622,30 @@ class CritterSiegeApp {
     const totalVx = this.localGrounded ? moveX : moveX + this.localVel.x;
     const totalVz = this.localGrounded ? moveZ : moveZ + this.localVel.z;
 
-    if (totalVx !== 0 || totalVz !== 0) {
+    const prevX = this.localPos.x;
+    const prevZ = this.localPos.z;
+    const remainingDist = Math.max(
+      0,
+      (this.localMoveStamina / staminaScale) * budgetDist,
+    );
+
+    if ((totalVx !== 0 || totalVz !== 0) && remainingDist > 1e-4) {
+      let stepDx = totalVx * dtSec;
+      let stepDz = totalVz * dtSec;
+      const stepDist = Math.hypot(stepDx, stepDz);
+      if (stepDist > remainingDist) {
+        const scale = remainingDist / stepDist;
+        stepDx *= scale;
+        stepDz *= scale;
+      }
+
       const nextX = Math.max(
         1.8,
-        Math.min(this.activeWorld.worldWidth - 1.8, this.localPos.x + totalVx * dtSec),
+        Math.min(this.activeWorld.worldWidth - 1.8, this.localPos.x + stepDx),
       );
       const nextZ = Math.max(
         1.8,
-        Math.min(this.activeWorld.worldDepth - 1.8, this.localPos.z + totalVz * dtSec),
+        Math.min(this.activeWorld.worldDepth - 1.8, this.localPos.z + stepDz),
       );
 
       if (this.localGrounded) {
@@ -1579,6 +1685,25 @@ class CritterSiegeApp {
           this.localPos.z = nextZ;
         }
       }
+
+      const movedDxz = Math.hypot(
+        this.localPos.x - prevX,
+        this.localPos.z - prevZ,
+      );
+      if (movedDxz > 1e-4) {
+        const spent = (movedDxz / budgetDist) * staminaScale;
+        this.localMoveStamina = Math.max(0, this.localMoveStamina - spent);
+        if (this.localMoveStamina < 0.05) {
+          this.localMoveStamina = 0;
+          if (state.phase === "ACTIVE" && !this.staminaSpentToastShown) {
+            this.staminaSpentToastShown = true;
+            this.hud.showToast(
+              "Move stamina spent — Aim, Grapple, or Fire!",
+              "info",
+            );
+          }
+        }
+      }
     }
 
     // Classic 3D Artillery Double-Tap Space High Backflip (high vertical + slight backward vault!)
@@ -1590,8 +1715,13 @@ class CritterSiegeApp {
       this.backflipUsedThisJump = true;
       this.localGrounded = false;
       this.localVel.y = stats.jumpImpulse * BACKFLIP_JUMP_MULT;
-      this.localVel.x = -Math.sin(yaw) * BACKFLIP_BACKWARD_SPEED;
-      this.localVel.z = -Math.cos(yaw) * BACKFLIP_BACKWARD_SPEED;
+      if (this.localMoveStamina > 0) {
+        this.localVel.x = -Math.sin(yaw) * BACKFLIP_BACKWARD_SPEED;
+        this.localVel.z = -Math.cos(yaw) * BACKFLIP_BACKWARD_SPEED;
+      } else {
+        this.localVel.x = 0;
+        this.localVel.z = 0;
+      }
       this.critterRigs.get(critter.id)?.triggerBackflip();
       this.audio.playLaunch("vine_grapple");
     } else if (jumpPressed && this.localGrounded) {

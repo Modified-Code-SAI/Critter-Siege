@@ -213,6 +213,8 @@ export interface CritterState {
   pitch: number;
   hp: number;
   maxHp: number;
+  moveStamina: number;
+  maxMoveDistance: number;
   alive: boolean;
   evoCharge: number;
   pendingEvoDraft: boolean;
@@ -227,6 +229,7 @@ export interface CritterState {
   droneNudgeUsedThisTurn: boolean;
   retreatBurrowUsedThisTurn: boolean;
   skyBomberDropUsedThisTurn: boolean;
+  grappleUsedThisTurn: boolean;
   colorIndex: number;
   color: string;
 }
@@ -428,6 +431,18 @@ export type EngineEvent =
   | {
       type: "WATER_ROSE";
       waterLevel: number;
+    }
+  | {
+      type: "WATER_RESCUED";
+      playerId: string;
+      position: Vec3;
+      damage: number;
+    }
+  | {
+      type: "VINE_GRAPPLED";
+      playerId: string;
+      from: Vec3;
+      to: Vec3;
     }
   | {
       type: "WIND_NUDGED";

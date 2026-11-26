@@ -1095,6 +1095,50 @@
         background: var(--coral);
       }
 
+      .cs-move-row {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        margin-top: 4px;
+        width: 116px;
+      }
+
+      .cs-move-label {
+        font-size: 9px;
+        font-weight: 800;
+        letter-spacing: 0.08em;
+        color: rgba(224, 242, 254, 0.78);
+        line-height: 1;
+        flex: 0 0 auto;
+      }
+
+      .cs-move-track {
+        flex: 1 1 auto;
+        height: 5px;
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.14);
+        overflow: hidden;
+      }
+
+      .cs-move-fill {
+        height: 100%;
+        width: 100%;
+        border-radius: 999px;
+        background: linear-gradient(90deg, #38bdf8, #34d399);
+        box-shadow: 0 0 8px rgba(56, 189, 248, 0.45);
+        transition: width 0.08s linear, background 0.18s ease;
+      }
+
+      .cs-move-fill[data-tier="low"] {
+        background: linear-gradient(90deg, #f59e0b, #fbbf24);
+        box-shadow: 0 0 8px rgba(251, 191, 36, 0.5);
+      }
+
+      .cs-move-fill[data-tier="empty"] {
+        background: rgba(248, 113, 113, 0.65);
+        box-shadow: none;
+      }
+
       .cs-hardpoints-row {
         display: inline-flex;
         gap: 6px;

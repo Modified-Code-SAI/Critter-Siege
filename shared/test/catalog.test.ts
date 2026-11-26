@@ -33,8 +33,8 @@ describe("Critter Siege catalogs & stats", () => {
       name: "Tunnel Mole",
       starter: true,
       unlockCost: 0,
-      baseHp: 100,
-      moveSpeed: 8.0,
+      baseHp: 240,
+      moveSpeed: 3.6,
       jumpImpulse: 9.8,
       carveBonus: 1.2,
       knockbackResist: 0,
@@ -50,8 +50,8 @@ describe("Critter Siege catalogs & stats", () => {
       name: "Norway Rat",
       starter: true,
       unlockCost: 0,
-      baseHp: 100,
-      moveSpeed: 8.8,
+      baseHp: 230,
+      moveSpeed: 4.2,
       jumpImpulse: 10.8,
       podMagnetRadius: 2.3,
       airControl: 0.4,
@@ -62,8 +62,8 @@ describe("Critter Siege catalogs & stats", () => {
       name: "Ridge Badger",
       starter: true,
       unlockCost: 0,
-      baseHp: 115,
-      moveSpeed: 7.8,
+      baseHp: 275,
+      moveSpeed: 3.3,
       jumpImpulse: 9.6,
       knockbackResist: 0.2,
       airControl: 0.3,
@@ -74,8 +74,8 @@ describe("Critter Siege catalogs & stats", () => {
       name: "Glider Squirrel",
       starter: true,
       unlockCost: 0,
-      baseHp: 100,
-      moveSpeed: 8.35,
+      baseHp: 235,
+      moveSpeed: 3.8,
       jumpImpulse: 10.2,
       grappleReachBonus: 1.15,
       airControl: 0.75,
@@ -86,7 +86,8 @@ describe("Critter Siege catalogs & stats", () => {
       name: "Quill Hedgehog",
       starter: false,
       unlockCost: 80,
-      baseHp: 105,
+      baseHp: 250,
+      moveSpeed: 3.5,
       meleeThorns: 12,
     });
 
@@ -95,7 +96,8 @@ describe("Critter Siege catalogs & stats", () => {
       name: "Plated Armadillo",
       starter: false,
       unlockCost: 110,
-      baseHp: 110,
+      baseHp: 260,
+      moveSpeed: 3.5,
       knockbackResist: 0.15,
       retreatRollBoost: 1.45,
     });
@@ -189,7 +191,7 @@ describe("Critter Siege catalogs & stats", () => {
 
   it("computes combined critter stats with equipped mutations", () => {
     const baseMole = computeCritterStats("mole", {});
-    expect(baseMole.maxHp).toBe(100);
+    expect(baseMole.maxHp).toBe(240);
     expect(baseMole.carveMultiplier).toBeCloseTo(1.2, 4);
     expect(baseMole.enablesGlide).toBe(false);
     expect(baseMole.apex).toBeNull();
@@ -201,8 +203,8 @@ describe("Critter Siege catalogs & stats", () => {
       crest: "aegis_crest",
     };
     const tankBadger = computeCritterStats("badger", equipped);
-    // 115 + 30 + 10 + 25 = 180
-    expect(tankBadger.maxHp).toBe(180);
+    // 275 + 50 + 25 + 45 = 395
+    expect(tankBadger.maxHp).toBe(395);
     expect(tankBadger.meleeThorns).toBe(10);
     expect(tankBadger.roundShieldHits).toBe(1);
     expect(tankBadger.slopeCling).toBe(true);
@@ -221,7 +223,7 @@ describe("Critter Siege catalogs & stats", () => {
     expect(skySniper.bonusMiniDart).toBe(true);
     expect(skySniper.extendedTrajectory).toBe(true);
     expect(skySniper.mobilityBonus).toBe(65);
-    expect(skySniper.moveSpeed).toBeCloseTo(8.35 * 1.65, 4);
+    expect(skySniper.moveSpeed).toBeCloseTo(3.8 * 1.65, 4);
     expect(skySniper.jumpImpulse).toBeCloseTo(10.2 * 1.22, 4);
     expect(skySniper.carveMultiplier).toBeCloseTo(1.6, 4);
     expect(skySniper.apex).toBe("sky_bomber");
@@ -230,7 +232,7 @@ describe("Critter Siege catalogs & stats", () => {
   it("initializes default gadget charges and optional bonus lobby gadget", () => {
     const standardCharges = createDefaultGadgetCharges();
     expect(standardCharges.gale_mortar).toBeNull();
-    expect(standardCharges.vine_grapple).toBe(2);
+    expect(standardCharges.vine_grapple).toBe(6);
     expect(standardCharges.seeker_firefly).toBe(1);
     expect(standardCharges.gravity_mine).toBe(0);
 
@@ -272,7 +274,7 @@ describe("Critter Siege catalogs & stats", () => {
     });
 
     expect(GADGET_CATALOG.vine_grapple).toMatchObject({
-      chargesPerRound: 2,
+      chargesPerRound: 6,
       turnEnding: false,
       windAffected: false,
       baseDamage: 0,

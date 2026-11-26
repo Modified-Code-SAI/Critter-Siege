@@ -260,7 +260,37 @@ export class MatchEngine {
     }
 
     const prevPos: Vec3 = { ...critter.position };
-    critter.position = { ...position };
+    const dxz = Math.hypot(position.x - prevPos.x, position.z - prevPos.z);
+    const isRetreat = this.phase === "RETREAT";
+    const budgetDist = isRetreat
+      ? this.computeRetreatMoveDistance(critter.species, critter.equipped)
+      : critter.maxMoveDistance;
+    const staminaScale = isRetreat ? 40 : 100;
+    const remainingDist = (critter.moveStamina / staminaScale) * budgetDist;
+
+    let nextPos: Vec3 = { ...position };
+    if (critter.moveStamina <= 0) {
+      if (dxz > 0.05) {
+        nextPos = { x: prevPos.x, y: position.y, z: prevPos.z };
+      }
+    } else if (dxz > remainingDist && dxz > 1e-6) {
+      const scale = remainingDist / dxz;
+      nextPos = {
+        x: prevPos.x + (position.x - prevPos.x) * scale,
+        y: position.y,
+        z: prevPos.z + (position.z - prevPos.z) * scale,
+      };
+      critter.moveStamina = 0;
+    } else if (dxz > 0) {
+      const cost = (dxz / Math.max(0.01, budgetDist)) * staminaScale;
+      const nextStamina = Math.max(
+        0,
+        Math.min(100, Number((critter.moveStamina - cost).toFixed(4))),
+      );
+      critter.moveStamina = nextStamina < 0.001 ? 0 : nextStamina;
+    }
+
+    critter.position = { ...nextPos };
     critter.yaw = yaw;
     critter.pitch = pitch;
 
@@ -296,29 +326,29 @@ export class MatchEngine {
       this.fallPeakY.set(playerId, critter.position.y);
     } else if (critter.alive && critter.position.y > this.waterLevel) {
       const stepHoriz = Math.hypot(
-        position.x - prevPos.x,
-        position.z - prevPos.z,
+        nextPos.x - prevPos.x,
+        nextPos.z - prevPos.z,
       );
       const grounded = this._world.isSolid(
-        position.x,
-        position.y - 0.55,
-        position.z,
+        nextPos.x,
+        nextPos.y - 0.55,
+        nextPos.z,
       );
       if (stepHoriz > 3.5) {
         // Large horizontal jump/teleport resets fall tracking cleanly
-        this.fallPeakY.set(playerId, position.y);
+        this.fallPeakY.set(playerId, nextPos.y);
       } else if (!grounded) {
         const prevPeak = this.fallPeakY.get(playerId) ?? prevPos.y;
         this.fallPeakY.set(
           playerId,
-          Math.max(prevPeak, prevPos.y, position.y),
+          Math.max(prevPeak, prevPos.y, nextPos.y),
         );
       } else {
         const peakY = Math.max(
           this.fallPeakY.get(playerId) ?? prevPos.y,
           prevPos.y,
         );
-        const drop = peakY - position.y;
+        const drop = peakY - nextPos.y;
         if (drop > FALL_DAMAGE_THRESHOLD_M) {
           const stats = computeCritterStats(critter.species, critter.equipped);
           const fallDmg = computeFallDamage(drop, stats.fallDamageResist);
@@ -329,13 +359,17 @@ export class MatchEngine {
             }
           }
         }
-        this.fallPeakY.set(playerId, position.y);
+        this.fallPeakY.set(playerId, nextPos.y);
       }
     }
 
-    // Check water drowning, spark mine, thorn, or fall KO
-    if (!critter.alive || critter.position.y <= this.waterLevel) {
-      critter.alive = false;
+    // Check water contact (Cycle 1-8 Rescue Parachute -35 HP vs Cycle 9+ Lethal Sudden Death)
+    if (critter.alive && critter.position.y <= this.waterLevel) {
+      events.push(...this.resolveWaterContact(critter));
+    }
+
+    // Check KO from drowning, spark mine, thorn, or fall
+    if (!critter.alive) {
       critter.hp = 0;
       if (this.checkRoundEnded()) {
         events.push(...this.finishRound());
@@ -373,17 +407,15 @@ export class MatchEngine {
     const events: EngineEvent[] = [];
 
     if (action.gadgetId === "vine_grapple") {
-      if (this.phase !== "ACTIVE") {
+      if (this.phase !== "ACTIVE" || critter.grappleUsedThisTurn) {
         return [];
       }
       const charges = critter.gadgetCharges.vine_grapple;
       if (charges !== null && charges <= 0) {
         return [];
       }
-      if (charges !== null) {
-        critter.gadgetCharges.vine_grapple = charges - 1;
-      }
 
+      const prevPos: Vec3 = { ...critter.position };
       const baseReach = this.mapScale === "grand" ? 26.0 : 18.0;
       const reach = baseReach * SPECIES_CATALOG[critter.species].grappleReachBonus;
 
@@ -412,12 +444,23 @@ export class MatchEngine {
       }
 
       if (pulledPod) {
+        const podOrigin: Vec3 = { ...pulledPod.position };
+        if (charges !== null) {
+          critter.gadgetCharges.vine_grapple = charges - 1;
+        }
+        critter.grappleUsedThisTurn = true;
         pulledPod.position = { ...critter.position };
+        events.push({
+          type: "VINE_GRAPPLED",
+          playerId,
+          from: prevPos,
+          to: podOrigin,
+        });
         events.push(...this.collectPodsInRange(critter));
         return events;
       }
 
-      // Otherwise grapple-tether critter to target or raycast terrain hit
+      // Otherwise grapple-tether upward onto cliffs OR rappel safely down steep cliff faces (0 moveStamina cost!)
       let destination: Vec3 | null = null;
       if (action.target && isFiniteVec3(action.target)) {
         const dx = action.target.x - critter.position.x;
@@ -432,28 +475,70 @@ export class MatchEngine {
           const destZ = critter.position.z + dz * scale;
           if (destY > this.waterLevel && this._world.isSolid(destX, destY, destZ)) {
             const surfY = this._world.getSurfaceY(destX, destZ);
-            if (surfY !== null) {
+            if (surfY !== null && (dy >= 0 || surfY <= destY + 1.8)) {
               destY = surfY + 0.1;
             }
           }
           destination = { x: destX, y: destY, z: destZ };
         }
       } else {
+        let lastAirX = critter.position.x;
+        let lastAirY = critter.position.y + 0.6;
+        let lastAirZ = critter.position.z;
         for (let d = 1.0; d <= reach; d += 0.5) {
           const px = critter.position.x + normDir.x * d;
           const py = critter.position.y + 0.6 + normDir.y * d;
           const pz = critter.position.z + normDir.z * d;
           if (this._world.isSolid(px, py, pz)) {
             const surfY = this._world.getSurfaceY(px, pz);
-            destination = { x: px, y: surfY !== null ? surfY + 0.1 : py + 0.5, z: pz };
+            if (normDir.y < -0.15) {
+              // Rappel safely down steep cliff faces: find lower foothold below hit or last air point
+              let rappelY: number | null = null;
+              const startScan = lastAirY + 0.35;
+              const minScan = Math.max(this.waterLevel + 0.2, lastAirY - 6.5);
+              for (let sy = startScan; sy >= minScan; sy -= 0.25) {
+                if (
+                  !this._world.isSolid(lastAirX, sy + 0.25, lastAirZ) &&
+                  this._world.isSolid(lastAirX, sy - 0.1, lastAirZ)
+                ) {
+                  rappelY = sy + 0.1;
+                  break;
+                }
+              }
+              if (rappelY !== null) {
+                destination = { x: lastAirX, y: rappelY, z: lastAirZ };
+              } else if (surfY !== null && surfY <= py + 1.5) {
+                destination = { x: px, y: surfY + 0.1, z: pz };
+              } else {
+                destination = { x: lastAirX, y: Math.max(this.waterLevel + 0.3, lastAirY), z: lastAirZ };
+              }
+            } else if (surfY !== null && surfY <= py + 3.4) {
+              destination = { x: px, y: surfY + 0.1, z: pz };
+            } else {
+              destination = { x: lastAirX, y: lastAirY + 0.15, z: lastAirZ };
+            }
             break;
           }
+          lastAirX = px;
+          lastAirY = py;
+          lastAirZ = pz;
         }
       }
 
       if (destination) {
-        critter.position = destination;
+        if (charges !== null) {
+          critter.gadgetCharges.vine_grapple = charges - 1;
+        }
+        critter.grappleUsedThisTurn = true;
+        critter.position = { ...destination };
+        critter.velocity = { x: 0, y: 0, z: 0 };
         this.fallPeakY.set(playerId, destination.y);
+        events.push({
+          type: "VINE_GRAPPLED",
+          playerId,
+          from: prevPos,
+          to: { ...destination },
+        });
         events.push(...this.collectPodsInRange(critter));
         events.push(
           ...Hazards.applyGroundHazardsForCritter(
@@ -470,8 +555,10 @@ export class MatchEngine {
             },
           ),
         );
-        if (!critter.alive || critter.position.y <= this.waterLevel) {
-          critter.alive = false;
+        if (critter.alive && critter.position.y <= this.waterLevel) {
+          events.push(...this.resolveWaterContact(critter));
+        }
+        if (!critter.alive) {
           critter.hp = 0;
           if (this.checkRoundEnded()) {
             events.push(...this.finishRound());
@@ -644,6 +731,7 @@ export class MatchEngine {
       : null;
 
     if (active && active.alive) {
+      active.moveStamina = 40;
       this.phase = "RETREAT";
       this.phaseTimeRemainingSec = this.retreatDurationSec;
       return [
@@ -776,6 +864,10 @@ export class MatchEngine {
     const stats = computeCritterStats(critter.species, critter.equipped);
     critter.apex = computeApexSynergy(critter.equipped);
     critter.maxHp = stats.maxHp;
+    critter.maxMoveDistance = this.computeMaxMoveDistance(
+      critter.species,
+      critter.equipped,
+    );
 
     if (critter.alive) {
       if (stats.maxHp > oldMaxHp) {
@@ -914,12 +1006,100 @@ export class MatchEngine {
     };
   }
 
-  private buildRoundGadgetCharges(bonus: GadgetId | null): Record<GadgetId, number | null> {
-    const charges = createDefaultGadgetCharges(bonus);
-    if (this.mapScale === "grand" && charges.vine_grapple !== null) {
-      charges.vine_grapple = 3;
+  private computeMaxMoveDistance(
+    species: CritterState["species"],
+    equipped: Partial<Record<HardpointSlot, MutationId>>,
+  ): number {
+    const base = this.mapScale === "grand" ? 20.0 : 14.0;
+    const speciesMult = species === "norway_rat" ? 1.18 : 1.0;
+    const mutMult = equipped.legs === "spring_paws" ? 1.2 : 1.0;
+    return Number((base * speciesMult * mutMult).toFixed(4));
+  }
+
+  private computeRetreatMoveDistance(
+    species: CritterState["species"],
+    equipped: Partial<Record<HardpointSlot, MutationId>>,
+  ): number {
+    const base = this.mapScale === "grand" ? 7.0 : 5.0;
+    const speciesMult = species === "norway_rat" ? 1.18 : 1.0;
+    const mutMult = equipped.legs === "spring_paws" ? 1.2 : 1.0;
+    const rollMult = SPECIES_CATALOG[species].retreatRollBoost;
+    return Number((base * speciesMult * mutMult * rollMult).toFixed(4));
+  }
+
+  private getRoundCycle(): number {
+    return Math.floor((this.turnNumber - 1) / Math.max(1, this.critters.length)) + 1;
+  }
+
+  private isSuddenDeath(): boolean {
+    return this.getRoundCycle() >= 9;
+  }
+
+  private findRescuePosition(critter: CritterState): Vec3 {
+    const candidates = this._world.findSpawnPoints(Math.max(4, this.critters.length));
+    const dry = candidates.filter((pt) => pt.y > this.waterLevel + 1.5);
+    const chosen = dry[critter.seatIndex % Math.max(1, dry.length)] ?? dry[0];
+    if (chosen) {
+      return { ...chosen };
     }
-    return charges;
+    const centerSurf = this._world.getSurfaceY(this._world.centerX, this._world.centerZ);
+    return {
+      x: this._world.centerX,
+      y: Math.max(this.waterLevel + 2.0, centerSurf ?? 10.0),
+      z: this._world.centerZ,
+    };
+  }
+
+  private resolveWaterContact(
+    critter: CritterState,
+    attacker?: CritterState | null,
+  ): EngineEvent[] {
+    if (!critter.alive || critter.position.y > this.waterLevel) {
+      return [];
+    }
+    if (!this.isSuddenDeath()) {
+      const splashDamage = 35;
+      critter.hp = Math.max(0, critter.hp - splashDamage);
+      if (critter.hp <= 0) {
+        critter.alive = false;
+        critter.hp = 0;
+        if (
+          attacker &&
+          attacker.id !== critter.id &&
+          !this.areTeammates(attacker, critter)
+        ) {
+          this.awardEnemyKo(attacker);
+        }
+        return [];
+      }
+      const safePos = this.findRescuePosition(critter);
+      critter.position = { ...safePos };
+      critter.velocity = { x: 0, y: 0, z: 0 };
+      this.fallPeakY.set(critter.id, safePos.y);
+      return [
+        {
+          type: "WATER_RESCUED",
+          playerId: critter.id,
+          position: safePos,
+          damage: splashDamage,
+        },
+      ];
+    }
+
+    critter.alive = false;
+    critter.hp = 0;
+    if (
+      attacker &&
+      attacker.id !== critter.id &&
+      !this.areTeammates(attacker, critter)
+    ) {
+      this.awardEnemyKo(attacker);
+    }
+    return [];
+  }
+
+  private buildRoundGadgetCharges(bonus: GadgetId | null): Record<GadgetId, number | null> {
+    return createDefaultGadgetCharges(bonus);
   }
 
   private initializeCritters(): void {
@@ -947,6 +1127,8 @@ export class MatchEngine {
         pitch: 0,
         hp: stats.maxHp,
         maxHp: stats.maxHp,
+        moveStamina: 100,
+        maxMoveDistance: this.computeMaxMoveDistance(p.species, {}),
         alive: true,
         evoCharge: 0,
         pendingEvoDraft: false,
@@ -961,6 +1143,7 @@ export class MatchEngine {
         droneNudgeUsedThisTurn: false,
         retreatBurrowUsedThisTurn: false,
         skyBomberDropUsedThisTurn: false,
+        grappleUsedThisTurn: false,
         colorIndex: idx,
         color: p.color ?? DEFAULT_COLORS[idx % DEFAULT_COLORS.length] ?? "#e67e22",
       };
@@ -1145,8 +1328,8 @@ export class MatchEngine {
       const target = this.findCritter(hit.critterId);
       if (!target) continue;
 
+      const prevHp = target.hp;
       target.position = { ...hit.newPosition };
-      target.hp = hit.newHp;
       if (hit.shieldAbsorbed && target.roundShieldRemaining > 0) {
         target.roundShieldRemaining -= 1;
       }
@@ -1158,11 +1341,29 @@ export class MatchEngine {
         shooter.damageDealt += hit.damage;
       }
 
-      if (hit.knockedOut && target.alive) {
-        target.alive = false;
-        // Review Focus #2 & #3: Only true enemy KOs award +1 KO point & +50% Evo Charge!
-        if (!isSelf && !isFriendly) {
-          this.awardEnemyKo(shooter);
+      if (hit.drowned && !this.isSuddenDeath() && target.alive) {
+        // Cycles 1-8 Water Rescue Parachute: blast damage + 35 splash damage, rescue if still > 0 HP
+        target.hp = Math.max(0, prevHp - hit.damage);
+        if (target.hp <= 0) {
+          target.alive = false;
+          if (!isSelf && !isFriendly) {
+            this.awardEnemyKo(shooter);
+          }
+        } else {
+          target.position = {
+            ...target.position,
+            y: Math.min(target.position.y, this.waterLevel),
+          };
+          events.push(...this.resolveWaterContact(target, shooter));
+        }
+      } else {
+        target.hp = hit.newHp;
+        if (hit.knockedOut && target.alive) {
+          target.alive = false;
+          // Review Focus #2 & #3: Only true enemy KOs award +1 KO point & +50% Evo Charge!
+          if (!isSelf && !isFriendly) {
+            this.awardEnemyKo(shooter);
+          }
         }
       }
     }
@@ -1247,6 +1448,8 @@ export class MatchEngine {
     this.thornTriggeredThisTurn.clear();
 
     for (const c of this.critters) {
+      c.moveStamina = 100;
+      c.grappleUsedThisTurn = false;
       c.droneNudgeUsedThisTurn = false;
       c.retreatBurrowUsedThisTurn = false;
       c.skyBomberDropUsedThisTurn = false;
@@ -1265,14 +1468,15 @@ export class MatchEngine {
 
     this.shiftWindSlightly();
 
-    // Sudden Death: Turn 6+ on Duel (60m) vs Turn 8+ on Grand (144m)
-    const suddenDeathTurn = this.mapScale === "grand" ? 8 : 6;
+    // Sudden Death begins at Cycle 9 (after every player has taken 8 full turns!)
+    const suddenDeathTurn = Math.max(1, this.critters.length) * 8 + 1;
     if (this.turnNumber >= suddenDeathTurn) {
+      const crumbleStep = this.turnNumber - suddenDeathTurn;
       this.waterLevel = Number((this.waterLevel + 0.65).toFixed(2));
       const crumbleRadius =
         this.mapScale === "grand"
-          ? Math.max(22.0, 66.0 - (this.turnNumber - 8) * 3.0)
-          : Math.max(10.0, 27.5 - (this.turnNumber - 6) * 1.3);
+          ? Math.max(22.0, 66.0 - crumbleStep * 3.0)
+          : Math.max(10.0, 27.5 - crumbleStep * 1.3);
       this._world.crumbleOuterRing(crumbleRadius);
       Hazards.pruneSubmergedHazards(this._world, this.hazards, this.waterLevel);
       events.push({ type: "WATER_ROSE", waterLevel: this.waterLevel });
@@ -1605,11 +1809,14 @@ export class MatchEngine {
       c.alive = true;
       c.maxHp = stats.maxHp;
       c.hp = stats.maxHp;
+      c.moveStamina = 100;
+      c.maxMoveDistance = this.computeMaxMoveDistance(c.species, c.equipped);
       c.roundShieldRemaining = stats.roundShieldHits;
       c.gadgetCharges = this.buildRoundGadgetCharges(bonus);
       c.droneNudgeUsedThisTurn = false;
       c.retreatBurrowUsedThisTurn = false;
       c.skyBomberDropUsedThisTurn = false;
+      c.grappleUsedThisTurn = false;
       c.pendingEvoDraft = c.evoCharge >= 100;
       this.fallPeakY.set(c.id, spawn.y);
     }
