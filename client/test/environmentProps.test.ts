@@ -2,7 +2,10 @@ import * as THREE from "three";
 import { describe, expect, it, vi } from "vitest";
 import { SdfWorld, type HazardState } from "@critter/shared";
 import { EnvironmentProps } from "../src/scene/environmentProps.js";
-import { createOceanShaderMaterial } from "../src/scene/worldScene.js";
+import {
+  computeWorldSceneMetrics,
+  createOceanShaderMaterial,
+} from "../src/scene/worldScene.js";
 
 function collectAllMeshes(root: THREE.Object3D): THREE.Mesh[] {
   const meshes: THREE.Mesh[] = [];
@@ -92,6 +95,17 @@ describe("EnvironmentProps lush scenery & interactive hazard visuals", () => {
     const mineObj = hazardGroup?.getObjectByName(`hazard_${mine.id}`);
     expect(barrelObj).toBeDefined();
     expect(mineObj).toBeDefined();
+
+    // Verify Spark Mine has dark metallic dome, pulsing crimson LED beacon, and glowing sensor ring
+    const mineBeacon = mineObj?.getObjectByName("spark_mine_beacon");
+    const mineRing = mineObj?.getObjectByName("spark_mine_ring");
+    expect(mineBeacon).toBeInstanceOf(THREE.Mesh);
+    expect(mineRing).toBeInstanceOf(THREE.Mesh);
+    if (mineBeacon instanceof THREE.Mesh && mineBeacon.material instanceof THREE.MeshStandardMaterial) {
+      expect(mineBeacon.material.emissive.r).toBeGreaterThan(0.7);
+      expect(mineBeacon.material.emissive.r).toBeGreaterThan(mineBeacon.material.emissive.b * 2);
+    }
+
     const disposeSpies = [
       ...(barrelObj ? collectAllMeshes(barrelObj) : []),
       ...(mineObj ? collectAllMeshes(mineObj) : []),
@@ -111,16 +125,16 @@ describe("EnvironmentProps lush scenery & interactive hazard visuals", () => {
     props.dispose();
   });
 
-  it("scales instanced scenery cleanly across 144m grand worlds with zero BoxGeometry", () => {
+  it("scales instanced scenery cleanly across 144m grand worlds with lush density and zero BoxGeometry", () => {
     const grandWorld = new SdfWorld(8842, "emerald_spire", "grand");
     const spawns = grandWorld.findSpawnPoints(4);
     const props = new EnvironmentProps(grandWorld, 1.5, spawns);
 
     const counts = props.getPropCounts();
-    expect(counts.trees).toBeGreaterThanOrEqual(40);
-    expect(counts.flora).toBeGreaterThanOrEqual(100);
-    expect(counts.boulders).toBeGreaterThanOrEqual(40);
-    expect(counts.landmarks).toBeGreaterThanOrEqual(8);
+    expect(counts.trees).toBeGreaterThanOrEqual(70);
+    expect(counts.flora).toBeGreaterThanOrEqual(190);
+    expect(counts.boulders).toBeGreaterThanOrEqual(75);
+    expect(counts.landmarks).toBeGreaterThanOrEqual(17);
 
     const positions = props.getVisiblePropPositions();
     const maxX = Math.max(...positions.map((p) => p.x));
@@ -167,7 +181,22 @@ describe("EnvironmentProps lush scenery & interactive hazard visuals", () => {
     props.dispose();
   });
 
-  it("constructs the custom GLSL stylized ocean ShaderMaterial with wave, depth-gradient, and surf foam uniforms", () => {
+  it("scales WorldScene metrics dynamically for 60m Duel and 144m Grand maps and builds ocean shader", () => {
+    const duel = computeWorldSceneMetrics(60);
+    expect(duel.oceanSpan).toBe(420);
+    expect(duel.shadowHalf).toBeCloseTo(60 * 0.62, 3);
+    expect(duel.fogDensity).toBeCloseTo(0.0038, 5);
+    expect(duel.isletMinDist).toBeCloseTo(60 * 1.15, 2);
+    expect(duel.isletMaxDist).toBeCloseTo(60 * 1.6, 2);
+
+    const grand = computeWorldSceneMetrics(144);
+    expect(grand.oceanSpan).toBeCloseTo(144 * 4.5, 2);
+    expect(grand.shadowHalf).toBeCloseTo(144 * 0.62, 3);
+    expect(grand.fogDensity).toBeCloseTo(0.0022, 5);
+    expect(grand.isletMinDist).toBeCloseTo(144 * 1.15, 2);
+    expect(grand.isletMaxDist).toBeCloseTo(144 * 1.6, 2);
+    expect(grand.cloudRadius).toBeGreaterThan(duel.cloudRadius * 1.8);
+
     const mat = createOceanShaderMaterial(new THREE.Vector3(0.6, 0.7, 0.4));
     expect(mat).toBeInstanceOf(THREE.ShaderMaterial);
     expect(mat.uniforms.uTime).toBeDefined();

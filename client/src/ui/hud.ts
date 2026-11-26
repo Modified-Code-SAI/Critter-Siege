@@ -10,6 +10,7 @@ import {
   type GadgetId,
   type GameMode,
   type HardpointSlot,
+  type MapScaleChoice,
   type MatchState,
   type MutationId,
   type PendingDraftState,
@@ -19,6 +20,11 @@ import {
 import type { CameraMode } from "../game/cameraRig.js";
 import type { LobbyViewState } from "../net/gameClient.js";
 import type { PlayerProfile } from "../profile/progression.js";
+
+/** Resolve the crisp 256px 3D rendered portrait URL for any playable Critter Siege species. */
+export function getSpeciesPortraitUrl(species: SpeciesId): string {
+  return `/portraits/${species}.jpg`;
+}
 
 /** Breakdown displayed on the Match Over Siege Essence summary modal. */
 export interface MatchEssenceBreakdown {
@@ -62,6 +68,7 @@ export interface HudCallbacks {
   onUnlockBonusGadget: (gadget: GadgetId) => void;
   onThemeChange: (theme: ThemeId) => void;
   onGameModeChange: (mode: GameMode) => void;
+  onMapScaleChange?: (mapScale: MapScaleChoice) => void;
   onBotCountChange: (count: number) => void;
   onPlaySandbox: () => void;
   onCreateRoom: () => void;
@@ -76,6 +83,9 @@ export interface HudCallbacks {
   onPlayAgain: () => void;
   onBackToLobby: () => void;
   onSelectCameraMode?: (mode: SelectableCameraMode) => void;
+  onUiFireStart?: () => void;
+  onUiFireRelease?: () => void;
+  onUiFireCancel?: () => void;
 }
 
 /** Per-frame dynamic HUD input during an active match. */
@@ -91,12 +101,15 @@ export interface HudFrameState {
   essenceBreakdown: MatchEssenceBreakdown | null;
   showQuickStartHint?: boolean;
   compass?: HudCompassState;
+  pointerLocked?: boolean;
+  canFire?: boolean;
 }
 
 /** Local lobby selection state managed between HudController and main.ts. */
 export interface LobbySelectionState {
   theme: ThemeId;
   gameMode: GameMode;
+  mapScale?: MapScaleChoice;
   botCount: number;
   bonusGadget: GadgetId | null;
   joinCodeInput: string;
@@ -121,6 +134,12 @@ const THEME_META: ReadonlyArray<{ id: ThemeId; shortLabel: string; label: string
   { id: "emerald_spire", shortLabel: "Emerald", label: "Emerald Spire" },
   { id: "canyon_arch", shortLabel: "Canyon", label: "Canyon Arch" },
   { id: "twin_pillars", shortLabel: "Pillars", label: "Twin Pillars" },
+];
+
+const MAP_SCALE_META: ReadonlyArray<{ id: MapScaleChoice; label: string; title: string }> = [
+  { id: "auto", label: "Auto", title: "2p = 60m Duel · 3–4p = 144m Grand" },
+  { id: "duel", label: "2p 60m", title: "Compact 60m Duel Island" },
+  { id: "grand", label: "4p 144m", title: "Massive 144m Grand Archipelago" },
 ];
 
 const COLOR_SWATCHES: readonly string[] = [
@@ -192,49 +211,6 @@ function getWindCompassLabel(vx: number, vz: number): string {
   const dirs = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"];
   const idx = Math.round(deg / 45) % 8;
   return dirs[idx] ?? "N";
-}
-
-function getSpeciesSvgIcon(species: SpeciesId): string {
-  switch (species) {
-    case "mole":
-      return `<svg viewBox="0 0 28 28" width="24" height="24" fill="none" aria-hidden="true">
-        <circle cx="14" cy="15" r="8" fill="currentColor" opacity="0.22"/>
-        <path d="M7 15c0-4 3-7 7-7s7 3 7 7-3 6-7 6-7-2-7-6z" stroke="currentColor" stroke-width="1.8"/>
-        <circle cx="11" cy="13" r="2.2" stroke="currentColor" stroke-width="1.6"/>
-        <circle cx="17" cy="13" r="2.2" stroke="currentColor" stroke-width="1.6"/>
-        <path d="M13.2 13h1.6M14 16.5l1.5 1.5h-3z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
-      </svg>`;
-    case "norway_rat":
-      return `<svg viewBox="0 0 28 28" width="24" height="24" fill="none" aria-hidden="true">
-        <circle cx="8.5" cy="9.5" r="3.2" stroke="currentColor" stroke-width="1.7"/>
-        <circle cx="19.5" cy="9.5" r="3.2" stroke="currentColor" stroke-width="1.7"/>
-        <path d="M8 15c0-3.3 2.7-6 6-6s6 2.7 6 6c0 3.5-3.2 6.5-6 7.5-2.8-1-6-4-6-7.5z" fill="currentColor" opacity="0.2" stroke="currentColor" stroke-width="1.7"/>
-        <circle cx="14" cy="19.5" r="1.3" fill="currentColor"/>
-      </svg>`;
-    case "badger":
-      return `<svg viewBox="0 0 28 28" width="24" height="24" fill="none" aria-hidden="true">
-        <path d="M6 15c0-4.5 3.4-8 8-8s8 3.5 8 8-3.4 7-8 7-8-2.5-8-7z" fill="currentColor" opacity="0.2" stroke="currentColor" stroke-width="1.8"/>
-        <path d="M14 7v14" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"/>
-        <circle cx="10" cy="13.5" r="1.2" fill="currentColor"/>
-        <circle cx="18" cy="13.5" r="1.2" fill="currentColor"/>
-      </svg>`;
-    case "glider_squirrel":
-      return `<svg viewBox="0 0 28 28" width="24" height="24" fill="none" aria-hidden="true">
-        <path d="M5 12l5-4 4 3 4-3 5 4-4 8-5-2-5 2z" fill="currentColor" opacity="0.22" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>
-        <circle cx="14" cy="12" r="2.2" fill="currentColor"/>
-      </svg>`;
-    case "hedgehog":
-      return `<svg viewBox="0 0 28 28" width="24" height="24" fill="none" aria-hidden="true">
-        <path d="M6 17l-1-4 3-1 1-4 4 1 3-3 3 3 4-1 1 4 3 1-1 4c-2 3-5 4-10 4s-8-1-10-4z" fill="currentColor" opacity="0.22" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>
-        <circle cx="11.5" cy="15.5" r="1.2" fill="currentColor"/>
-        <circle cx="16.5" cy="15.5" r="1.2" fill="currentColor"/>
-      </svg>`;
-    case "armadillo":
-      return `<svg viewBox="0 0 28 28" width="24" height="24" fill="none" aria-hidden="true">
-        <path d="M6 18c0-5.5 3.6-10 8-10s8 4.5 8 10H6z" fill="currentColor" opacity="0.22" stroke="currentColor" stroke-width="1.8"/>
-        <path d="M10 10v8M14 8v10M18 10v8" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
-      </svg>`;
-  }
 }
 
 function getGadgetSvgIcon(gadget: GadgetId): string {
@@ -336,10 +312,10 @@ function getMutationSvgIcon(mutId: MutationId): string {
 }
 
 /**
- * Ultra-modern minimal icon-first DOM Lobby and In-Game HUD controller for Critter Siege.
- * Keeps the 3D island & sculpted GLB heroes breathing at 100% viewport scale with
- * floating translucent controls, clickable camera pills, live center charge arc,
- * animated turn banners, top compass pips, and a dismissible Turn-1 hint bar.
+ * Ultra-modern grandma-friendly DOM Lobby and In-Game HUD controller for Critter Siege.
+ * Displays crisp 3D character portraits, Lobby Map Size selector (Auto · 2p 60m · 4p 144m),
+ * clickable camera pills, unmistakable glowing Power Bar, accessible HOLD TO FIRE button,
+ * subtle Pointer-Lock free-look indicator, and a sleek `?` Controls quick-reference card.
  */
 export class HudController {
   private readonly root: HTMLElement;
@@ -368,9 +344,12 @@ export class HudController {
   private readonly camShoulderBtn: HTMLButtonElement;
   private readonly camVisorBtn: HTMLButtonElement;
   private readonly camDroneBtn: HTMLButtonElement;
+  private readonly helpBtnEl: HTMLButtonElement;
+  private readonly helpCardEl: HTMLDivElement;
   private readonly muteBtnEl: HTMLButtonElement;
 
   private readonly turnBannerEl: HTMLDivElement;
+  private readonly turnBannerAvatarEl: HTMLImageElement;
   private readonly turnBannerTitleEl: HTMLDivElement;
   private readonly turnBannerSubEl: HTMLDivElement;
 
@@ -378,6 +357,7 @@ export class HudController {
   private readonly centerChargeArcEl: SVGPathElement;
   private readonly centerChargePctEl: HTMLSpanElement;
 
+  private readonly blAvatarEl: HTMLImageElement;
   private readonly blTeamEl: HTMLSpanElement;
   private readonly blShieldEl: HTMLSpanElement;
   private readonly blHpTextEl: HTMLSpanElement;
@@ -387,8 +367,13 @@ export class HudController {
   private readonly blHardpointsEl: HTMLDivElement;
   private readonly blApexEl: HTMLDivElement;
 
+  private readonly lookHintEl: HTMLDivElement;
+  private readonly powerBarWrapEl: HTMLDivElement;
+  private readonly powerBarFillEl: HTMLDivElement;
+  private readonly powerBarPctEl: HTMLSpanElement;
   private readonly quickStartEl: HTMLDivElement;
   private readonly hotbarListEl: HTMLDivElement;
+  private readonly holdFireBtnEl: HTMLButtonElement;
 
   private readonly droneBadgeEl: HTMLDivElement;
   private readonly droneCompassEl: HTMLDivElement;
@@ -398,7 +383,10 @@ export class HudController {
 
   private multiplayerOpen = false;
   private shopOpen = false;
+  private helpOpen = false;
+  private uiFireActive = false;
 
+  private lastHudAvatarSpecies: SpeciesId | null = null;
   private lastHardpointSig = "";
   private lastHotbarSig = "";
   private lastDraftSig = "";
@@ -421,7 +409,7 @@ export class HudController {
     this.gameLayer.className = "cs-game-layer cs-hidden";
     this.root.appendChild(this.gameLayer);
 
-    // Top-center compact telemetry pill + compass pips + top-right camera switcher
+    // Top-center compact telemetry pill + compass pips + top-right camera switcher + ? help
     const topBar = document.createElement("div");
     topBar.className = "cs-top-bar";
     topBar.innerHTML = `
@@ -457,7 +445,7 @@ export class HudController {
           <button type="button" class="cs-cam-pill" data-cam="first_person" title="First-Person Optic Visor (Hold RMB or Press V)">
             <svg viewBox="0 0 20 20" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="10" cy="10" r="6"/><circle cx="10" cy="10" r="1.5" fill="currentColor"/><path d="M10 2v2M10 16v2M2 10h2M16 10h2"/></svg>
             <span>Visor</span>
-            <kbd>RMB</kbd>
+            <kbd>V</kbd>
           </button>
           <button type="button" class="cs-cam-pill" data-cam="drone_recon" title="Tactical Drone Recon (Press Tab)">
             <svg viewBox="0 0 20 20" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="10" cy="10" r="2.5"/><path d="M3 6l4 2M17 6l-4 2M3 14l4-2M17 14l-4-2"/></svg>
@@ -465,6 +453,7 @@ export class HudController {
             <kbd>Tab</kbd>
           </button>
         </div>
+        <button type="button" class="cs-glass cs-mini-icon-btn cs-help-btn" data-ref="help-toggle" title="Controls Quick Guide" aria-label="Controls Quick Guide">?</button>
         <button type="button" class="cs-glass cs-mini-icon-btn" data-ref="mute" title="Toggle Audio (M)" aria-label="Toggle Audio"></button>
         <button type="button" class="cs-glass cs-mini-icon-btn" data-ref="exit-lobby" title="Return to Lobby" aria-label="Return to Lobby">
           <svg viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 9.5L10 3l7 6.5"/><path d="M5.5 8.5V17h9V8.5"/></svg>
@@ -486,7 +475,46 @@ export class HudController {
     this.camShoulderBtn = topBar.querySelector('[data-cam="over_shoulder"]') as HTMLButtonElement;
     this.camVisorBtn = topBar.querySelector('[data-cam="first_person"]') as HTMLButtonElement;
     this.camDroneBtn = topBar.querySelector('[data-cam="drone_recon"]') as HTMLButtonElement;
+    this.helpBtnEl = topBar.querySelector('[data-ref="help-toggle"]') as HTMLButtonElement;
     this.muteBtnEl = topBar.querySelector('[data-ref="mute"]') as HTMLButtonElement;
+
+    // Sleek 3-icon Quick-Reference Controls Card toggled by `?`
+    this.helpCardEl = document.createElement("div");
+    this.helpCardEl.className = "cs-help-card cs-glass cs-hidden";
+    this.helpCardEl.innerHTML = `
+      <div class="cs-help-head">
+        <span>Quick Controls</span>
+        <button type="button" class="cs-close-btn" data-ref="help-close" aria-label="Close Controls Guide">×</button>
+      </div>
+      <div class="cs-help-row">
+        <div class="cs-help-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4l4 4H8l4-4z"/><path d="M12 20l-4-4h8l-4 4z"/><path d="M4 12l4-4v8l-4-4z"/><path d="M20 12l-4 4V8l4 4z"/></svg>
+        </div>
+        <div class="cs-help-text">
+          <strong>Move &amp; Backflip</strong>
+          <span><kbd>WASD</kbd> / <kbd>Arrows</kbd> Walk · <kbd>Space</kbd> Jump · <kbd>2× Space</kbd> High Backflip</span>
+        </div>
+      </div>
+      <div class="cs-help-row">
+        <div class="cs-help-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><circle cx="12" cy="12" r="7"/><circle cx="12" cy="12" r="2" fill="currentColor"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/></svg>
+        </div>
+        <div class="cs-help-text">
+          <strong>Look &amp; Views</strong>
+          <span><kbd>Click</kbd> Free Mouse-Look (<kbd>ESC</kbd> cursor) · <kbd>Q</kbd>/<kbd>E</kbd> Turn · <kbd>RMB</kbd>/<kbd>V</kbd> Visor · <kbd>Tab</kbd> Drone</span>
+        </div>
+      </div>
+      <div class="cs-help-row">
+        <div class="cs-help-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M5 19L19 5"/><path d="M13 5h6v6"/><circle cx="7" cy="17" r="2.2" fill="currentColor"/></svg>
+        </div>
+        <div class="cs-help-text">
+          <strong>Charge &amp; Shoot</strong>
+          <span><kbd>Hold Click</kbd>, <kbd>Hold Enter</kbd>, or <b>HOLD TO FIRE</b> · <kbd>RMB</kbd> Cancel · <kbd>1–7</kbd> Gear</span>
+        </div>
+      </div>
+    `;
+    this.gameLayer.appendChild(this.helpCardEl);
 
     this.camShoulderBtn.addEventListener("click", () =>
       this.callbacks.onSelectCameraMode?.("over_shoulder"),
@@ -497,18 +525,31 @@ export class HudController {
     this.camDroneBtn.addEventListener("click", () =>
       this.callbacks.onSelectCameraMode?.("drone_recon"),
     );
+    this.helpBtnEl.addEventListener("click", () => this.toggleHelpCard());
+    const helpCloseBtn = this.helpCardEl.querySelector(
+      '[data-ref="help-close"]',
+    ) as HTMLButtonElement | null;
+    helpCloseBtn?.addEventListener("click", () => this.setHelpCardOpen(false));
     this.muteBtnEl.addEventListener("click", () => this.callbacks.onToggleMute());
     const exitBtn = topBar.querySelector('[data-ref="exit-lobby"]') as HTMLButtonElement;
     exitBtn.addEventListener("click", () => this.callbacks.onBackToLobby());
 
-    // Brief Animated Center Turn Banner (1.6s auto-fade)
+    // Brief Animated Center Turn Banner with crisp 3D portrait (1.6s auto-fade)
     this.turnBannerEl = document.createElement("div");
     this.turnBannerEl.className = "cs-turn-banner cs-hidden";
     this.turnBannerEl.innerHTML = `
-      <div class="cs-banner-title" data-ref="banner-title">YOUR TURN</div>
-      <div class="cs-banner-sub" data-ref="banner-sub">Move · Aim · Hold Click to Fire</div>
+      <div class="cs-banner-inner">
+        <img class="cs-banner-avatar cs-hidden" data-ref="banner-avatar" src="${getSpeciesPortraitUrl("mole")}" alt="" />
+        <div class="cs-banner-copy">
+          <div class="cs-banner-title" data-ref="banner-title">YOUR TURN</div>
+          <div class="cs-banner-sub" data-ref="banner-sub">Move · Click to Look · Hold Click or Enter to Fire</div>
+        </div>
+      </div>
     `;
     this.gameLayer.appendChild(this.turnBannerEl);
+    this.turnBannerAvatarEl = this.turnBannerEl.querySelector(
+      '[data-ref="banner-avatar"]',
+    ) as HTMLImageElement;
     this.turnBannerTitleEl = this.turnBannerEl.querySelector(
       '[data-ref="banner-title"]',
     ) as HTMLDivElement;
@@ -542,11 +583,12 @@ export class HudController {
       '[data-ref="center-pct"]',
     ) as HTMLSpanElement;
 
-    // Minimal Bottom-Left Floating Status Cluster (HP pill + Evo ring + 4 minimal icon slots)
+    // Minimal Bottom-Left Floating Status Cluster (3D Portrait Avatar + Evo ring + HP pill + 4 slots)
     const bottomLeft = document.createElement("div");
     bottomLeft.className = "cs-bottom-left";
     bottomLeft.innerHTML = `
       <div class="cs-status-pill cs-glass">
+        <img class="cs-hud-avatar" data-ref="bl-avatar" src="${getSpeciesPortraitUrl("mole")}" alt="Active Critter" />
         <div class="cs-evo-ring" title="Evo Charge">
           <svg viewBox="0 0 36 36" width="34" height="34" aria-hidden="true">
             <circle cx="18" cy="18" r="14" fill="none" stroke="rgba(255,255,255,0.14)" stroke-width="3.2"/>
@@ -569,6 +611,7 @@ export class HudController {
       <div class="cs-apex-badge cs-hidden" data-ref="bl-apex"></div>
     `;
     this.gameLayer.appendChild(bottomLeft);
+    this.blAvatarEl = bottomLeft.querySelector('[data-ref="bl-avatar"]') as HTMLImageElement;
     this.blTeamEl = bottomLeft.querySelector('[data-ref="bl-team"]') as HTMLSpanElement;
     this.blShieldEl = bottomLeft.querySelector('[data-ref="bl-shield"]') as HTMLSpanElement;
     this.blHpFillEl = bottomLeft.querySelector('[data-ref="bl-hp-fill"]') as HTMLDivElement;
@@ -582,26 +625,86 @@ export class HudController {
     ) as HTMLDivElement;
     this.blApexEl = bottomLeft.querySelector('[data-ref="bl-apex"]') as HTMLDivElement;
 
-    // Bottom-center dismissible Turn-1 Quick-Start Pill + Icon-First Gadget Dock
+    // Bottom-center: Pointer-Lock hint + Big Glowing Power Bar + Quick-Start Pill + Gadget Dock + HOLD TO FIRE
     const bottomCenter = document.createElement("div");
     bottomCenter.className = "cs-bottom-center";
     bottomCenter.innerHTML = `
+      <div class="cs-look-hint-pill cs-glass cs-hidden" data-ref="look-hint">
+        Click anywhere to look freely · <kbd>ESC</kbd> for cursor
+      </div>
+      <div class="cs-power-bar-wrap cs-glass cs-hidden" data-ref="power-bar-wrap">
+        <div class="cs-power-bar-head">
+          <span class="cs-power-bar-label">SHOT POWER · RELEASE TO FIRE · <kbd>RMB</kbd> CANCEL</span>
+          <span class="cs-power-bar-pct" data-ref="power-bar-pct">15%</span>
+        </div>
+        <div class="cs-power-bar-track">
+          <div class="cs-power-bar-fill" data-ref="power-bar-fill"></div>
+        </div>
+      </div>
       <div class="cs-quickstart-pill cs-glass cs-hidden" data-ref="quickstart">
         <span><kbd>WASD</kbd> Move</span>
         <span class="cs-qs-dot"></span>
-        <span><kbd>Drag</kbd> Aim</span>
+        <span><kbd>2× Space</kbd> Backflip</span>
         <span class="cs-qs-dot"></span>
-        <span><kbd>Hold Click</kbd> Charge &amp; Shoot</span>
+        <span><kbd>Click</kbd> Look · <kbd>Q</kbd>/<kbd>E</kbd> Turn</span>
+        <span class="cs-qs-dot"></span>
+        <span><kbd>Hold Click</kbd> / <kbd>Enter</kbd> Fire</span>
       </div>
-      <div class="cs-gadget-dock cs-glass" data-ref="hotbar"></div>
+      <div class="cs-dock-row">
+        <div class="cs-gadget-dock cs-glass" data-ref="hotbar"></div>
+        <button type="button" class="cs-hold-fire-btn cs-hidden" data-ref="hold-fire" title="Hold to charge shot power, release to fire">
+          HOLD TO FIRE
+        </button>
+      </div>
     `;
     this.gameLayer.appendChild(bottomCenter);
+    this.lookHintEl = bottomCenter.querySelector(
+      '[data-ref="look-hint"]',
+    ) as HTMLDivElement;
+    this.powerBarWrapEl = bottomCenter.querySelector(
+      '[data-ref="power-bar-wrap"]',
+    ) as HTMLDivElement;
+    this.powerBarFillEl = bottomCenter.querySelector(
+      '[data-ref="power-bar-fill"]',
+    ) as HTMLDivElement;
+    this.powerBarPctEl = bottomCenter.querySelector(
+      '[data-ref="power-bar-pct"]',
+    ) as HTMLSpanElement;
     this.quickStartEl = bottomCenter.querySelector(
       '[data-ref="quickstart"]',
     ) as HTMLDivElement;
     this.hotbarListEl = bottomCenter.querySelector(
       '[data-ref="hotbar"]',
     ) as HTMLDivElement;
+    this.holdFireBtnEl = bottomCenter.querySelector(
+      '[data-ref="hold-fire"]',
+    ) as HTMLButtonElement;
+
+    this.holdFireBtnEl.addEventListener("pointerdown", (e) => {
+      e.stopPropagation();
+      e.preventDefault();
+      this.uiFireActive = true;
+      this.callbacks.onUiFireStart?.();
+    });
+    this.holdFireBtnEl.addEventListener("pointerup", (e) => {
+      e.stopPropagation();
+      if (this.uiFireActive) {
+        this.uiFireActive = false;
+        this.callbacks.onUiFireRelease?.();
+      }
+    });
+    this.holdFireBtnEl.addEventListener("pointercancel", () => {
+      if (this.uiFireActive) {
+        this.uiFireActive = false;
+        this.callbacks.onUiFireCancel?.();
+      }
+    });
+    this.holdFireBtnEl.addEventListener("pointerleave", () => {
+      if (this.uiFireActive) {
+        this.uiFireActive = false;
+        this.callbacks.onUiFireCancel?.();
+      }
+    });
 
     // 3. First-Person Optic Visor Overlay (clean subtle reticle framing)
     this.visorOverlay = document.createElement("div");
@@ -661,6 +764,18 @@ export class HudController {
     this.updateMuteIcon(false);
   }
 
+  /** Toggle the `?` quick-reference controls overlay card. */
+  public toggleHelpCard(): void {
+    this.setHelpCardOpen(!this.helpOpen);
+  }
+
+  /** Explicitly open or close the `?` quick-reference controls card. */
+  public setHelpCardOpen(open: boolean): void {
+    this.helpOpen = open;
+    this.helpCardEl.classList.toggle("cs-hidden", !open);
+    this.helpBtnEl.classList.toggle("cs-cam-active", open);
+  }
+
   /** Display a short translucent toast notification. */
   public showToast(message: string, tone: "info" | "success" | "error" = "info"): void {
     this.toastEl.textContent = message;
@@ -674,18 +789,25 @@ export class HudController {
     }, 3000);
   }
 
-  /** Show a brief bold animated center turn/event banner that auto-fades after 1.6s. */
+  /** Show a brief bold animated center turn/event banner with optional 3D species portrait. */
   public showTurnBanner(
     title: string,
     subtitle = "",
     tone: "mine" | "retreat" | "pod" = "mine",
+    species?: SpeciesId,
   ): void {
+    if (species) {
+      this.turnBannerAvatarEl.src = getSpeciesPortraitUrl(species);
+      this.turnBannerAvatarEl.alt = SPECIES_CATALOG[species].name;
+      this.turnBannerAvatarEl.classList.remove("cs-hidden");
+    } else {
+      this.turnBannerAvatarEl.classList.add("cs-hidden");
+    }
     this.turnBannerTitleEl.textContent = title;
     this.turnBannerSubEl.textContent = subtitle;
     this.turnBannerSubEl.classList.toggle("cs-hidden", subtitle.length === 0);
     this.turnBannerEl.dataset.tone = tone;
     this.turnBannerEl.classList.remove("cs-hidden", "cs-banner-anim");
-    // Restart animation cleanly
     void this.turnBannerEl.offsetWidth;
     this.turnBannerEl.classList.add("cs-banner-anim");
 
@@ -711,6 +833,7 @@ export class HudController {
     this.droneOverlay.classList.add("cs-hidden");
     this.draftModal.classList.add("cs-hidden");
     this.matchOverModal.classList.add("cs-hidden");
+    this.setHelpCardOpen(false);
 
     const isOnlineRoom =
       onlineLobby !== null &&
@@ -734,7 +857,7 @@ export class HudController {
     this.renderLobbyDom(profile, selection, onlineLobby);
   }
 
-  /** Update the live in-game HUD, camera pills, center charge arc, compass, and modals. */
+  /** Update the live in-game HUD, camera pills, glowing Power Bar, HOLD TO FIRE button, compass, and modals. */
   public updateGameHud(frame: HudFrameState): void {
     this.lobbyLayer.classList.add("cs-hidden");
     this.gameLayer.classList.remove("cs-hidden");
@@ -812,25 +935,82 @@ export class HudController {
     // Top compass pips (Rival + Evo Pod)
     this.syncCompassStrip(frame.compass);
 
-    // Center glowing charge arc (ALL camera modes!)
+    // Live Center Charge Arc + Unmistakable Glowing Power Bar above the Gadget Dock
+    const chargeFrac = Math.max(0, Math.min(1, frame.chargePower));
+    const chargePct = Math.round(chargeFrac * 100);
     this.centerChargeEl.classList.toggle("cs-hidden", !frame.charging);
+    this.powerBarWrapEl.classList.toggle("cs-hidden", !frame.charging);
     if (frame.charging) {
       const arcTotal = 255;
-      const frac = Math.max(0, Math.min(1, frame.chargePower));
-      this.centerChargeArcEl.style.strokeDashoffset = `${(arcTotal * (1 - frac)).toFixed(1)}`;
-      this.centerChargePctEl.textContent = `${Math.round(frac * 100)}%`;
+      this.centerChargeArcEl.style.strokeDashoffset = `${(arcTotal * (1 - chargeFrac)).toFixed(1)}`;
+      this.centerChargePctEl.textContent = `${chargePct}%`;
+      this.powerBarFillEl.style.width = `${(chargeFrac * 100).toFixed(1)}%`;
+      this.powerBarPctEl.textContent = `${chargePct}%`;
+    }
+
+    const isDrone =
+      cameraMode === "drone_recon" || cameraMode === "spectator_drone";
+    const canInteract =
+      isMyTurn &&
+      Boolean(localCritter?.alive) &&
+      (matchState.phase === "ACTIVE" || matchState.phase === "RETREAT") &&
+      !isDrone &&
+      cameraMode !== "shot_cam";
+    const canFireNow =
+      frame.canFire !== undefined
+        ? frame.canFire && !isDrone && cameraMode !== "shot_cam"
+        : isMyTurn &&
+          Boolean(localCritter?.alive) &&
+          matchState.phase === "ACTIVE" &&
+          !isDrone &&
+          cameraMode !== "shot_cam";
+
+    // Subtle Pointer-Lock free-look indicator pill
+    const showLookHint = canInteract && !frame.charging;
+    this.lookHintEl.classList.toggle("cs-hidden", !showLookHint);
+    if (showLookHint) {
+      if (frame.pointerLocked) {
+        this.lookHintEl.classList.add("cs-look-locked");
+        this.lookHintEl.innerHTML = `Mouse-Look Active · <kbd>ESC</kbd> for cursor`;
+      } else {
+        this.lookHintEl.classList.remove("cs-look-locked");
+        this.lookHintEl.innerHTML = `Click anywhere to look freely · <kbd>ESC</kbd> for cursor`;
+      }
+    }
+
+    // Accessible tactile HOLD TO FIRE button next to Gadget Dock
+    this.holdFireBtnEl.classList.toggle("cs-hidden", !canFireNow);
+    if (canFireNow) {
+      const isUtility =
+        selectedGadget === "vine_grapple" || selectedGadget === "prism_wall";
+      this.holdFireBtnEl.classList.toggle("cs-charging", frame.charging);
+      this.holdFireBtnEl.textContent = isUtility
+        ? "USE GADGET"
+        : frame.charging
+          ? `RELEASE · ${chargePct}%`
+          : "HOLD TO FIRE";
+    } else if (this.uiFireActive) {
+      this.uiFireActive = false;
     }
 
     // Dismissible Turn-1 Quick-Start Pill
     this.quickStartEl.classList.toggle(
       "cs-hidden",
       !frame.showQuickStartHint ||
-        cameraMode === "drone_recon" ||
+        frame.charging ||
+        isDrone ||
         cameraMode === "shot_cam",
     );
 
-    // Minimal Bottom-Left Status Cluster
+    // Minimal Bottom-Left Status Cluster with real 3D character portrait
     if (localCritter) {
+      if (this.lastHudAvatarSpecies !== localCritter.species) {
+        this.lastHudAvatarSpecies = localCritter.species;
+        this.blAvatarEl.src = getSpeciesPortraitUrl(localCritter.species);
+        this.blAvatarEl.alt = SPECIES_CATALOG[localCritter.species].name;
+      }
+      this.blAvatarEl.style.borderColor = localCritter.color;
+
       if (matchState.mode === "2v2" && localCritter.team) {
         this.blTeamEl.textContent = `T${localCritter.team}`;
         this.blTeamEl.classList.remove("cs-hidden");
@@ -869,14 +1049,12 @@ export class HudController {
     this.visorOverlay.classList.toggle("cs-hidden", cameraMode !== "first_person");
 
     // Tactical Drone Recon / Spectator Drone overlay
-    const isDrone =
-      cameraMode === "drone_recon" || cameraMode === "spectator_drone";
     this.droneOverlay.classList.toggle("cs-hidden", !isDrone);
     if (isDrone) {
       if (cameraMode === "spectator_drone") {
         const canNudge = localCritter ? !localCritter.droneNudgeUsedThisTurn : false;
         this.droneBadgeEl.textContent = canNudge
-          ? "SPECTATOR DRONE · [E] NUDGE WIND"
+          ? "SPECTATOR DRONE · [X] NUDGE WIND"
           : "SPECTATOR DRONE · NUDGE USED";
       } else {
         this.droneBadgeEl.textContent =
@@ -956,6 +1134,9 @@ export class HudController {
   ): void {
     const activeTheme = onlineLobby ? onlineLobby.theme : selection.theme;
     const activeMode = onlineLobby ? onlineLobby.gameMode : selection.gameMode;
+    const activeMapScale: MapScaleChoice = onlineLobby
+      ? (onlineLobby.mapScale ?? "auto")
+      : (selection.mapScale ?? "auto");
     const activeBots = onlineLobby ? onlineLobby.botCount : selection.botCount;
     const isOnlineRoom =
       onlineLobby !== null &&
@@ -988,7 +1169,9 @@ export class HudController {
           style="--sp-accent:${meta.accent}"
           title="${escapeHtml(def.name)} (${def.baseHp} HP)"
         >
-          <div class="cs-sp-icon">${getSpeciesSvgIcon(id)}</div>
+          <div class="cs-sp-portrait">
+            <img src="${getSpeciesPortraitUrl(id)}" alt="${escapeHtml(def.name)}" loading="eager" />
+          </div>
           <div class="cs-sp-name">${escapeHtml(meta.shortName)}</div>
           ${
             unlocked
@@ -1003,6 +1186,14 @@ export class HudController {
       (t) => `
         <button type="button" class="cs-chip-btn ${activeTheme === t.id ? "cs-active" : ""}" data-theme="${t.id}" ${isHost ? "" : "disabled"}>
           ${escapeHtml(t.shortLabel)}
+        </button>
+      `,
+    ).join("");
+
+    const mapScalePillsHtml = MAP_SCALE_META.map(
+      (m) => `
+        <button type="button" class="cs-chip-btn ${activeMapScale === m.id ? "cs-active" : ""}" data-map-scale="${m.id}" title="${escapeHtml(m.title)}" ${isHost ? "" : "disabled"}>
+          ${escapeHtml(m.label)}
         </button>
       `,
     ).join("");
@@ -1039,7 +1230,7 @@ export class HudController {
               .map(
                 (p) => `
               <div class="cs-roster-row">
-                <span class="cs-dot" style="background:${escapeHtml(p.color)}"></span>
+                <img class="cs-roster-avatar" src="${getSpeciesPortraitUrl(p.species)}" alt="${escapeHtml(SPECIES_CATALOG[p.species].name)}" style="border-color:${escapeHtml(p.color)}" />
                 <span class="cs-roster-name">${escapeHtml(p.name)}${p.id === onlineLobby.hostId ? " ★" : ""}</span>
                 <span class="cs-roster-species">${escapeHtml(SPECIES_BADGE_META[p.species].shortName)}</span>
                 ${activeMode === "2v2" ? `<span class="cs-team-chip">T${p.team === 0 ? "A" : "B"}</span>` : ""}
@@ -1149,6 +1340,10 @@ export class HudController {
               <span class="cs-set-label">Island</span>
               <div class="cs-chip-group">${themePillsHtml}</div>
             </div>
+            <div class="cs-setting-line">
+              <span class="cs-set-label">Map</span>
+              <div class="cs-chip-group">${mapScalePillsHtml}</div>
+            </div>
             <div class="cs-setting-line cs-setting-split">
               <div class="cs-chip-group">
                 <button type="button" class="cs-chip-btn ${activeMode === "ffa" ? "cs-active" : ""}" data-mode="ffa" ${isHost ? "" : "disabled"}>FFA</button>
@@ -1176,8 +1371,11 @@ export class HudController {
       </div>
 
       <div class="cs-hero-stage-badge cs-glass">
-        <span class="cs-hero-stage-name">${escapeHtml(activeSpecDef.name)}</span>
-        <span class="cs-hero-stage-chip">${activeSpecDef.baseHp} HP · ${escapeHtml(activeSpecMeta.chip)}</span>
+        <img class="cs-hero-stage-avatar" src="${getSpeciesPortraitUrl(profile.selectedSpecies)}" alt="${escapeHtml(activeSpecDef.name)}" style="border-color:${activeSpecMeta.accent}" />
+        <div class="cs-hero-stage-copy">
+          <span class="cs-hero-stage-name">${escapeHtml(activeSpecDef.name)}</span>
+          <span class="cs-hero-stage-chip">${activeSpecDef.baseHp} HP · ${escapeHtml(activeSpecMeta.chip)}</span>
+        </div>
       </div>
     `;
 
@@ -1223,6 +1421,15 @@ export class HudController {
         btn.addEventListener("click", () => {
           const theme = btn.dataset.theme as ThemeId | undefined;
           if (theme) this.callbacks.onThemeChange(theme);
+        });
+      });
+
+    this.lobbyLayer
+      .querySelectorAll<HTMLButtonElement>("[data-map-scale]")
+      .forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const mapScale = btn.dataset.mapScale as MapScaleChoice | undefined;
+          if (mapScale) this.callbacks.onMapScaleChange?.(mapScale);
         });
       });
 
@@ -1572,7 +1779,12 @@ export class HudController {
       .map(
         (c) => `
         <tr class="${c.id === localPlayerId ? "cs-row-local" : ""}">
-          <td><span class="cs-dot" style="background:${escapeHtml(c.color)}"></span>${escapeHtml(c.name)}</td>
+          <td>
+            <div class="cs-score-player">
+              <img class="cs-score-avatar" src="${getSpeciesPortraitUrl(c.species)}" alt="${escapeHtml(SPECIES_CATALOG[c.species].name)}" style="border-color:${escapeHtml(c.color)}" />
+              <span>${escapeHtml(c.name)}</span>
+            </div>
+          </td>
           <td>${escapeHtml(SPECIES_BADGE_META[c.species].shortName)}</td>
           <td>${c.kills}</td>
           <td>${c.podsCollected}</td>

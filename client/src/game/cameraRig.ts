@@ -24,7 +24,7 @@ export interface CameraUpdateContext {
 const DEFAULT_FOV = 64;
 const FIRST_PERSON_FOV = 52;
 const CAMERA_NEAR = 0.1;
-const CAMERA_FAR = 720;
+const CAMERA_FAR = 1100;
 
 const OVER_SHOULDER_BACK = 4.6;
 const OVER_SHOULDER_RIGHT = 1.15;
@@ -32,10 +32,10 @@ const OVER_SHOULDER_UP = 2.1;
 const OVER_SHOULDER_PIVOT_Y = 1.1;
 const FIRST_PERSON_EYE_Y = 0.85;
 
-const DRONE_MIN_DIST = 20.0;
-const DRONE_MAX_DIST = 68.0;
-const DRONE_DEFAULT_DIST = 46.0;
-const DRONE_GRAND_SCALE = 2.15;
+const DRONE_MIN_ZOOM_RATIO = 0.35;
+const DRONE_MAX_ZOOM_RATIO = 1.15;
+const DRONE_DEFAULT_ZOOM_RATIO = 0.72;
+const DRONE_ZOOM_BASE_SPAN = 60.0;
 const DRONE_MIN_PITCH = 0.25;
 const DRONE_MAX_PITCH = 1.38;
 const DRONE_DEFAULT_PITCH = Math.PI * 0.25;
@@ -47,7 +47,7 @@ const MIN_CAMERA_ARM = 0.65;
 
 const DEFAULT_ISLAND_CENTER = new THREE.Vector3(
   SDF_DIMS.nx * SDF_DIMS.voxelSize * 0.5,
-  8.0,
+  SDF_DIMS.ny * SDF_DIMS.voxelSize * 0.25,
   SDF_DIMS.nz * SDF_DIMS.voxelSize * 0.5,
 );
 
@@ -77,7 +77,7 @@ export class CameraRig {
 
   private droneYaw = Math.PI * 0.25;
   private dronePitch = DRONE_DEFAULT_PITCH;
-  private droneDistance = DRONE_DEFAULT_DIST;
+  private droneZoomRatio = DRONE_DEFAULT_ZOOM_RATIO;
 
   private readonly currentPos = new THREE.Vector3(
     DEFAULT_ISLAND_CENTER.x,
@@ -151,10 +151,10 @@ export class CameraRig {
       DRONE_MIN_PITCH,
       DRONE_MAX_PITCH,
     );
-    this.droneDistance = clamp(
-      this.droneDistance + dZoom,
-      DRONE_MIN_DIST,
-      DRONE_MAX_DIST,
+    this.droneZoomRatio = clamp(
+      this.droneZoomRatio + dZoom / DRONE_ZOOM_BASE_SPAN,
+      DRONE_MIN_ZOOM_RATIO,
+      DRONE_MAX_ZOOM_RATIO,
     );
   }
 
@@ -187,7 +187,7 @@ export class CameraRig {
     const safeDt = clamp(finiteOr(ctx.dtSec, 0.016), 0, 0.25);
     const safeYaw = finiteOr(ctx.yaw, 0);
     const safePitch = clamp(finiteOr(ctx.pitch, 0), -1.2, 1.2);
-    const centerY = ctx.world.mapScale === "grand" ? 14.0 : 8.0;
+    const centerY = ctx.world.worldHeight * 0.25;
     const targetX = finiteOr(ctx.targetPos.x, ctx.world.centerX);
     const targetY = finiteOr(ctx.targetPos.y, centerY);
     const targetZ = finiteOr(ctx.targetPos.z, ctx.world.centerZ);
@@ -447,12 +447,16 @@ export class CameraRig {
   private computeDronePose(world: SdfWorld): void {
     const cosP = Math.cos(this.dronePitch);
     const sinP = Math.sin(this.dronePitch);
-    const isGrand = world.mapScale === "grand";
-    const scale = isGrand ? DRONE_GRAND_SCALE : 1.0;
     const centerX = world.centerX;
-    const centerY = isGrand ? 14.0 : 8.0;
+    const centerY = world.worldHeight * 0.25;
     const centerZ = world.centerZ;
-    const effectiveDist = this.droneDistance * scale;
+    const minZoom = world.worldWidth * DRONE_MIN_ZOOM_RATIO;
+    const maxZoom = world.worldWidth * DRONE_MAX_ZOOM_RATIO;
+    const effectiveDist = clamp(
+      world.worldWidth * this.droneZoomRatio,
+      minZoom,
+      maxZoom,
+    );
 
     this.desiredPos.set(
       centerX + Math.sin(this.droneYaw) * cosP * effectiveDist,

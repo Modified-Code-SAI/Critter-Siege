@@ -151,12 +151,12 @@ export class EnvironmentProps {
     const worldMaxZ = world.worldDepth;
     const isGrand = world.mapScale === "grand";
     const margin = isGrand ? 6.0 : 4.5;
-    const gridStep = isGrand ? 2.6 : 1.35;
-    const jitter = isGrand ? 1.5 : 0.9;
-    const maxLandmarks = isGrand ? 16 : 10;
-    const maxTrees = isGrand ? 64 : 36;
-    const maxBoulders = isGrand ? 70 : 45;
-    const maxFlora = isGrand ? 180 : 120;
+    const gridStep = isGrand ? 2.4 : 1.35;
+    const jitter = isGrand ? 1.4 : 0.9;
+    const maxLandmarks = isGrand ? 22 : 10;
+    const maxTrees = isGrand ? 90 : 38;
+    const maxBoulders = isGrand ? 95 : 45;
+    const maxFlora = isGrand ? 220 : 120;
 
     const spots: SurfaceSpot[] = [];
     for (let x = margin; x <= worldMaxX - margin; x += gridStep) {
@@ -195,7 +195,7 @@ export class EnvironmentProps {
       if (landmarkSpots.length >= maxLandmarks) break;
       if (spot.normalY < 0.72 || spot.pos.y < 3.2) continue;
       if (!isClearOfAvoid(spot.pos, 3.3)) continue;
-      if (!isClearOfList(spot.pos, placedLandmarks, isGrand ? 10.5 : 6.2)) continue;
+      if (!isClearOfList(spot.pos, placedLandmarks, isGrand ? 8.6 : 6.2)) continue;
       placedLandmarks.push(spot.pos);
       landmarkSpots.push({
         pos: spot.pos,
@@ -213,7 +213,7 @@ export class EnvironmentProps {
       if (world.sample(spot.pos.x, spot.pos.y + 3.2, spot.pos.z) <= 0.1) continue;
       if (!isClearOfAvoid(spot.pos, 3.1)) continue;
       if (!isClearOfList(spot.pos, placedLandmarks, 3.2)) continue;
-      if (!isClearOfList(spot.pos, placedTrees, isGrand ? 4.4 : 3.0)) continue;
+      if (!isClearOfList(spot.pos, placedTrees, isGrand ? 3.8 : 2.9)) continue;
 
       placedTrees.push(spot.pos);
       const entry = {
@@ -246,7 +246,7 @@ export class EnvironmentProps {
       if (!isClearOfAvoid(spot.pos, 2.8)) continue;
       if (!isClearOfList(spot.pos, placedLandmarks, 2.4)) continue;
       if (!isClearOfList(spot.pos, placedTrees, 1.9)) continue;
-      if (!isClearOfList(spot.pos, placedBoulders, isGrand ? 3.4 : 2.3)) continue;
+      if (!isClearOfList(spot.pos, placedBoulders, isGrand ? 2.9 : 2.2)) continue;
 
       placedBoulders.push(spot.pos);
       const base = 0.52 + rng() * 0.72;
@@ -1084,74 +1084,93 @@ export class EnvironmentProps {
     }
 
     if (hazard.type === "spark_mine") {
-      // Sculpted proximity Spark Mine: forged dome casing + radial prongs + electric core + proximity ring
+      // Sculpted proximity Spark Mine: dark forged metallic dome + pulsing crimson LED beacon + glowing sensor ring
       const hullMat = new THREE.MeshStandardMaterial({
-        color: 0x2f3846,
-        roughness: 0.42,
-        metalness: 0.72,
+        color: 0x262d38,
+        roughness: 0.36,
+        metalness: 0.78,
       });
       const baseRing = new THREE.Mesh(
-        new THREE.CylinderGeometry(0.46, 0.56, 0.2, 12),
+        new THREE.CylinderGeometry(0.48, 0.58, 0.18, 14),
         hullMat,
       );
-      baseRing.position.y = 0.1;
+      baseRing.position.y = 0.09;
       baseRing.castShadow = true;
       baseRing.receiveShadow = true;
 
       const dome = new THREE.Mesh(
-        new THREE.SphereGeometry(0.42, 12, 8),
+        new THREE.SphereGeometry(0.44, 14, 10),
         hullMat.clone(),
       );
-      dome.scale.set(1.0, 0.58, 1.0);
-      dome.position.y = 0.22;
+      dome.name = "spark_mine_dome";
+      dome.scale.set(1.0, 0.56, 1.0);
+      dome.position.y = 0.21;
       dome.castShadow = true;
+      dome.receiveShadow = true;
 
-      const coreMat = new THREE.MeshStandardMaterial({
-        color: 0x7ef7ff,
-        emissive: 0x16bfff,
-        emissiveIntensity: 1.5,
-        roughness: 0.18,
-        metalness: 0.15,
+      const collarMat = new THREE.MeshStandardMaterial({
+        color: 0x3b4454,
+        roughness: 0.34,
+        metalness: 0.82,
       });
-      pulseMaterials.push(coreMat);
+      const ledCollar = new THREE.Mesh(
+        new THREE.TorusGeometry(0.16, 0.036, 8, 16),
+        collarMat,
+      );
+      ledCollar.rotation.x = Math.PI * 0.5;
+      ledCollar.position.y = 0.44;
 
-      const core = new THREE.Mesh(new THREE.OctahedronGeometry(0.18, 0), coreMat);
-      core.position.y = 0.5;
+      const beaconMat = new THREE.MeshStandardMaterial({
+        color: 0xff3b5c,
+        emissive: 0xff1744,
+        emissiveIntensity: 1.9,
+        roughness: 0.16,
+        metalness: 0.1,
+      });
+      pulseMaterials.push(beaconMat);
+
+      const beacon = new THREE.Mesh(
+        new THREE.SphereGeometry(0.135, 12, 10),
+        beaconMat,
+      );
+      beacon.name = "spark_mine_beacon";
+      beacon.position.y = 0.51;
 
       const prongMat = new THREE.MeshStandardMaterial({
-        color: 0xffa630,
-        emissive: 0xd9480f,
-        emissiveIntensity: 0.75,
-        roughness: 0.35,
-        metalness: 0.45,
+        color: 0x525d70,
+        emissive: 0xb91c1c,
+        emissiveIntensity: 0.45,
+        roughness: 0.34,
+        metalness: 0.76,
       });
       pulseMaterials.push(prongMat);
 
       for (let i = 0; i < 6; i++) {
         const a = (i / 6) * Math.PI * 2;
         const prong = new THREE.Mesh(
-          new THREE.ConeGeometry(0.065, 0.26, 6),
+          new THREE.ConeGeometry(0.06, 0.24, 6),
           prongMat.clone(),
         );
-        prong.position.set(Math.cos(a) * 0.42, 0.32, Math.sin(a) * 0.42);
-        prong.rotation.set(Math.sin(a) * 0.75, -a, -Math.cos(a) * 0.75);
+        prong.position.set(Math.cos(a) * 0.44, 0.31, Math.sin(a) * 0.44);
+        prong.rotation.set(Math.sin(a) * 0.78, -a, -Math.cos(a) * 0.78);
         prong.castShadow = true;
         group.add(prong);
       }
 
       const warningRing = new THREE.Mesh(
-        new THREE.TorusGeometry(0.84, 0.034, 8, 26),
+        new THREE.TorusGeometry(0.88, 0.038, 8, 28),
         new THREE.MeshBasicMaterial({
-          color: 0x4ee8ff,
+          color: 0xff4769,
           transparent: true,
-          opacity: 0.56,
+          opacity: 0.64,
           depthWrite: false,
         }),
       );
+      warningRing.name = "spark_mine_ring";
       warningRing.rotation.x = Math.PI * 0.5;
       warningRing.position.y = 0.08;
 
-      group.add(baseRing, dome, core, warningRing);
+      group.add(baseRing, dome, ledCollar, beacon, warningRing);
       return {
         type: hazard.type,
         group,

@@ -187,6 +187,42 @@ describe("CritterRig & TerrainRenderer", () => {
     sharedMat.dispose();
   });
 
+  it("positions, scales, hides, and disposes the airborne ground contact shadow disc and backflip animation cleanly", () => {
+    const rig = new CritterRig("glider_squirrel", "#fb7185", "SkyHopper", false);
+    const shadow = rig.root.getObjectByName("drop_shadow");
+    expect(shadow).toBeInstanceOf(THREE.Mesh);
+    if (!(shadow instanceof THREE.Mesh)) return;
+    expect(shadow.geometry.type).not.toBe("BoxGeometry");
+
+    // Grounded at y=10
+    rig.root.position.set(20, 10, 20);
+    rig.updateDropShadow(10);
+    expect(shadow.visible).toBe(true);
+    expect(rig.root.position.y + shadow.position.y).toBeCloseTo(10.04, 2);
+    const groundedScale = shadow.scale.x;
+
+    // Airborne 4m above ground -> shadow stays glued to groundY=10 and shrinks smoothly
+    rig.root.position.set(20, 14, 20);
+    rig.updateDropShadow(10);
+    expect(shadow.visible).toBe(true);
+    expect(rig.root.position.y + shadow.position.y).toBeCloseTo(10.04, 2);
+    expect(shadow.scale.x).toBeLessThan(groundedScale);
+
+    // Over open ocean void -> shadow hides cleanly
+    rig.updateDropShadow(null);
+    expect(shadow.visible).toBe(false);
+
+    // Triggering a classic artillery backflip spins cleanly over ~0.55s without NaN
+    rig.triggerBackflip();
+    for (let i = 0; i < 10; i++) {
+      rig.updateAnimation(0.06, false, 4.0 - i, true, 0.2);
+    }
+
+    const shadowDisposeSpy = vi.spyOn(shadow.geometry, "dispose");
+    rig.dispose();
+    expect(shadowDisposeSpy).toHaveBeenCalledTimes(1);
+  });
+
   it("builds smooth vertex-colored Surface Nets terrain chunks and rebuilds only dirty chunks on carve", () => {
     const world = new SdfWorld(42, "emerald_spire");
     const renderer = new TerrainRenderer(world);

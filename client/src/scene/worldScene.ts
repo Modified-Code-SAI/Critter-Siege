@@ -12,8 +12,37 @@ const DEFAULT_ISLAND_CENTER = new THREE.Vector3(
 );
 const DEFAULT_WATER_LEVEL = 2.0;
 const FOG_COLOR_HEX = 0xdbeeff;
-const FOG_DENSITY = 0.0023;
-const BASE_SKY_RADIUS = Math.max(210, DEFAULT_WORLD_HALF * 8.5);
+const DUEL_FOG_DENSITY = 0.0038;
+const GRAND_FOG_DENSITY = 0.0022;
+const BASE_OCEAN_SPAN = 420;
+const BASE_CLOUD_RADIUS = DEFAULT_WORLD_SPAN_X * 1.12;
+const BASE_SKY_RADIUS = Math.max(260, DEFAULT_WORLD_HALF * 9.5);
+
+/** Dynamically scaled visual parameters computed for a 60m Duel or 144m Grand world. */
+export interface WorldSceneMetrics {
+  worldSize: number;
+  oceanSpan: number;
+  shadowHalf: number;
+  fogDensity: number;
+  cloudRadius: number;
+  isletMinDist: number;
+  isletMaxDist: number;
+}
+
+/** Compute ocean, sun-shadow, fog, cloud, and distant-islet metrics for any world width. */
+export function computeWorldSceneMetrics(worldSize: number): WorldSceneMetrics {
+  const safeSize =
+    Number.isFinite(worldSize) && worldSize > 0 ? worldSize : DEFAULT_WORLD_SPAN_X;
+  return {
+    worldSize: safeSize,
+    oceanSpan: Math.max(420, safeSize * 4.5),
+    shadowHalf: safeSize * 0.62,
+    fogDensity: safeSize > 90 ? GRAND_FOG_DENSITY : DUEL_FOG_DENSITY,
+    cloudRadius: Math.max(36, safeSize * 1.12),
+    isletMinDist: safeSize * 1.15,
+    isletMaxDist: safeSize * 1.6,
+  };
+}
 
 interface CloudCluster {
   group: THREE.Group;
@@ -24,6 +53,9 @@ interface CloudCluster {
 
 interface DistantIslet {
   group: THREE.Group;
+  angle: number;
+  distT: number;
+  baseScale: number;
   baseY: number;
   bobPhase: number;
 }
@@ -196,7 +228,7 @@ export function createOceanShaderMaterial(
       uDeepColor: { value: new THREE.Color(0x0a3d80) },
       uFoamColor: { value: new THREE.Color(0xefffff) },
       uFogColor: { value: new THREE.Color(FOG_COLOR_HEX) },
-      uFogDensity: { value: FOG_DENSITY },
+      uFogDensity: { value: DUEL_FOG_DENSITY },
     },
   });
 }
@@ -253,7 +285,7 @@ export class WorldScene {
 
   public constructor(container: HTMLElement) {
     this.scene = new THREE.Scene();
-    this.scene.fog = new THREE.FogExp2(FOG_COLOR_HEX, FOG_DENSITY);
+    this.scene.fog = new THREE.FogExp2(FOG_COLOR_HEX, DUEL_FOG_DENSITY);
 
     const isCanvas =
       typeof HTMLCanvasElement !== "undefined" &&
@@ -291,7 +323,7 @@ export class WorldScene {
     this.hemiLight = new THREE.HemisphereLight(0xa8e6ff, 0x7a7b4c, 0.98);
     this.scene.add(this.hemiLight);
 
-    const shadowHalf = Math.max(36, this.worldHalf + 10);
+    const initialMetrics = computeWorldSceneMetrics(DEFAULT_WORLD_SPAN_X);
     this.sunLight = new THREE.DirectionalLight(0xffebd0, 2.2);
     this.sunLight.position.set(
       this.islandCenter.x + this.worldHalf * 1.25,
@@ -302,11 +334,11 @@ export class WorldScene {
     this.sunLight.castShadow = true;
     this.sunLight.shadow.mapSize.set(2048, 2048);
     this.sunLight.shadow.camera.near = 4;
-    this.sunLight.shadow.camera.far = Math.max(120, this.worldHalf * 5.8);
-    this.sunLight.shadow.camera.left = -shadowHalf;
-    this.sunLight.shadow.camera.right = shadowHalf;
-    this.sunLight.shadow.camera.top = shadowHalf;
-    this.sunLight.shadow.camera.bottom = -shadowHalf;
+    this.sunLight.shadow.camera.far = Math.max(140, initialMetrics.worldSize * 3.2);
+    this.sunLight.shadow.camera.left = -initialMetrics.shadowHalf;
+    this.sunLight.shadow.camera.right = initialMetrics.shadowHalf;
+    this.sunLight.shadow.camera.top = initialMetrics.shadowHalf;
+    this.sunLight.shadow.camera.bottom = -initialMetrics.shadowHalf;
     this.sunLight.shadow.bias = -0.00045;
     this.sunLight.shadow.normalBias = 0.04;
     this.scene.add(this.sunLight);
@@ -394,8 +426,7 @@ export class WorldScene {
       this.islandCenter.z,
     );
 
-    const oceanSpan = Math.max(360, DEFAULT_WORLD_HALF * 14);
-    const oceanGeo = new THREE.PlaneGeometry(oceanSpan, oceanSpan, 96, 96);
+    const oceanGeo = new THREE.PlaneGeometry(BASE_OCEAN_SPAN, BASE_OCEAN_SPAN, 96, 96);
     this.oceanMat = createOceanShaderMaterial(sunDir);
     this.oceanMesh = new THREE.Mesh(oceanGeo, this.oceanMat);
     this.oceanMesh.name = "turquoise_shader_ocean";
@@ -443,33 +474,47 @@ export class WorldScene {
     this.scene.add(this.waterGroup);
   }
 
-  /** Recenter and scale sun shadows, ocean, sky dome, clouds, and horizon islets for Duel (60m) vs Grand (144m) worlds. */
-  public setWorldBounds(
-    worldWidth: number,
-    worldHeight: number,
-    worldDepth: number,
+  /**
+   * Dynamically scale ocean plane, directional sun shadow bounds, fog density,
+   * cloud radius, sky dome, and distant floating silhouette islets to `worldSize`.
+   */
+  public configureForWorldSize(
+    worldSize: number,
+    worldHeight?: number,
+    worldDepth?: number,
   ): void {
-    const safeW = Number.isFinite(worldWidth) && worldWidth > 0 ? worldWidth : DEFAULT_WORLD_SPAN_X;
-    const safeH = Number.isFinite(worldHeight) && worldHeight > 0 ? worldHeight : DEFAULT_WORLD_SPAN_Y;
-    const safeD = Number.isFinite(worldDepth) && worldDepth > 0 ? worldDepth : DEFAULT_WORLD_SPAN_Z;
+    const safeW =
+      Number.isFinite(worldSize) && worldSize > 0 ? worldSize : DEFAULT_WORLD_SPAN_X;
+    const safeD =
+      worldDepth !== undefined && Number.isFinite(worldDepth) && worldDepth > 0
+        ? worldDepth
+        : safeW;
+    const safeH =
+      worldHeight !== undefined && Number.isFinite(worldHeight) && worldHeight > 0
+        ? worldHeight
+        : safeW > 90
+          ? 49.5
+          : DEFAULT_WORLD_SPAN_Y;
 
-    this.worldHalf = Math.max(safeW, safeD) * 0.5;
+    const spanXZ = Math.max(safeW, safeD);
+    const metrics = computeWorldSceneMetrics(spanXZ);
+
+    this.worldHalf = spanXZ * 0.5;
     this.worldScale = this.worldHalf / DEFAULT_WORLD_HALF;
     this.islandCenter.set(safeW * 0.5, Math.max(8.0, safeH * 0.3), safeD * 0.5);
     this.cloudYOffset = Math.max(0, safeH - DEFAULT_WORLD_SPAN_Y) * 0.85;
 
-    const shadowHalf = Math.max(36, this.worldHalf + 12);
     this.sunLight.position.set(
       this.islandCenter.x + this.worldHalf * 1.25,
       Math.max(36, this.worldHalf * 1.65),
       this.islandCenter.z + this.worldHalf * 0.95,
     );
     this.sunLight.target.position.copy(this.islandCenter);
-    this.sunLight.shadow.camera.left = -shadowHalf;
-    this.sunLight.shadow.camera.right = shadowHalf;
-    this.sunLight.shadow.camera.top = shadowHalf;
-    this.sunLight.shadow.camera.bottom = -shadowHalf;
-    this.sunLight.shadow.camera.far = Math.max(120, this.worldHalf * 5.8);
+    this.sunLight.shadow.camera.left = -metrics.shadowHalf;
+    this.sunLight.shadow.camera.right = metrics.shadowHalf;
+    this.sunLight.shadow.camera.top = metrics.shadowHalf;
+    this.sunLight.shadow.camera.bottom = -metrics.shadowHalf;
+    this.sunLight.shadow.camera.far = Math.max(140, spanXZ * 3.2);
     this.sunLight.shadow.camera.updateProjectionMatrix();
 
     this.fillLight.position.set(
@@ -478,7 +523,7 @@ export class WorldScene {
       this.islandCenter.z - this.worldHalf * 1.0,
     );
 
-    const skyScale = Math.max(1.0, this.worldScale * 0.88);
+    const skyScale = Math.max(1.0, (metrics.oceanSpan * 0.68) / BASE_SKY_RADIUS);
     const sunDir = new THREE.Vector3()
       .subVectors(this.sunLight.position, this.islandCenter)
       .normalize();
@@ -489,22 +534,29 @@ export class WorldScene {
       .addScaledVector(sunDir, BASE_SKY_RADIUS * skyScale * 0.84);
     this.sunOrbGroup.scale.setScalar(skyScale);
 
+    // Position distant floating silhouette islets cleanly at worldSize * 1.15 .. 1.6
     this.distantIsletsRoot.position.set(this.islandCenter.x, 0, this.islandCenter.z);
-    this.distantIsletsRoot.scale.set(
-      this.worldScale,
-      Math.max(1.0, this.worldScale * 0.72),
-      this.worldScale,
-    );
+    this.distantIsletsRoot.scale.set(1, 1, 1);
+    const isletVisualScale = Math.max(1.0, (spanXZ / DEFAULT_WORLD_SPAN_X) * 0.85);
+    for (const islet of this.distantIslets) {
+      const dist =
+        metrics.isletMinDist +
+        islet.distT * (metrics.isletMaxDist - metrics.isletMinDist);
+      islet.group.position.x = Math.cos(islet.angle) * dist;
+      islet.group.position.z = Math.sin(islet.angle) * dist;
+      islet.group.scale.setScalar(islet.baseScale * isletVisualScale);
+    }
 
+    const cloudScale = metrics.cloudRadius / BASE_CLOUD_RADIUS;
     this.cloudsRoot.position.set(this.islandCenter.x, 0, this.islandCenter.z);
-    this.cloudsRoot.scale.set(this.worldScale, 1.0, this.worldScale);
+    this.cloudsRoot.scale.set(cloudScale, 1.0, cloudScale);
 
     this.waterGroup.position.set(
       this.islandCenter.x,
       this.waterLevel,
       this.islandCenter.z,
     );
-    const oceanScale = Math.max(1.0, this.worldScale);
+    const oceanScale = metrics.oceanSpan / BASE_OCEAN_SPAN;
     this.oceanMesh.scale.set(oceanScale, oceanScale, 1);
 
     const centerUniform = this.oceanMat.uniforms.uIslandCenter;
@@ -516,14 +568,22 @@ export class WorldScene {
       scaleUniform.value = this.worldScale;
     }
 
-    const effectiveFogDensity = FOG_DENSITY / Math.sqrt(Math.max(1.0, this.worldScale));
     if (this.scene.fog instanceof THREE.FogExp2) {
-      this.scene.fog.density = effectiveFogDensity;
+      this.scene.fog.density = metrics.fogDensity;
     }
     const fogUniform = this.oceanMat.uniforms.uFogDensity;
     if (fogUniform) {
-      fogUniform.value = effectiveFogDensity;
+      fogUniform.value = metrics.fogDensity;
     }
+  }
+
+  /** Recenter and scale sun shadows, ocean, sky dome, clouds, and horizon islets for Duel (60m) vs Grand (144m) worlds. */
+  public setWorldBounds(
+    worldWidth: number,
+    worldHeight: number,
+    worldDepth: number,
+  ): void {
+    this.configureForWorldSize(worldWidth, worldHeight, worldDepth);
   }
 
   /** Set the vertical ocean height (for sudden-death rising tide). */
@@ -630,20 +690,21 @@ export class WorldScene {
   }
 
   private buildDistantIslets(): void {
+    const initialMetrics = computeWorldSceneMetrics(DEFAULT_WORLD_SPAN_X);
     const specs: ReadonlyArray<{
       angle: number;
-      dist: number;
+      distT: number;
       y: number;
       scale: number;
       phase: number;
     }> = [
-      { angle: 0.35, dist: 92, y: 12, scale: 1.3, phase: 0.4 },
-      { angle: 1.25, dist: 112, y: 18, scale: 1.65, phase: 1.7 },
-      { angle: 2.15, dist: 96, y: 10, scale: 1.15, phase: 2.8 },
-      { angle: 3.1, dist: 124, y: 21, scale: 1.85, phase: 3.9 },
-      { angle: 4.05, dist: 104, y: 14, scale: 1.4, phase: 4.6 },
-      { angle: 5.05, dist: 88, y: 9, scale: 1.1, phase: 5.5 },
-      { angle: 5.75, dist: 118, y: 16, scale: 1.55, phase: 1.1 },
+      { angle: 0.35, distT: 0.12, y: 12, scale: 1.3, phase: 0.4 },
+      { angle: 1.25, distT: 0.62, y: 18, scale: 1.65, phase: 1.7 },
+      { angle: 2.15, distT: 0.25, y: 10, scale: 1.15, phase: 2.8 },
+      { angle: 3.1, distT: 0.96, y: 21, scale: 1.85, phase: 3.9 },
+      { angle: 4.05, distT: 0.48, y: 14, scale: 1.4, phase: 4.6 },
+      { angle: 5.05, distT: 0.05, y: 9, scale: 1.1, phase: 5.5 },
+      { angle: 5.75, distT: 0.78, y: 16, scale: 1.55, phase: 1.1 },
     ];
 
     for (const sp of specs) {
@@ -686,15 +747,25 @@ export class WorldScene {
       );
       spireTree.position.set(1.2, 3.4, -0.6);
 
+      const dist =
+        initialMetrics.isletMinDist +
+        sp.distT * (initialMetrics.isletMaxDist - initialMetrics.isletMinDist);
       group.add(underRock, crown, spireTree);
       group.position.set(
-        Math.cos(sp.angle) * sp.dist,
+        Math.cos(sp.angle) * dist,
         sp.y,
-        Math.sin(sp.angle) * sp.dist,
+        Math.sin(sp.angle) * dist,
       );
       group.scale.setScalar(sp.scale);
       this.distantIsletsRoot.add(group);
-      this.distantIslets.push({ group, baseY: sp.y, bobPhase: sp.phase });
+      this.distantIslets.push({
+        group,
+        angle: sp.angle,
+        distT: sp.distT,
+        baseScale: sp.scale,
+        baseY: sp.y,
+        bobPhase: sp.phase,
+      });
     }
   }
 

@@ -1301,10 +1301,36 @@ function buildAimIndicator(teamColor: string): THREE.Group {
   return group;
 }
 
+function createDropShadowTexture(): THREE.CanvasTexture | null {
+  if (typeof document === "undefined") {
+    return null;
+  }
+  const canvas = document.createElement("canvas");
+  canvas.width = 64;
+  canvas.height = 64;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) {
+    return null;
+  }
+  const grad = ctx.createRadialGradient(32, 32, 4, 32, 32, 30);
+  grad.addColorStop(0.0, "rgba(4, 10, 20, 0.88)");
+  grad.addColorStop(0.55, "rgba(4, 10, 20, 0.52)");
+  grad.addColorStop(1.0, "rgba(4, 10, 20, 0.0)");
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, 64, 64);
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  return texture;
+}
+
+const BACKFLIP_ANIM_SEC = 0.55;
+
 /**
  * Smooth 3D character rig for Critter Siege with automatic Hunyuan3D GLB hero model
  * loading, procedural fallback, 4 calibrated hardpoint anchors, active aiming barrel,
- * squash-stretch animation, clean GPU disposal, and floating HP bar sprite.
+ * airborne ground contact shadow disc, squash-stretch/backflip animation, clean GPU
+ * disposal, and floating HP bar sprite.
  */
 export class CritterRig {
   public readonly root: THREE.Group;
@@ -1315,6 +1341,8 @@ export class CritterRig {
   private readonly apexGroup: THREE.Group;
   private readonly aimIndicator: THREE.Group;
   private readonly selectionRing: THREE.Mesh;
+  private readonly dropShadow: THREE.Mesh;
+  private readonly dropShadowTexture: THREE.CanvasTexture | null;
   private readonly teamColor: string;
   private readonly label: string;
 
@@ -1331,6 +1359,7 @@ export class CritterRig {
   private lastHp = 100;
   private lastMaxHp = 100;
   private animTime = 0;
+  private backflipTimerSec = 0;
   private baseRingScale = 1.0;
   private disposed = false;
 
@@ -1382,6 +1411,22 @@ export class CritterRig {
     this.selectionRing.position.y = 0.04;
     this.selectionRing.visible = false;
     this.root.add(this.selectionRing);
+
+    this.dropShadowTexture = createDropShadowTexture();
+    const shadowGeo = new THREE.CircleGeometry(0.56, 24);
+    const shadowMat = new THREE.MeshBasicMaterial({
+      color: this.dropShadowTexture ? 0xffffff : 0x06101d,
+      ...(this.dropShadowTexture ? { map: this.dropShadowTexture } : {}),
+      transparent: true,
+      opacity: 0.62,
+      depthWrite: false,
+    });
+    this.dropShadow = new THREE.Mesh(shadowGeo, shadowMat);
+    this.dropShadow.name = "drop_shadow";
+    this.dropShadow.rotation.x = -Math.PI * 0.5;
+    this.dropShadow.position.y = 0.04;
+    this.dropShadow.renderOrder = 1;
+    this.root.add(this.dropShadow);
 
     this.initHpBarSprite();
 
@@ -1511,7 +1556,35 @@ export class CritterRig {
     }
   }
 
-  /** Advance idle breathing, lively hop & squash-stretch, aiming barrel pitch, and active ring pulse. */
+  /**
+   * Position the soft dark ground contact shadow disc directly on terrain beneath
+   * standing or airborne critters so jumps and cliff edges are effortless to judge.
+   */
+  public updateDropShadow(groundY: number | null): void {
+    if (groundY === null || !Number.isFinite(groundY)) {
+      this.dropShadow.visible = false;
+      return;
+    }
+    const heightAbove = Math.max(0, this.root.position.y - groundY);
+    if (heightAbove >= 20.0) {
+      this.dropShadow.visible = false;
+      return;
+    }
+    this.dropShadow.visible = true;
+    this.dropShadow.position.set(0, groundY - this.root.position.y + 0.04, 0);
+    const altitudeShrink = Math.max(0.42, 1.0 - heightAbove * 0.055);
+    this.dropShadow.scale.setScalar(this.baseRingScale * altitudeShrink);
+    if (this.dropShadow.material instanceof THREE.MeshBasicMaterial) {
+      this.dropShadow.material.opacity = Math.max(0.18, 0.62 - heightAbove * 0.04);
+    }
+  }
+
+  /** Trigger a classic 3D artillery 360-degree backflip somersault animation. */
+  public triggerBackflip(): void {
+    this.backflipTimerSec = BACKFLIP_ANIM_SEC;
+  }
+
+  /** Advance idle breathing, lively hop & squash-stretch, backflip spin, aiming barrel pitch, and active ring pulse. */
   public updateAnimation(
     dtSec: number,
     moving: boolean,
@@ -1538,10 +1611,17 @@ export class CritterRig {
     this.bodyGroup.scale.y += (scaleY - this.bodyGroup.scale.y) * lerpK;
     this.bodyGroup.scale.z += (scaleXZ - this.bodyGroup.scale.z) * lerpK;
 
-    const targetPitch = Math.max(-0.26, Math.min(0.26, -safeVy * 0.036));
-    const moveRoll = moving ? Math.sin(this.animTime * 12.5) * 0.085 : 0;
-    this.bodyGroup.rotation.x += (targetPitch - this.bodyGroup.rotation.x) * Math.min(1, safeDt * 12);
-    this.bodyGroup.rotation.z += (moveRoll - this.bodyGroup.rotation.z) * Math.min(1, safeDt * 12);
+    if (this.backflipTimerSec > 0) {
+      this.backflipTimerSec = Math.max(0, this.backflipTimerSec - safeDt);
+      const flipProgress = 1 - this.backflipTimerSec / BACKFLIP_ANIM_SEC;
+      this.bodyGroup.rotation.x = -flipProgress * Math.PI * 2;
+      this.bodyGroup.rotation.z *= 0.85;
+    } else {
+      const targetPitch = Math.max(-0.26, Math.min(0.26, -safeVy * 0.036));
+      const moveRoll = moving ? Math.sin(this.animTime * 12.5) * 0.085 : 0;
+      this.bodyGroup.rotation.x += (targetPitch - this.bodyGroup.rotation.x) * Math.min(1, safeDt * 12);
+      this.bodyGroup.rotation.z += (moveRoll - this.bodyGroup.rotation.z) * Math.min(1, safeDt * 12);
+    }
 
     if (this.apexGroup.children.length > 0) {
       this.apexGroup.rotation.y += safeDt * 1.4;
@@ -1593,6 +1673,13 @@ export class CritterRig {
     this.root.remove(this.selectionRing);
     this.selectionRing.geometry.dispose();
     disposeMaterial(this.selectionRing.material);
+
+    this.root.remove(this.dropShadow);
+    this.dropShadow.geometry.dispose();
+    disposeMaterial(this.dropShadow.material);
+    if (this.dropShadowTexture) {
+      this.dropShadowTexture.dispose();
+    }
 
     if (this.hpSprite) {
       this.root.remove(this.hpSprite);

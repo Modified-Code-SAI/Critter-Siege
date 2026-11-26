@@ -6,6 +6,7 @@ import {
   InputController,
   type InputCallbacks,
   type InputCanvasTarget,
+  type InputDocumentTarget,
   type InputGlobalTarget,
 } from "../src/game/inputController.js";
 import { TrajectoryPreview } from "../src/game/trajectoryPreview.js";
@@ -79,6 +80,39 @@ describe("CameraRig", () => {
     rig.toggleDroneRecon();
     rig.update(makeContext(world));
     expect(rig.getMode()).toBe("over_shoulder");
+  });
+
+  it("derives dynamic 144m Grand Drone Recon center and min/default/max zoom from world size", () => {
+    const grandWorld = new SdfWorld(777, "emerald_spire", "grand");
+    const rig = new CameraRig(16 / 9);
+    const expectedCenter = new THREE.Vector3(
+      grandWorld.centerX,
+      grandWorld.worldHeight * 0.25,
+      grandWorld.centerZ,
+    );
+
+    rig.toggleDroneRecon();
+    for (let i = 0; i < 60; i++) {
+      rig.update(makeContext(grandWorld, { dtSec: 0.1 }));
+    }
+    const defaultDist = rig.camera.position.distanceTo(expectedCenter);
+    expect(defaultDist).toBeCloseTo(grandWorld.worldWidth * 0.72, 0);
+
+    // Zoom all the way in -> clamps cleanly to worldWidth * 0.35
+    rig.orbitDrone(0, 0, -500);
+    for (let i = 0; i < 60; i++) {
+      rig.update(makeContext(grandWorld, { dtSec: 0.1 }));
+    }
+    const minDist = rig.camera.position.distanceTo(expectedCenter);
+    expect(minDist).toBeCloseTo(grandWorld.worldWidth * 0.35, 0);
+
+    // Zoom all the way out -> clamps cleanly to worldWidth * 1.15
+    rig.orbitDrone(0, 0, 500);
+    for (let i = 0; i < 60; i++) {
+      rig.update(makeContext(grandWorld, { dtSec: 0.1 }));
+    }
+    const maxDist = rig.camera.position.distanceTo(expectedCenter);
+    expect(maxDist).toBeCloseTo(grandWorld.worldWidth * 1.15, 0);
   });
 
   it("forces shot_cam during RESOLVING with shotPos and returns cleanly to over_shoulder in RETREAT", () => {
@@ -230,9 +264,10 @@ describe("CameraRig", () => {
     expect(preview.group.children.length).toBe(0);
   });
 
-  it("handles InputController charge fire, hotkeys, drone ping, and detaches all listeners on dispose", () => {
+  it("handles Pointer Lock mouse-look, zero-misfire unlocked click/drag, Q/E turn, KeyX nudge, UI fire, double-tap Space backflip, and clean dispose", () => {
     const canvasListeners = new Map<string, Set<EventListenerOrEventListenerObject>>();
     const windowListeners = new Map<string, Set<EventListenerOrEventListenerObject>>();
+    const docListeners = new Map<string, Set<EventListenerOrEventListenerObject>>();
 
     const makeDispatcher = (
       store: Map<string, Set<EventListenerOrEventListenerObject>>,
@@ -263,15 +298,35 @@ describe("CameraRig", () => {
 
     const canvasBus = makeDispatcher(canvasListeners);
     const windowBus = makeDispatcher(windowListeners);
+    const docBus = makeDispatcher(docListeners);
+
+    let pointerLockRequests = 0;
+    let pointerLockExits = 0;
+    let lockedEl: unknown = null;
 
     const mockCanvas: InputCanvasTarget = {
       addEventListener: (t, l) => canvasBus.addEventListener(t, l),
       removeEventListener: (t, l) => canvasBus.removeEventListener(t, l),
       getBoundingClientRect: () => ({ left: 0, top: 0, width: 800, height: 600 }),
+      requestPointerLock: () => {
+        pointerLockRequests += 1;
+      },
     };
     const mockWindow: InputGlobalTarget = {
       addEventListener: (t, l) => windowBus.addEventListener(t, l),
       removeEventListener: (t, l) => windowBus.removeEventListener(t, l),
+    };
+    const mockDoc: InputDocumentTarget = {
+      get pointerLockElement() {
+        return lockedEl;
+      },
+      exitPointerLock: () => {
+        pointerLockExits += 1;
+        lockedEl = null;
+        docBus.dispatch("pointerlockchange", {} as Event);
+      },
+      addEventListener: (t, l) => docBus.addEventListener(t, l),
+      removeEventListener: (t, l) => docBus.removeEventListener(t, l),
     };
 
     const firedPowers: number[] = [];
@@ -313,10 +368,48 @@ describe("CameraRig", () => {
       callbacks,
       undefined,
       mockWindow,
+      mockDoc,
     );
     controller.setCanAct(true, true, false);
+    controller.setAim(0, 0.18);
+    expect(controller.isPointerLocked()).toBe(false);
 
-    // Hold LMB for 0.7s (7 x 0.1s frames) -> power ramps from 0.15 halfway toward 1.0, then release fires
+    // 1. Unlocked first click requests pointer lock cleanly WITHOUT firing or charging
+    canvasBus.dispatch("mousedown", { button: 0, clientX: 400, clientY: 300 } as unknown as Event);
+    expect(pointerLockRequests).toBe(1);
+    const snap = controller.update(0.1);
+    expect(snap.charging).toBe(false);
+    windowBus.dispatch("mouseup", { button: 0, clientX: 401, clientY: 300 } as unknown as Event);
+    expect(firedPowers.length).toBe(0);
+
+    // 2. Unlocked LMB drag (>6px) smoothly orbits yaw/pitch with ZERO misfire on release
+    const yawBeforeDrag = controller.update(0).yaw;
+    canvasBus.dispatch("mousedown", { button: 0, clientX: 400, clientY: 300 } as unknown as Event);
+    windowBus.dispatch("mousemove", { clientX: 440, clientY: 280 } as unknown as Event);
+    windowBus.dispatch("mouseup", { button: 0, clientX: 440, clientY: 280 } as unknown as Event);
+    expect(controller.update(0).yaw).not.toBeCloseTo(yawBeforeDrag, 3);
+    expect(firedPowers.length).toBe(0);
+
+    // 3. Unlocked RMB drag (>6px) smoothly orbits without snapping into First-Person Visor
+    const yawBeforeRmbDrag = controller.update(0).yaw;
+    canvasBus.dispatch("mousedown", { button: 2, clientX: 400, clientY: 300 } as unknown as Event);
+    windowBus.dispatch("mousemove", { clientX: 350, clientY: 310 } as unknown as Event);
+    windowBus.dispatch("mouseup", { button: 2, clientX: 350, clientY: 310 } as unknown as Event);
+    expect(controller.update(0).yaw).not.toBeCloseTo(yawBeforeRmbDrag, 3);
+    expect(fpStates.length).toBe(0);
+
+    // 4. Engage Pointer Lock -> free mouse-look with NO button held, hold LMB charges & releases to fire
+    lockedEl = mockCanvas;
+    docBus.dispatch("pointerlockchange", {} as Event);
+    expect(controller.isPointerLocked()).toBe(true);
+
+    const yawLockedBefore = controller.update(0).yaw;
+    windowBus.dispatch("mousemove", { movementX: 25, movementY: -15 } as unknown as Event);
+    const afterFreeLook = controller.update(0);
+    expect(afterFreeLook.yaw).toBeLessThan(yawLockedBefore);
+    expect(afterFreeLook.pitch).toBeGreaterThan(0.18);
+
+    // Hold LMB while locked for 0.7s -> ramps charge power and fires on release
     canvasBus.dispatch("mousedown", { button: 0, clientX: 400, clientY: 300 } as unknown as Event);
     let mid = controller.update(0.1);
     for (let i = 0; i < 6; i++) {
@@ -329,7 +422,94 @@ describe("CameraRig", () => {
     expect(firedPowers.length).toBe(1);
     expect(firedPowers[0]).toBeCloseTo(mid.chargePower, 2);
 
-    // Keyboard shortcuts: Tab (preventDefault), V, 1..6, F, E, G
+    // 5. Pressing RMB mid-charge while locked cancels charge cleanly AND enters First-Person Visor
+    canvasBus.dispatch("mousedown", { button: 0, clientX: 400, clientY: 300 } as unknown as Event);
+    expect(controller.update(0.1).charging).toBe(true);
+    canvasBus.dispatch("mousedown", { button: 2, clientX: 400, clientY: 300 } as unknown as Event);
+    expect(controller.update(0).charging).toBe(false);
+    expect(fpStates).toEqual([true]);
+    // Releasing LMB after cancel must NOT fire!
+    windowBus.dispatch("mouseup", { button: 0, clientX: 400, clientY: 300 } as unknown as Event);
+    expect(firedPowers.length).toBe(1);
+    // Releasing RMB exits First-Person Visor
+    windowBus.dispatch("mouseup", { button: 2, clientX: 400, clientY: 300 } as unknown as Event);
+    expect(fpStates).toEqual([true, false]);
+
+    // 6. Q / E smoothly rotate camera yaw (Q turns left +yaw, E turns right -yaw) and E never triggers wind nudge
+    controller.setAim(0, 0.18);
+    windowBus.dispatch("keydown", { code: "KeyQ", repeat: false } as unknown as Event);
+    const afterQ = controller.update(0.2);
+    windowBus.dispatch("keyup", { code: "KeyQ" } as unknown as Event);
+    expect(afterQ.yaw).toBeGreaterThan(0.25);
+
+    windowBus.dispatch("keydown", { code: "KeyE", repeat: false } as unknown as Event);
+    const afterE = controller.update(0.2);
+    windowBus.dispatch("keyup", { code: "KeyE" } as unknown as Event);
+    expect(afterE.yaw).toBeCloseTo(0, 2);
+    expect(nudgeCalls).toBe(0);
+
+    // 7. Accessible HOLD TO FIRE UI API + cancelCharge() + Hold Enter
+    controller.startUiFireCharge();
+    controller.update(0.2);
+    controller.update(0.2);
+    controller.releaseUiFireCharge();
+    expect(firedPowers.length).toBe(2);
+
+    controller.startUiFireCharge();
+    expect(controller.update(0.1).charging).toBe(true);
+    controller.cancelCharge();
+    expect(controller.update(0).charging).toBe(false);
+    controller.releaseUiFireCharge();
+    expect(firedPowers.length).toBe(2);
+
+    // Hold Enter fires cleanly even when unlocked
+    controller.exitPointerLock();
+    expect(pointerLockExits).toBe(1);
+    expect(controller.isPointerLocked()).toBe(false);
+    windowBus.dispatch("keydown", { code: "Enter", repeat: false } as unknown as Event);
+    controller.update(0.2);
+    windowBus.dispatch("keyup", { code: "Enter" } as unknown as Event);
+    expect(firedPowers.length).toBe(3);
+
+    // 8. Double-tap Space within 280ms while stationary triggers backflipPressed; slow tap or walking does not
+    windowBus.dispatch("keydown", { code: "Space", repeat: false } as unknown as Event);
+    const firstTap = controller.update(0.08);
+    windowBus.dispatch("keyup", { code: "Space" } as unknown as Event);
+    expect(firstTap.jumpPressed).toBe(true);
+    expect(firstTap.backflipPressed).toBe(false);
+
+    controller.update(0.08); // total 160ms <= 280ms
+    windowBus.dispatch("keydown", { code: "Space", repeat: false } as unknown as Event);
+    const secondTap = controller.update(0.016);
+    windowBus.dispatch("keyup", { code: "Space" } as unknown as Event);
+    expect(secondTap.backflipPressed).toBe(true);
+    expect(secondTap.jumpPressed).toBe(false);
+
+    // Waiting > 280ms resets double-tap window
+    windowBus.dispatch("keydown", { code: "Space", repeat: false } as unknown as Event);
+    controller.update(0.05);
+    windowBus.dispatch("keyup", { code: "Space" } as unknown as Event);
+    controller.update(0.2);
+    controller.update(0.2); // 450ms > 280ms
+    windowBus.dispatch("keydown", { code: "Space", repeat: false } as unknown as Event);
+    const slowTap = controller.update(0.016);
+    windowBus.dispatch("keyup", { code: "Space" } as unknown as Event);
+    expect(slowTap.backflipPressed).toBe(false);
+    expect(slowTap.jumpPressed).toBe(true);
+
+    // Walking forward (KeyW held) blocks backflip on double-tap Space
+    controller.update(0.35);
+    windowBus.dispatch("keydown", { code: "KeyW", repeat: false } as unknown as Event);
+    windowBus.dispatch("keydown", { code: "Space", repeat: false } as unknown as Event);
+    controller.update(0.05);
+    windowBus.dispatch("keyup", { code: "Space" } as unknown as Event);
+    windowBus.dispatch("keydown", { code: "Space", repeat: false } as unknown as Event);
+    const walkTap = controller.update(0.016);
+    windowBus.dispatch("keyup", { code: "Space" } as unknown as Event);
+    windowBus.dispatch("keyup", { code: "KeyW" } as unknown as Event);
+    expect(walkTap.backflipPressed).toBe(false);
+
+    // 9. Keyboard shortcuts: Tab (preventDefault), V, 1..6, F, X (Spectator Drone Wind Nudge), G
     let tabPrevented = false;
     windowBus.dispatch("keydown", {
       code: "Tab",
@@ -344,15 +524,15 @@ describe("CameraRig", () => {
     windowBus.dispatch("keydown", { code: "KeyV", repeat: false } as unknown as Event);
     windowBus.dispatch("keydown", { code: "Digit3", repeat: false } as unknown as Event);
     windowBus.dispatch("keydown", { code: "KeyF", repeat: false } as unknown as Event);
-    windowBus.dispatch("keydown", { code: "KeyE", repeat: false } as unknown as Event);
+    windowBus.dispatch("keydown", { code: "KeyX", repeat: false } as unknown as Event);
     windowBus.dispatch("keydown", { code: "KeyG", repeat: false } as unknown as Event);
-    expect(fpStates).toEqual([true]);
+    expect(fpStates).toEqual([true, false, true]);
     expect(selectedIndices).toEqual([2]);
     expect(burrowCalls).toBe(1);
     expect(nudgeCalls).toBe(1);
     expect(utilityCalls).toBe(1);
 
-    // Drone click-to-ping raycasts against target mesh
+    // 10. Drone click-to-ping raycasts against target mesh
     const targetPlane = new THREE.Mesh(
       new THREE.PlaneGeometry(30, 30),
       new THREE.MeshBasicMaterial(),
@@ -371,12 +551,15 @@ describe("CameraRig", () => {
     targetPlane.geometry.dispose();
     (targetPlane.material as THREE.Material).dispose();
 
-    // Dispose must detach EVERY listener cleanly
+    // 11. Dispose must detach EVERY listener cleanly
     controller.dispose();
     for (const set of canvasListeners.values()) {
       expect(set.size).toBe(0);
     }
     for (const set of windowListeners.values()) {
+      expect(set.size).toBe(0);
+    }
+    for (const set of docListeners.values()) {
       expect(set.size).toBe(0);
     }
   });

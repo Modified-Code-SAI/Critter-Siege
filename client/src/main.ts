@@ -11,6 +11,7 @@ import {
   type GameMode,
   type HazardState,
   type ImpactEvent,
+  type MapScaleChoice,
   type MatchState,
   type SpeciesId,
   type ThemeId,
@@ -76,6 +77,10 @@ const LOBBY_SHOWCASE_SPECIES: readonly {
 
 const GRAVITY = 18.0;
 const MOVE_SYNC_INTERVAL_MS = 66;
+const AUTO_HOP_MAX_STEP_M = 1.0;
+const BACKFLIP_JUMP_MULT = 1.48;
+const BACKFLIP_BACKWARD_SPEED = 3.8;
+const BACKFLIP_GRACE_SEC = 0.32;
 const WORLD_SPAN_X = SDF_DIMS.nx * SDF_DIMS.voxelSize;
 const WORLD_SPAN_Z = SDF_DIMS.nz * SDF_DIMS.voxelSize;
 const WORLD_CENTER_X = WORLD_SPAN_X * 0.5;
@@ -126,7 +131,7 @@ function findLocalGroundY(
   z: number,
   refY: number,
 ): number | null {
-  const startY = Math.min(world.worldHeight - 1.5, refY + 1.2);
+  const startY = Math.min(world.worldHeight - 1.5, refY + 1.3);
   const endY = Math.max(0.5, refY - 1.6);
   const step = 0.2;
 
@@ -153,9 +158,47 @@ function findLocalGroundY(
   }
 
   const topY = world.getSurfaceY(x, z);
-  if (topY !== null && topY <= refY + 1.0) {
+  if (topY !== null && topY <= refY + AUTO_HOP_MAX_STEP_M + 0.05) {
     return topY;
   }
+  return null;
+}
+
+function findDropShadowGroundY(
+  world: SdfWorld,
+  x: number,
+  z: number,
+  refY: number,
+  waterLevel: number,
+): number | null {
+  const startY = Math.min(world.worldHeight - 1.0, refY + 0.35);
+  const endY = Math.max(0.4, waterLevel);
+  if (startY <= endY) {
+    return null;
+  }
+  const step = 0.25;
+  let prevY = startY;
+  let prevVal = world.sample(x, prevY, z);
+
+  for (let y = startY - step; y >= endY; y -= step) {
+    const currVal = world.sample(x, y, z);
+    if (prevVal >= 0 && currVal < 0) {
+      let lo = y;
+      let hi = prevY;
+      for (let i = 0; i < 4; i++) {
+        const mid = (lo + hi) * 0.5;
+        if (world.sample(x, mid, z) < 0) {
+          lo = mid;
+        } else {
+          hi = mid;
+        }
+      }
+      return (lo + hi) * 0.5;
+    }
+    prevY = y;
+    prevVal = currVal;
+  }
+
   return null;
 }
 
@@ -171,9 +214,11 @@ function isEditableElement(target: EventTarget | null): boolean {
 }
 
 /**
- * Top-level Critter Siege browser application integrating 3D SDF island rendering,
- * sculpted critters, 4-mode camera rig, physics movement, Shot Cam playback,
- * WebAudio synthesis, progression, and Sandbox + WebSocket multiplayer.
+ * Top-level Critter Siege browser application integrating 3D SDF island rendering
+ * (60m Duel & 144m Grand), sculpted critters with airborne ground shadows,
+ * grandma-friendly Pointer-Lock & keyboard controls, 4-mode camera rig,
+ * Auto-Hop + Double-Tap Space Backflip kinematics, Shot Cam playback, WebAudio
+ * synthesis, progression, and Sandbox + WebSocket multiplayer.
  */
 class CritterSiegeApp {
   private readonly appContainer: HTMLElement;
@@ -212,10 +257,12 @@ class CritterSiegeApp {
   private selectedGadget: GadgetId = "gale_mortar";
   private dronePing: Vec3 | null = null;
 
-  // Local critter movement kinematics
+  // Local critter movement kinematics (WASD + Auto-Hop + Double-Tap Space Backflip)
   private readonly localPos = new THREE.Vector3(WORLD_CENTER_X, 10, WORLD_CENTER_Z);
   private readonly localVel = new THREE.Vector3(0, 0, 0);
   private localGrounded = true;
+  private localTimeSinceGroundedSec = 0;
+  private backflipUsedThisJump = false;
   private localTurnKey = "";
   private lastMoveSyncMs = 0;
   private lastSyncedPos = new THREE.Vector3(WORLD_CENTER_X, 10, WORLD_CENTER_Z);
@@ -251,6 +298,7 @@ class CritterSiegeApp {
     this.lobbySelection = {
       theme: "emerald_spire",
       gameMode: "ffa",
+      mapScale: "auto",
       botCount: 3,
       bonusGadget: profile.unlockedBonusGadgets[0] ?? null,
       joinCodeInput: readRoomCodeFromUrl(),
@@ -273,6 +321,11 @@ class CritterSiegeApp {
 
     // Build initial live Lobby sculpted sky-island + lush scenery + sample critters & hazards
     this.activeWorld = new SdfWorld(4242, this.lobbySelection.theme);
+    this.worldScene.configureForWorldSize(
+      this.activeWorld.worldWidth,
+      this.activeWorld.worldHeight,
+      this.activeWorld.worldDepth,
+    );
     this.terrainRenderer = new TerrainRenderer(this.activeWorld);
     this.worldScene.scene.add(this.terrainRenderer.group);
 
@@ -395,6 +448,14 @@ class CritterSiegeApp {
         }
         this.refreshLobbyHud();
       },
+      onMapScaleChange: (mapScale: MapScaleChoice) => {
+        this.audio.playUiClick();
+        this.lobbySelection.mapScale = mapScale;
+        if (this.onlineLobby?.mode === "online") {
+          this.gameClient.sendLobbyConfig({ mapScale });
+        }
+        this.refreshLobbyHud();
+      },
       onBotCountChange: (count) => {
         this.audio.playUiClick();
         this.lobbySelection.botCount = count;
@@ -414,6 +475,9 @@ class CritterSiegeApp {
           {
             theme: this.lobbySelection.theme,
             mode: this.lobbySelection.gameMode,
+            ...(this.lobbySelection.mapScale !== undefined
+              ? { mapScale: this.lobbySelection.mapScale }
+              : {}),
             botCount: this.lobbySelection.botCount,
             bonusGadget: this.lobbySelection.bonusGadget,
           },
@@ -478,8 +542,18 @@ class CritterSiegeApp {
           this.cameraRig.exitDroneRecon();
           this.cameraRig.setFirstPerson(true);
         } else if (this.cameraRig.getMode() !== "drone_recon") {
+          this.input.exitPointerLock();
           this.cameraRig.toggleDroneRecon();
         }
+      },
+      onUiFireStart: () => {
+        this.input.startUiFireCharge();
+      },
+      onUiFireRelease: () => {
+        this.input.releaseUiFireCharge();
+      },
+      onUiFireCancel: () => {
+        this.input.cancelCharge();
       },
     });
 
@@ -496,6 +570,9 @@ class CritterSiegeApp {
         onSelectGadgetIndex: (idx) => this.selectGadgetByIndex(idx),
         onToggleDrone: () => {
           if (!this.inMatch) return;
+          if (this.cameraRig.getMode() !== "drone_recon") {
+            this.input.exitPointerLock();
+          }
           this.cameraRig.toggleDroneRecon();
         },
         onFirstPersonChange: (active) => {
@@ -519,6 +596,8 @@ class CritterSiegeApp {
         this.hud.showToast(muted ? "Audio muted" : "Audio enabled", "info");
       } else if (e.code === "Digit7") {
         this.selectGadgetByIndex(6);
+      } else if (e.key === "?" && this.inMatch) {
+        this.hud.toggleHelpCard();
       }
     };
 
@@ -557,12 +636,16 @@ class CritterSiegeApp {
       color: p.selectedColor,
       gameMode: this.lobbySelection.gameMode,
       theme: this.lobbySelection.theme,
+      ...(this.lobbySelection.mapScale !== undefined
+        ? { mapScale: this.lobbySelection.mapScale }
+        : {}),
       botCount: Math.max(1, this.lobbySelection.botCount),
       bonusGadget: this.lobbySelection.bonusGadget,
     });
   }
 
   private returnToLobby(): void {
+    this.input.exitPointerLock();
     this.gameClient.disconnect();
     this.inMatch = false;
     this.matchState = null;
@@ -628,6 +711,15 @@ class CritterSiegeApp {
     this.matchState = state;
     this.inMatch = true;
 
+    // Release Pointer Lock automatically whenever a modal UI requires cursor clicking
+    if (
+      state.phase === "ROUND_DRAFT" ||
+      state.phase === "DRAFT_IF_READY" ||
+      state.phase === "MATCH_OVER"
+    ) {
+      this.input.exitPointerLock();
+    }
+
     const suddenDeathTurn = state.mapScale === "grand" ? 8 : 6;
     const worldKey = `${state.matchId}:${state.seed}:${state.round}:${state.theme}:${state.mapScale}`;
     if (worldKey !== this.activeWorldKey) {
@@ -637,7 +729,7 @@ class CritterSiegeApp {
         state.theme,
         state.mapScale,
       );
-      this.worldScene.setWorldBounds(
+      this.worldScene.configureForWorldSize(
         this.activeWorld.worldWidth,
         this.activeWorld.worldHeight,
         this.activeWorld.worldDepth,
@@ -710,6 +802,8 @@ class CritterSiegeApp {
         );
         this.localVel.set(0, 0, 0);
         this.localGrounded = true;
+        this.localTimeSinceGroundedSec = 0;
+        this.backflipUsedThisJump = false;
         this.lastSyncedPos.copy(this.localPos);
 
         if (isControlling && turnKey !== this.localTurnKey) {
@@ -717,14 +811,20 @@ class CritterSiegeApp {
           if (state.phase === "ACTIVE") {
             this.hud.showTurnBanner(
               "YOUR TURN",
-              "Move · Aim · Hold Click to Fire",
+              "Move · Click to Look · Hold Click or Enter to Fire",
               "mine",
+              localCritter.species,
             );
             // Face toward nearest enemy at the start of your turn for instant aim feel
             const aimYaw = this.computeInitialTurnYaw(state, localCritter);
             this.input.setAim(aimYaw, 0.24);
           } else if (state.phase === "RETREAT") {
-            this.hud.showTurnBanner("RETREAT! 6s", "Run to cover!", "retreat");
+            this.hud.showTurnBanner(
+              "RETREAT! 6s",
+              "Run to cover!",
+              "retreat",
+              localCritter.species,
+            );
           }
         }
       }
@@ -1073,6 +1173,7 @@ class CritterSiegeApp {
     }
 
     for (const rig of this.critterRigs.values()) {
+      rig.updateDropShadow(rig.root.position.y);
       rig.updateAnimation(dtSec, false, 0, false);
     }
   }
@@ -1128,7 +1229,7 @@ class CritterSiegeApp {
     // Update Shot Cam projectile flight animation
     const shotPos = this.advanceShotPlayback(dtSec, state);
 
-    // Smooth local critter kinematics + 15 Hz sync
+    // Smooth local critter kinematics (WASD + Auto-Hop + Double-Tap Space Backflip) + 15 Hz sync
     if (canMove && localCritter && !isDroneMode) {
       this.stepLocalCritterMovement(
         dtSec,
@@ -1138,6 +1239,7 @@ class CritterSiegeApp {
         moveInput.forward,
         moveInput.right,
         moveInput.jumpPressed,
+        moveInput.backflipPressed,
         moveInput.glideHeld,
         moveInput.yaw,
         moveInput.pitch,
@@ -1176,7 +1278,7 @@ class CritterSiegeApp {
     const effectiveCamMode = this.cameraRig.getMode();
     const trackedCritterId = focusCritter?.id ?? localId;
 
-    // Update all critter rigs (hiding tracked critter cleanly in First-Person Optic Visor)
+    // Update all critter rigs + airborne ground contact shadow discs
     for (const c of state.critters) {
       const rig = this.critterRigs.get(c.id);
       if (!rig) continue;
@@ -1211,6 +1313,16 @@ class CritterSiegeApp {
         rig.root.visible = false;
       } else {
         rig.root.visible = c.alive;
+      }
+      if (rig.root.visible) {
+        const shadowGroundY = findDropShadowGroundY(
+          this.activeWorld,
+          rig.root.position.x,
+          rig.root.position.z,
+          rig.root.position.y,
+          state.waterLevel,
+        );
+        rig.updateDropShadow(shadowGroundY);
       }
       rig.applyMutations(c.equipped, c.apex);
       const aimPitch = isLocalControlled ? moveInput.pitch : c.pitch;
@@ -1294,6 +1406,8 @@ class CritterSiegeApp {
       essenceBreakdown: this.essenceBreakdown,
       showQuickStartHint,
       compass,
+      pointerLocked: this.input.isPointerLocked(),
+      canFire,
     });
   }
 
@@ -1379,6 +1493,7 @@ class CritterSiegeApp {
     forward: number,
     right: number,
     jumpPressed: boolean,
+    backflipPressed: boolean,
     glideHeld: boolean,
     yaw: number,
     pitch: number,
@@ -1386,6 +1501,12 @@ class CritterSiegeApp {
     const stats = computeCritterStats(critter.species, critter.equipped);
     const speedMult = state.phase === "RETREAT" ? stats.retreatRollBoost : 1.0;
     const moveSpeed = stats.moveSpeed * speedMult;
+
+    if (this.localGrounded) {
+      this.localTimeSinceGroundedSec = 0;
+    } else {
+      this.localTimeSinceGroundedSec += dtSec;
+    }
 
     let moveX = 0;
     let moveZ = 0;
@@ -1404,14 +1525,18 @@ class CritterSiegeApp {
       }
     }
 
-    if (moveX !== 0 || moveZ !== 0) {
+    // Combine airborne backflip momentum with player directional input
+    const totalVx = this.localGrounded ? moveX : moveX + this.localVel.x;
+    const totalVz = this.localGrounded ? moveZ : moveZ + this.localVel.z;
+
+    if (totalVx !== 0 || totalVz !== 0) {
       const nextX = Math.max(
         1.8,
-        Math.min(this.activeWorld.worldWidth - 1.8, this.localPos.x + moveX * dtSec),
+        Math.min(this.activeWorld.worldWidth - 1.8, this.localPos.x + totalVx * dtSec),
       );
       const nextZ = Math.max(
         1.8,
-        Math.min(this.activeWorld.worldDepth - 1.8, this.localPos.z + moveZ * dtSec),
+        Math.min(this.activeWorld.worldDepth - 1.8, this.localPos.z + totalVz * dtSec),
       );
 
       if (this.localGrounded) {
@@ -1424,11 +1549,19 @@ class CritterSiegeApp {
         if (groundY !== null) {
           const stepUp = groundY - this.localPos.y;
           const normal = this.activeWorld.sampleNormal(nextX, groundY, nextZ);
-          const minWalkNormal = stats.slopeCling ? 0.34 : 0.54;
+          // Smooth Auto-Hop: forgiving climb over small bumps & crater rims up to 1.0m
+          const minWalkNormal =
+            stepUp > 0.22
+              ? stats.slopeCling
+                ? 0.28
+                : 0.42
+              : stats.slopeCling
+                ? 0.34
+                : 0.54;
           const hasHeadroom =
             this.activeWorld.sample(nextX, groundY + 0.65, nextZ) > -0.05;
 
-          if (stepUp <= 0.95 && normal.y >= minWalkNormal && hasHeadroom) {
+          if (stepUp <= AUTO_HOP_MAX_STEP_M && normal.y >= minWalkNormal && hasHeadroom) {
             this.localPos.set(nextX, groundY, nextZ);
           }
         } else {
@@ -1445,13 +1578,29 @@ class CritterSiegeApp {
       }
     }
 
-    if (jumpPressed && this.localGrounded) {
+    // Classic 3D Artillery Double-Tap Space High Backflip (high vertical + slight backward vault!)
+    if (
+      backflipPressed &&
+      !this.backflipUsedThisJump &&
+      (this.localGrounded || this.localTimeSinceGroundedSec <= BACKFLIP_GRACE_SEC)
+    ) {
+      this.backflipUsedThisJump = true;
+      this.localGrounded = false;
+      this.localVel.y = stats.jumpImpulse * BACKFLIP_JUMP_MULT;
+      this.localVel.x = -Math.sin(yaw) * BACKFLIP_BACKWARD_SPEED;
+      this.localVel.z = -Math.cos(yaw) * BACKFLIP_BACKWARD_SPEED;
+      this.critterRigs.get(critter.id)?.triggerBackflip();
+      this.audio.playLaunch("vine_grapple");
+    } else if (jumpPressed && this.localGrounded) {
       this.localVel.y = stats.jumpImpulse;
       this.localGrounded = false;
       this.audio.playUiClick();
     }
 
     if (!this.localGrounded) {
+      const airDrag = Math.exp(-2.2 * dtSec);
+      this.localVel.x *= airDrag;
+      this.localVel.z *= airDrag;
       this.localVel.y -= GRAVITY * dtSec;
       const canGlide = stats.enablesGlide || stats.airControl >= 0.7;
       if (glideHeld && canGlide && this.localVel.y < -2.6) {
@@ -1474,8 +1623,10 @@ class CritterSiegeApp {
           );
           if (landingY !== null && this.localPos.y <= landingY + 0.08) {
             this.localPos.y = landingY;
-            this.localVel.y = 0;
+            this.localVel.set(0, 0, 0);
             this.localGrounded = true;
+            this.localTimeSinceGroundedSec = 0;
+            this.backflipUsedThisJump = false;
           }
         }
       }
@@ -1517,7 +1668,7 @@ class CritterSiegeApp {
         { x: this.localPos.x, y: this.localPos.y, z: this.localPos.z },
         yaw,
         pitch,
-        { x: moveX, y: this.localVel.y, z: moveZ },
+        { x: totalVx, y: this.localVel.y, z: totalVz },
       );
     }
   }
@@ -1589,7 +1740,7 @@ class CritterSiegeApp {
   private rebuildLobbyPreview(theme: ThemeId): void {
     this.previewTheme = theme;
     this.activeWorld = new SdfWorld(4242, theme, "duel");
-    this.worldScene.setWorldBounds(
+    this.worldScene.configureForWorldSize(
       this.activeWorld.worldWidth,
       this.activeWorld.worldHeight,
       this.activeWorld.worldDepth,
