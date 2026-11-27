@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   GADGET_CATALOG,
+  GALE_SCATTER_CONE_MIN_DOT,
+  GALE_SCATTER_REACH,
   GRAVITY,
   MatchEngine,
   SDF_DIMS,
@@ -8,8 +10,10 @@ import {
   computeFallDamage,
   planBotTurn,
   sampleAimArc,
+  sampleGrappleTarget,
   simulateShot,
   type CritterState,
+  type EvoPodState,
   type MatchConfig,
   type ShotParams,
 } from "@critter/shared";
@@ -3510,5 +3514,469 @@ describe("Phase 1 Overhaul: 5-Round Persistent Map, Two-Stage Tide & Siege Coin 
       expect(solidChecks).toBeGreaterThan(20);
       expect(airChecks).toBeGreaterThan(20);
     }
+  });
+
+  it("Review Focus #5 (Gale Scatter 6m cone): applies smooth falloff at 5.0m, misses 4.5m off-axis, blocks behind solid wall >2.0m, and keeps close <=2.8m thorns", () => {
+    expect(GALE_SCATTER_REACH).toBe(6.0);
+    expect(GALE_SCATTER_CONE_MIN_DOT).toBe(0.85);
+
+    const world = new SdfWorld(55, "emerald_spire");
+
+    // Find a level solid stretch with unobstructed air at +0.5m height over 5.5m
+    let basePos: { x: number; y: number; z: number } | null = null;
+    let aimDir: { x: number; y: number; z: number } | null = null;
+    for (let x = 14; x <= 46 && !basePos; x += 2) {
+      for (let z = 14; z <= 46 && !basePos; z += 2) {
+        const y0 = world.getSurfaceY(x, z);
+        if (y0 === null || y0 < 4) continue;
+        for (let a = 0; a < 8; a++) {
+          const ang = (a * Math.PI) / 4;
+          const dx = Math.cos(ang);
+          const dz = Math.sin(ang);
+          const yClose = world.getSurfaceY(x + dx * 2.0, z + dz * 2.0);
+          const yFar = world.getSurfaceY(x + dx * 5.0, z + dz * 5.0);
+          const yBeyond = world.getSurfaceY(x + dx * 7.5, z + dz * 7.5);
+          if (
+            yClose === null ||
+            yFar === null ||
+            yBeyond === null ||
+            Math.abs(yClose - y0) > 1.0 ||
+            Math.abs(yFar - y0) > 1.0 ||
+            Math.abs(yBeyond - y0) > 1.5
+          ) {
+            continue;
+          }
+          let clear = true;
+          for (let s = 0.5; s <= 5.5; s += 0.5) {
+            if (world.isSolid(x + dx * s, y0 + 0.65, z + dz * s)) {
+              clear = false;
+              break;
+            }
+          }
+          if (clear) {
+            basePos = { x, y: y0, z };
+            aimDir = { x: dx, y: 0, z: dz };
+            break;
+          }
+        }
+      }
+    }
+    expect(basePos).not.toBeNull();
+    expect(aimDir).not.toBeNull();
+    if (!basePos || !aimDir) return;
+
+    const origin = { x: basePos.x, y: basePos.y + 0.5, z: basePos.z };
+    const attacker = makeDummyCritter({
+      id: "attacker",
+      species: "norway_rat",
+      position: { ...basePos },
+      hp: 200,
+      maxHp: 200,
+    });
+
+    // 1. Compare close (2.0m, full damage/kb) vs far (5.0m inside cone, smooth falloff)
+    const closePos = {
+      x: basePos.x + aimDir.x * 2.0,
+      y: world.getSurfaceY(basePos.x + aimDir.x * 2.0, basePos.z + aimDir.z * 2.0) ?? basePos.y,
+      z: basePos.z + aimDir.z * 2.0,
+    };
+    const farPos = {
+      x: basePos.x + aimDir.x * 5.0,
+      y: world.getSurfaceY(basePos.x + aimDir.x * 5.0, basePos.z + aimDir.z * 5.0) ?? basePos.y,
+      z: basePos.z + aimDir.z * 5.0,
+    };
+    // Off-axis enemy at 4.5m rotated 45 deg (dot ~= 0.707 < 0.85)
+    const cos45 = Math.SQRT1_2;
+    const offDirX = aimDir.x * cos45 - aimDir.z * cos45;
+    const offDirZ = aimDir.x * cos45 + aimDir.z * cos45;
+    const offPos = {
+      x: basePos.x + offDirX * 4.5,
+      y: basePos.y,
+      z: basePos.z + offDirZ * 4.5,
+    };
+
+    const enemyClose = makeDummyCritter({
+      id: "close",
+      species: "norway_rat",
+      position: closePos,
+      hp: 200,
+      maxHp: 200,
+      equipped: { legs: "spring_paws" },
+    });
+    const enemyFar = makeDummyCritter({
+      id: "far",
+      species: "norway_rat",
+      position: farPos,
+      hp: 200,
+      maxHp: 200,
+      equipped: { legs: "spring_paws" },
+    });
+    const enemyOffAxis = makeDummyCritter({
+      id: "off-axis",
+      species: "norway_rat",
+      position: offPos,
+      hp: 200,
+      maxHp: 200,
+    });
+
+    const closeSim = simulateShot(
+      world,
+      [attacker, enemyClose],
+      {
+        shooterId: "attacker",
+        gadgetId: "quake_club",
+        origin,
+        direction: aimDir,
+        power: 1.0,
+        species: "norway_rat",
+        equipped: {},
+        apex: null,
+      },
+      { x: 0, y: 0, z: 0 },
+      1.5,
+    );
+    const farAndOffSim = simulateShot(
+      world,
+      [attacker, enemyFar, enemyOffAxis],
+      {
+        shooterId: "attacker",
+        gadgetId: "quake_club",
+        origin,
+        direction: aimDir,
+        power: 1.0,
+        species: "norway_rat",
+        equipped: {},
+        apex: null,
+      },
+      { x: 0, y: 0, z: 0 },
+      1.5,
+    );
+
+    const closeHit = closeSim.hits.find((h) => h.critterId === "close");
+    const farHit = farAndOffSim.hits.find((h) => h.critterId === "far");
+    const offHit = farAndOffSim.hits.find((h) => h.critterId === "off-axis");
+
+    expect(closeHit).toBeDefined();
+    expect(farHit).toBeDefined();
+    expect(offHit).toBeUndefined();
+    if (closeHit && farHit) {
+      expect(farHit.damage).toBeGreaterThan(0);
+      expect(farHit.damage).toBeLessThan(closeHit.damage);
+      const closeKb = Math.hypot(
+        closeHit.knockbackVelocity.x,
+        closeHit.knockbackVelocity.y,
+        closeHit.knockbackVelocity.z,
+      );
+      const farKb = Math.hypot(
+        farHit.knockbackVelocity.x,
+        farHit.knockbackVelocity.y,
+        farHit.knockbackVelocity.z,
+      );
+      expect(farKb).toBeGreaterThan(0);
+      expect(farKb).toBeLessThan(closeKb);
+    }
+
+    // 2. Solid terrain wall occlusion blocks Gale Scatter beyond 2.0m
+    const centerSurf = world.getSurfaceY(world.centerX, world.centerZ);
+    expect(centerSurf).not.toBeNull();
+    if (centerSurf !== null) {
+      const wallY = Math.max(3.0, centerSurf - 2.5);
+      expect(world.isSolid(world.centerX, wallY, world.centerZ)).toBe(true);
+      const wallAttacker = makeDummyCritter({
+        id: "wall-att",
+        position: { x: world.centerX - 2.2, y: wallY - 0.5, z: world.centerZ },
+      });
+      const wallTarget = makeDummyCritter({
+        id: "behind-wall",
+        position: { x: world.centerX + 2.2, y: wallY - 0.5, z: world.centerZ },
+      });
+      const wallSim = simulateShot(
+        world,
+        [wallAttacker, wallTarget],
+        {
+          shooterId: "wall-att",
+          gadgetId: "quake_club",
+          origin: { x: world.centerX - 2.2, y: wallY, z: world.centerZ },
+          direction: { x: 1, y: 0, z: 0 },
+          power: 1.0,
+          species: "norway_rat",
+          equipped: {},
+          apex: null,
+        },
+        { x: 0, y: 0, z: 0 },
+        1.5,
+      );
+      expect(wallSim.hits.find((h) => h.critterId === "behind-wall")).toBeUndefined();
+    }
+
+    // 3. Close-range (<= 2.8m) still triggers bramble_shell meleeThorns; far-range (5.0m) does NOT
+    const thornyClose = makeDummyCritter({
+      id: "thorny-close",
+      species: "norway_rat",
+      position: closePos,
+      equipped: { back: "bramble_shell" },
+    });
+    const closeThornSim = simulateShot(
+      world,
+      [attacker, thornyClose],
+      {
+        shooterId: "attacker",
+        gadgetId: "quake_club",
+        origin,
+        direction: aimDir,
+        power: 1.0,
+        species: "norway_rat",
+        equipped: {},
+        apex: null,
+      },
+      { x: 0, y: 0, z: 0 },
+      1.5,
+    );
+    const attackerCloseThorns = closeThornSim.hits.find(
+      (h) => h.critterId === "attacker",
+    );
+    expect(attackerCloseThorns?.damage).toBe(10);
+
+    const thornyFar = makeDummyCritter({
+      id: "thorny-far",
+      species: "norway_rat",
+      position: farPos,
+      equipped: { back: "bramble_shell" },
+    });
+    const farThornSim = simulateShot(
+      world,
+      [attacker, thornyFar],
+      {
+        shooterId: "attacker",
+        gadgetId: "quake_club",
+        origin,
+        direction: aimDir,
+        power: 1.0,
+        species: "norway_rat",
+        equipped: {},
+        apex: null,
+      },
+      { x: 0, y: 0, z: 0 },
+      1.5,
+    );
+    expect(farThornSim.hits.find((h) => h.critterId === "thorny-far")).toBeDefined();
+    expect(farThornSim.hits.find((h) => h.critterId === "attacker")).toBeUndefined();
+  });
+
+  it("Review Focus #3 (Vine Grapple pod-pull & sampleGrappleTarget): direction-only pod pull emits isPodPull without moving critter, rappel works without pod, and sampleGrappleTarget detects pods & cliffs", () => {
+    // 1. sampleGrappleTarget unit checks: pods (isPod: true), occluded pod ignored, cliffs (isPod: false)
+    const world = new SdfWorld(42, "emerald_spire");
+    const sp = world.findSpawnPoints(1)[0];
+    expect(sp).toBeDefined();
+    if (!sp) return;
+
+    const previewOrigin = { x: sp.x, y: sp.y + 0.6, z: sp.z };
+    // Aim slightly upward into clear sky along outward radial where no rock exists for 8m
+    const outX = sp.x - world.centerX;
+    const outZ = sp.z - world.centerZ;
+    const outLen = Math.hypot(outX, outZ) || 1;
+    const skyDir = {
+      x: (outX / outLen) * 0.8,
+      y: 0.6,
+      z: (outZ / outLen) * 0.8,
+    };
+    const syntheticPod: EvoPodState = {
+      id: "pod-preview-1",
+      position: {
+        x: previewOrigin.x + skyDir.x * 7.0,
+        y: previewOrigin.y + skyDir.y * 7.0,
+        z: previewOrigin.z + skyDir.z * 7.0,
+      },
+      collected: false,
+      spawnedAtTurn: 1,
+      parachuting: false,
+    };
+    const podPreview = sampleGrappleTarget(
+      world,
+      previewOrigin,
+      skyDir,
+      18,
+      1.5,
+      [syntheticPod],
+    );
+    expect(podPreview).not.toBeNull();
+    expect(podPreview?.isPod).toBe(true);
+    expect(podPreview?.target).toEqual(syntheticPod.position);
+
+    // Occluded pod behind solid center spire must NOT return isPod: true
+    const spireSurf = world.getSurfaceY(world.centerX, world.centerZ);
+    expect(spireSurf).not.toBeNull();
+    if (spireSurf !== null) {
+      const wallY = Math.max(3.0, spireSurf - 2.5);
+      expect(world.isSolid(world.centerX, wallY, world.centerZ)).toBe(true);
+      const occludedPod: EvoPodState = {
+        id: "pod-occluded",
+        position: { x: world.centerX + 3.5, y: wallY, z: world.centerZ },
+        collected: false,
+        spawnedAtTurn: 1,
+        parachuting: false,
+      };
+      const blockedPreview = sampleGrappleTarget(
+        world,
+        { x: world.centerX - 3.5, y: wallY, z: world.centerZ },
+        { x: 1, y: 0, z: 0 },
+        18,
+        1.5,
+        [occludedPod],
+      );
+      expect(blockedPreview).not.toBeNull();
+      expect(blockedPreview?.isPod).toBe(false);
+    }
+
+    // Cliff / terrain preview without pods returns isPod: false
+    const cliffPreview = sampleGrappleTarget(
+      world,
+      previewOrigin,
+      { x: -(outX / outLen) * 0.85, y: -0.35, z: -(outZ / outLen) * 0.85 },
+      18,
+      1.5,
+      [],
+    );
+    expect(cliffPreview).not.toBeNull();
+    expect(cliffPreview?.isPod).toBe(false);
+
+    // 2. MatchEngine direction-only vine_grapple aimed at an uncollected Evo Pod emits isPodPull: true & leaves critter stationary
+    const engine = new MatchEngine(makeBaseConfig({ seed: 42 }));
+    engine.tick(29); // Turn 2 spawns Pod #1
+    const snapWithPod = engine.getSnapshot();
+    const spawnedPod = snapWithPod.evoPods.find((p) => !p.collected);
+    expect(spawnedPod).toBeDefined();
+    if (!spawnedPod) return;
+
+    // Pick a walkable stand spot 4.5..7.5m away from the pod with unobstructed line-of-sight
+    let standSpot: { x: number; y: number; z: number } | null = null;
+    for (let dist = 5.0; dist <= 7.5 && !standSpot; dist += 1.0) {
+      for (let a = 0; a < 16; a++) {
+        const ang = (a * Math.PI * 2) / 16;
+        const sx = spawnedPod.position.x + Math.cos(ang) * dist;
+        const sz = spawnedPod.position.z + Math.sin(ang) * dist;
+        const sy = engine.world.getSurfaceY(sx, sz);
+        if (sy === null || sy <= snapWithPod.waterLevel + 0.8) continue;
+        const rayOrigin = { x: sx, y: sy + 0.6, z: sz };
+        const dx = spawnedPod.position.x - rayOrigin.x;
+        const dy = spawnedPod.position.y - rayOrigin.y;
+        const dz = spawnedPod.position.z - rayOrigin.z;
+        const dLen = Math.hypot(dx, dy, dz);
+        let clear = true;
+        for (let s = 0.8; s <= dLen - 0.6; s += 0.5) {
+          if (
+            engine.world.isSolid(
+              rayOrigin.x + (dx / dLen) * s,
+              rayOrigin.y + (dy / dLen) * s,
+              rayOrigin.z + (dz / dLen) * s,
+            )
+          ) {
+            clear = false;
+            break;
+          }
+        }
+        if (clear) {
+          standSpot = { x: sx, y: sy, z: sz };
+          break;
+        }
+      }
+    }
+    expect(standSpot).not.toBeNull();
+    if (!standSpot) return;
+
+    advanceAndWalkTo(engine, "p1", standSpot, 24);
+    for (let g = 0; g < 6 && engine.getSnapshot().activePlayerId !== "p1"; g++) {
+      engine.tick(29);
+    }
+    const beforePullSnap = engine.getSnapshot();
+    const p1BeforePull = beforePullSnap.critters.find((c) => c.id === "p1");
+    const targetPod = beforePullSnap.evoPods.find(
+      (p) => p.id === spawnedPod.id && !p.collected,
+    );
+    expect(p1BeforePull).toBeDefined();
+    expect(targetPod).toBeDefined();
+    if (!p1BeforePull || !targetPod) return;
+
+    const posBeforePull = { ...p1BeforePull.position };
+    const chargesBeforePull = p1BeforePull.gadgetCharges.vine_grapple ?? 0;
+    const dirToPod = {
+      x: targetPod.position.x - p1BeforePull.position.x,
+      y: targetPod.position.y - (p1BeforePull.position.y + 0.6),
+      z: targetPod.position.z - p1BeforePull.position.z,
+    };
+
+    const pullEvents = engine.applyUtility("p1", {
+      gadgetId: "vine_grapple",
+      direction: dirToPod,
+    });
+    const vineEv = pullEvents.find((e) => e.type === "VINE_GRAPPLED");
+    expect(vineEv).toBeDefined();
+    expect(vineEv?.type === "VINE_GRAPPLED" && vineEv.isPodPull).toBe(true);
+    expect(
+      pullEvents.some(
+        (e) => e.type === "EVO_POD_COLLECTED" && e.playerId === "p1",
+      ),
+    ).toBe(true);
+
+    const p1AfterPull = engine
+      .getSnapshot()
+      .critters.find((c) => c.id === "p1");
+    expect(p1AfterPull?.position).toEqual(posBeforePull);
+    expect(p1AfterPull?.grappleUsedThisTurn).toBe(true);
+    expect(p1AfterPull?.gadgetCharges.vine_grapple).toBe(chargesBeforePull - 1);
+
+    // 3. Downward cliff rappel via direction-only vine_grapple still works cleanly when no pod is in ray
+    const rappelEngine = new MatchEngine(makeBaseConfig({ seed: 42 }));
+    const rInit = rappelEngine.getSnapshot();
+    const rP1 = rInit.critters.find((c) => c.id === "p1");
+    expect(rP1).toBeDefined();
+    if (!rP1) return;
+
+    const rOrigin = { x: rP1.position.x, y: rP1.position.y + 0.6, z: rP1.position.z };
+    let downDir: { x: number; y: number; z: number } | null = null;
+    let predictedRappel: { x: number; y: number; z: number } | null = null;
+    for (let a = 0; a < 16 && !downDir; a++) {
+      const ang = (a * Math.PI * 2) / 16;
+      const candDir = { x: Math.cos(ang) * 0.92, y: -0.39, z: Math.sin(ang) * 0.92 };
+      const preview = sampleGrappleTarget(
+        rappelEngine.world,
+        rOrigin,
+        candDir,
+        18,
+        rInit.waterLevel,
+        rInit.evoPods,
+      );
+      if (
+        preview &&
+        !preview.isPod &&
+        preview.target.y > rInit.waterLevel + 0.5 &&
+        Math.hypot(
+          preview.target.x - rP1.position.x,
+          preview.target.z - rP1.position.z,
+        ) > 1.5
+      ) {
+        downDir = candDir;
+        predictedRappel = preview.target;
+      }
+    }
+    expect(downDir).not.toBeNull();
+    expect(predictedRappel).not.toBeNull();
+    if (!downDir || !predictedRappel) return;
+
+    const rappelEvs = rappelEngine.applyUtility("p1", {
+      gadgetId: "vine_grapple",
+      direction: downDir,
+    });
+    const rappelGrapple = rappelEvs.find((e) => e.type === "VINE_GRAPPLED");
+    expect(rappelGrapple).toBeDefined();
+    expect(
+      rappelGrapple?.type === "VINE_GRAPPLED" ? rappelGrapple.isPodPull : true,
+    ).toBeUndefined();
+    const rP1After = rappelEngine
+      .getSnapshot()
+      .critters.find((c) => c.id === "p1");
+    expect(rP1After?.hp).toBe(rP1.hp);
+    expect(rP1After?.grappleUsedThisTurn).toBe(true);
+    expect(rP1After?.position).toEqual(predictedRappel);
   });
 });

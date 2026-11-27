@@ -5,6 +5,7 @@ import type {
   CarveOp,
   CritterHitResult,
   CritterState,
+  EvoPodState,
   GadgetId,
   HardpointSlot,
   ImpactEvent,
@@ -25,6 +26,12 @@ export type {
 
 /** World gravitational acceleration in m/s^2. */
 export const GRAVITY = 18.0;
+
+/** Maximum effective range in meters of the Gale Scatter wide-cone wind shotgun. */
+export const GALE_SCATTER_REACH = 6.0;
+
+/** Minimum normalized dot product (~31.8° half-angle / ~63.6° full spread) for Gale Scatter cone hits beyond point-blank. */
+export const GALE_SCATTER_CONE_MIN_DOT = 0.85;
 
 /** Minimum vertical drop in meters onto solid rock before fall damage applies. */
 export const FALL_DAMAGE_THRESHOLD_M = 7.5;
@@ -386,7 +393,7 @@ export function sampleAimArc(
   if (params.gadgetId === "quake_club") {
     const steps = 6;
     for (let i = 1; i <= steps; i++) {
-      const dist = (2.8 * i) / steps;
+      const dist = (GALE_SCATTER_REACH * i) / steps;
       points.push({
         x: params.origin.x + dir.x * dist,
         y: params.origin.y + dir.y * dist,
@@ -601,14 +608,14 @@ export function simulateShot(
   const carveOps: CarveOp[] = [];
   let durationSec = 0;
 
-  // --- 1. Quake Club close-range melee strike ---
+  // --- 1. Gale Scatter (internal id: quake_club) wide-cone pneumatic wind shotgun ---
   if (params.gadgetId === "quake_club") {
     durationSec = 0.25;
-    const reach = 2.8;
+    const reach = GALE_SCATTER_REACH;
     const strikeCenter: Vec3 = {
-      x: params.origin.x + normDir.x * 1.4,
-      y: params.origin.y + normDir.y * 1.4,
-      z: params.origin.z + normDir.z * 1.4,
+      x: params.origin.x + normDir.x * 2.2,
+      y: params.origin.y + normDir.y * 2.2,
+      z: params.origin.z + normDir.z * 2.2,
     };
     path.push(strikeCenter);
 
@@ -644,17 +651,39 @@ export function simulateShot(
       const dot = toDir
         ? toDir.x * normDir.x + toDir.y * normDir.y + toDir.z * normDir.z
         : 1;
-      if (dist > 1.6 && dot < 0.1) continue;
+      if (dist > 1.6 && dot < GALE_SCATTER_CONE_MIN_DOT) continue;
+
+      // Solid terrain walls block the wind shotgun beyond 2.0m
+      if (dist > 2.0 && toDir) {
+        let occluded = false;
+        const maxSample = dist - 0.6;
+        for (let s = 0.8; s <= maxSample; s += 0.5) {
+          const px = params.origin.x + toDir.x * s;
+          const py = params.origin.y + toDir.y * s;
+          const pz = params.origin.z + toDir.z * s;
+          if (world.isSolid(px, py, pz)) {
+            occluded = true;
+            break;
+          }
+        }
+        if (occluded) continue;
+      }
+
+      const falloff =
+        dist <= 2.8
+          ? 1.0
+          : 1.0 - 0.35 * ((dist - 2.8) / (GALE_SCATTER_REACH - 2.8));
 
       const targetStats = computeCritterStats(target.species, target.equipped);
-      let damage = Math.round(gadget.baseDamage * damageMult);
+      let damage = Math.round(gadget.baseDamage * damageMult * falloff);
       let shieldAbsorbed = false;
       if (target.roundShieldRemaining > 0 && damage > 0) {
         shieldAbsorbed = true;
         damage = 0;
       }
 
-      const kbScale = gadget.knockback * (1 - targetStats.knockbackResist);
+      const kbScale =
+        gadget.knockback * falloff * (1 - targetStats.knockbackResist);
       const kbDir = safeNormalizeVec3({
         x: normDir.x,
         y: Math.max(0.35, normDir.y + 0.45),
@@ -692,7 +721,7 @@ export function simulateShot(
         knockedOut: newHp <= 0 || settled.drowned,
       });
 
-      if (targetStats.meleeThorns > 0) {
+      if (dist <= 2.8 && targetStats.meleeThorns > 0) {
         totalThornsOnAttacker += targetStats.meleeThorns;
       }
     }
@@ -1082,4 +1111,152 @@ export function simulateShot(
     carveOps,
     hits,
   };
+}
+
+/** Resolved Vine Grapple target hit along an aim ray (either an Evo Pod pull or a terrain anchor). */
+export interface GrapplePreviewHit {
+  readonly target: Vec3;
+  readonly isPod: boolean;
+}
+
+/**
+ * Find the closest uncollected Evo Pod within `reach` along a Vine Grapple aim ray
+ * (`proj > 0.5 && proj <= reach`, perpendicular distance `<= 1.6m`) that is not occluded by solid rock.
+ */
+export function findRayGrapplePod(
+  world: SdfWorld,
+  origin: Vec3,
+  direction: Vec3,
+  reach: number,
+  evoPods: readonly EvoPodState[],
+): EvoPodState | null {
+  if (!isFiniteVec3(origin) || !Number.isFinite(reach) || reach <= 0) {
+    return null;
+  }
+  const normDir = safeNormalizeVec3(direction);
+  if (!normDir) {
+    return null;
+  }
+
+  let bestPod: EvoPodState | null = null;
+  let bestDist = Infinity;
+
+  for (const pod of evoPods) {
+    if (pod.collected) continue;
+    const dx = pod.position.x - origin.x;
+    const dy = pod.position.y - origin.y;
+    const dz = pod.position.z - origin.z;
+    const dist = Math.hypot(dx, dy, dz);
+    if (dist > reach) continue;
+
+    const proj = dx * normDir.x + dy * normDir.y + dz * normDir.z;
+    if (proj <= 0.5 || proj > reach) continue;
+
+    const closestX = origin.x + normDir.x * proj;
+    const closestY = origin.y + normDir.y * proj;
+    const closestZ = origin.z + normDir.z * proj;
+    const perpDist = Math.hypot(
+      pod.position.x - closestX,
+      pod.position.y - closestY,
+      pod.position.z - closestZ,
+    );
+    if (perpDist > 1.6) continue;
+
+    let occluded = false;
+    const maxSample = proj - 0.6;
+    for (let s = 0.8; s <= maxSample; s += 0.5) {
+      const px = origin.x + normDir.x * s;
+      const py = origin.y + normDir.y * s;
+      const pz = origin.z + normDir.z * s;
+      if (world.isSolid(px, py, pz)) {
+        occluded = true;
+        break;
+      }
+    }
+    if (occluded) continue;
+
+    if (dist < bestDist) {
+      bestDist = dist;
+      bestPod = pod;
+    }
+  }
+
+  return bestPod;
+}
+
+/**
+ * Pure shared Vine Grapple raycast resolver shared by MatchEngine and client preview.
+ * Prioritizes unoccluded uncollected Evo Pods along the ray (`isPod: true`), otherwise resolves
+ * cliff-climb or downward cliff-rappel (`normDir.y < -0.15`) terrain destinations (`isPod: false`).
+ */
+export function sampleGrappleTarget(
+  world: SdfWorld,
+  origin: Vec3,
+  direction: Vec3,
+  reach: number,
+  waterLevel: number,
+  evoPods?: readonly EvoPodState[],
+): GrapplePreviewHit | null {
+  if (!isFiniteVec3(origin) || !Number.isFinite(reach) || reach <= 0) {
+    return null;
+  }
+  const normDir = safeNormalizeVec3(direction);
+  if (!normDir) {
+    return null;
+  }
+
+  if (evoPods && evoPods.length > 0) {
+    const pod = findRayGrapplePod(world, origin, normDir, reach, evoPods);
+    if (pod) {
+      return { target: { ...pod.position }, isPod: true };
+    }
+  }
+
+  let lastAirX = origin.x;
+  let lastAirY = origin.y;
+  let lastAirZ = origin.z;
+  for (let d = 1.0; d <= reach; d += 0.5) {
+    const px = origin.x + normDir.x * d;
+    const py = origin.y + normDir.y * d;
+    const pz = origin.z + normDir.z * d;
+    if (world.isSolid(px, py, pz)) {
+      const surfY = world.getSurfaceY(px, pz);
+      let destination: Vec3;
+      if (normDir.y < -0.15) {
+        let rappelY: number | null = null;
+        const startScan = lastAirY + 0.35;
+        const minScan = Math.max(waterLevel + 0.2, lastAirY - 6.5);
+        for (let sy = startScan; sy >= minScan; sy -= 0.25) {
+          if (
+            !world.isSolid(lastAirX, sy + 0.25, lastAirZ) &&
+            world.isSolid(lastAirX, sy - 0.1, lastAirZ)
+          ) {
+            rappelY = sy + 0.1;
+            break;
+          }
+        }
+        if (rappelY !== null) {
+          destination = { x: lastAirX, y: rappelY, z: lastAirZ };
+        } else if (surfY !== null && surfY <= py + 1.5) {
+          destination = { x: px, y: surfY + 0.1, z: pz };
+        } else {
+          destination = {
+            x: lastAirX,
+            y: Math.max(waterLevel + 0.3, lastAirY),
+            z: lastAirZ,
+          };
+        }
+      } else if (surfY !== null && surfY <= py + 3.4) {
+        destination = { x: px, y: surfY + 0.1, z: pz };
+      } else {
+        destination = { x: lastAirX, y: lastAirY + 0.15, z: lastAirZ };
+      }
+      return { target: destination, isPod: false };
+    }
+    lastAirX = px;
+    lastAirY = py;
+    lastAirZ = pz;
+  }
+
+  return null;
 }

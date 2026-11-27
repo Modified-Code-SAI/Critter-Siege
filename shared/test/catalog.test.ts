@@ -280,6 +280,10 @@ describe("Critter Siege catalogs & stats", () => {
     });
 
     expect(GADGET_CATALOG.quake_club).toMatchObject({
+      id: "quake_club",
+      name: "Gale Scatter",
+      description:
+        "Wide-cone pneumatic wind shotgun that blasts rivals back with a spreading gale gust.",
       chargesPerRound: null,
       startingCharges: null,
       shopCost: 25,

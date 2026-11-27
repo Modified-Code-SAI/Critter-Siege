@@ -23,7 +23,9 @@ import * as Hazards from "./hazards.js";
 import {
   FALL_DAMAGE_THRESHOLD_M,
   computeFallDamage,
+  findRayGrapplePod,
   safeNormalizeVec3,
+  sampleGrappleTarget,
   simulateShot,
   type ShotParams,
 } from "./physics.js";
@@ -491,21 +493,26 @@ export class MatchEngine {
       }
 
       const prevPos: Vec3 = { ...critter.position };
+      const grappleOrigin: Vec3 = {
+        x: critter.position.x,
+        y: critter.position.y + 0.6,
+        z: critter.position.z,
+      };
       const baseReach = this.mapScale === "grand" ? 26.0 : 18.0;
       const reach = baseReach * SPECIES_CATALOG[critter.species].grappleReachBonus;
 
-      // Check if an uncollected Evo Pod is near the grapple target -> yank it!
+      // Check if an uncollected Evo Pod is near the grapple target or along the aim ray -> yank it!
       let pulledPod: EvoPodState | null = null;
-      for (const pod of this.evoPods) {
-        if (pod.collected) continue;
-        const distFromCritter = Math.hypot(
-          pod.position.x - critter.position.x,
-          pod.position.y - critter.position.y,
-          pod.position.z - critter.position.z,
-        );
-        if (distFromCritter > reach) continue;
+      if (action.target && isFiniteVec3(action.target)) {
+        for (const pod of this.evoPods) {
+          if (pod.collected) continue;
+          const distFromCritter = Math.hypot(
+            pod.position.x - critter.position.x,
+            pod.position.y - critter.position.y,
+            pod.position.z - critter.position.z,
+          );
+          if (distFromCritter > reach) continue;
 
-        if (action.target && isFiniteVec3(action.target)) {
           const distToTarget = Math.hypot(
             pod.position.x - action.target.x,
             pod.position.y - action.target.y,
@@ -516,6 +523,14 @@ export class MatchEngine {
             break;
           }
         }
+      } else {
+        pulledPod = findRayGrapplePod(
+          this._world,
+          grappleOrigin,
+          normDir,
+          reach,
+          this.evoPods,
+        );
       }
 
       if (pulledPod) {
@@ -530,6 +545,7 @@ export class MatchEngine {
           playerId,
           from: prevPos,
           to: podOrigin,
+          isPodPull: true,
         });
         events.push(...this.collectPodsInRange(critter));
         return events;
@@ -557,46 +573,14 @@ export class MatchEngine {
           destination = { x: destX, y: destY, z: destZ };
         }
       } else {
-        let lastAirX = critter.position.x;
-        let lastAirY = critter.position.y + 0.6;
-        let lastAirZ = critter.position.z;
-        for (let d = 1.0; d <= reach; d += 0.5) {
-          const px = critter.position.x + normDir.x * d;
-          const py = critter.position.y + 0.6 + normDir.y * d;
-          const pz = critter.position.z + normDir.z * d;
-          if (this._world.isSolid(px, py, pz)) {
-            const surfY = this._world.getSurfaceY(px, pz);
-            if (normDir.y < -0.15) {
-              let rappelY: number | null = null;
-              const startScan = lastAirY + 0.35;
-              const minScan = Math.max(this.waterLevel + 0.2, lastAirY - 6.5);
-              for (let sy = startScan; sy >= minScan; sy -= 0.25) {
-                if (
-                  !this._world.isSolid(lastAirX, sy + 0.25, lastAirZ) &&
-                  this._world.isSolid(lastAirX, sy - 0.1, lastAirZ)
-                ) {
-                  rappelY = sy + 0.1;
-                  break;
-                }
-              }
-              if (rappelY !== null) {
-                destination = { x: lastAirX, y: rappelY, z: lastAirZ };
-              } else if (surfY !== null && surfY <= py + 1.5) {
-                destination = { x: px, y: surfY + 0.1, z: pz };
-              } else {
-                destination = { x: lastAirX, y: Math.max(this.waterLevel + 0.3, lastAirY), z: lastAirZ };
-              }
-            } else if (surfY !== null && surfY <= py + 3.4) {
-              destination = { x: px, y: surfY + 0.1, z: pz };
-            } else {
-              destination = { x: lastAirX, y: lastAirY + 0.15, z: lastAirZ };
-            }
-            break;
-          }
-          lastAirX = px;
-          lastAirY = py;
-          lastAirZ = pz;
-        }
+        const terrainHit = sampleGrappleTarget(
+          this._world,
+          grappleOrigin,
+          normDir,
+          reach,
+          this.waterLevel,
+        );
+        destination = terrainHit ? terrainHit.target : null;
       }
 
       if (destination) {

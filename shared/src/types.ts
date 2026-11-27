@@ -532,6 +532,7 @@ export type EngineEvent =
       playerId: string;
       from: Vec3;
       to: Vec3;
+      isPodPull?: boolean;
     }
   | {
       type: "WIND_NUDGED";

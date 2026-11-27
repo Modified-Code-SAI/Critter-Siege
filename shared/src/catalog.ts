@@ -334,9 +334,9 @@ export const GADGET_CATALOG: Readonly<Record<GadgetId, GadgetDefinition>> = {
   },
   quake_club: {
     id: "quake_club",
-    name: "Quake Club",
+    name: "Gale Scatter",
     description:
-      "Heavy close-range shock slam delivering massive knockback with minimal terrain loss.",
+      "Wide-cone pneumatic wind shotgun that blasts rivals back with a spreading gale gust.",
     bonusLobbyOnly: false,
     unlockCost: 0,
     chargesPerRound: null,
