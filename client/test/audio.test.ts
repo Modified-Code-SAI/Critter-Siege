@@ -916,4 +916,63 @@ describe("MusicEngine & SynthAudio atmospheric adaptive soundtrack and SFX", () 
     audio.dispose();
     expect(vi.getTimerCount()).toBe(0);
   });
+
+  it("synthesizes Scatter Bomb launch, bounce clang, and canister split SFX cleanly in headless Node and mocked AudioContext", () => {
+    // 1. Headless Node safety (before and after dispose)
+    const headless = new SynthAudio();
+    expect(() => {
+      headless.playLaunch("spore_burst");
+      headless.playScatterBounce();
+      headless.playScatterSplit();
+      headless.dispose();
+      headless.playLaunch("spore_burst");
+      headless.playScatterBounce();
+      headless.playScatterSplit();
+    }).not.toThrow();
+
+    // 2. Mocked AudioContext verification
+    vi.useFakeTimers();
+    const harness = createMockAudioContext({ minimal: false });
+    stubGlobalAudioContext(harness.ctx);
+    const audio = new SynthAudio();
+    audio.unlockAndStartMusic();
+
+    // playLaunch("spore_burst") -> low mortar thump + metallic latch + filtered air burst
+    const oscLaunch = harness.oscillators.length;
+    const bufLaunch = harness.bufferSources.length;
+    audio.playLaunch("spore_burst");
+    expect(harness.oscillators.length - oscLaunch).toBeGreaterThanOrEqual(3);
+    expect(harness.bufferSources.length - bufLaunch).toBeGreaterThanOrEqual(1);
+
+    // playScatterBounce() -> iron-on-rock clang + impact noise
+    const oscBounce = harness.oscillators.length;
+    const bufBounce = harness.bufferSources.length;
+    audio.playScatterBounce();
+    expect(harness.oscillators.length - oscBounce).toBeGreaterThanOrEqual(2);
+    expect(harness.bufferSources.length - bufBounce).toBeGreaterThanOrEqual(1);
+
+    // playScatterSplit() -> canister crack + shrapnel pop burst
+    const oscSplit = harness.oscillators.length;
+    const bufSplit = harness.bufferSources.length;
+    audio.playScatterSplit();
+    expect(harness.oscillators.length - oscSplit).toBeGreaterThanOrEqual(2);
+    expect(harness.bufferSources.length - bufSplit).toBeGreaterThanOrEqual(2);
+
+    // Muted suppresses all Scatter Bomb SFX
+    audio.setMuted(true);
+    const oscMuted = harness.oscillators.length;
+    const bufMuted = harness.bufferSources.length;
+    audio.playLaunch("spore_burst");
+    audio.playScatterBounce();
+    audio.playScatterSplit();
+    expect(harness.oscillators.length).toBe(oscMuted);
+    expect(harness.bufferSources.length).toBe(bufMuted);
+
+    for (const num of harness.recordedParamNumbers) {
+      expect(Number.isFinite(num)).toBe(true);
+    }
+
+    audio.dispose();
+    expect(vi.getTimerCount()).toBe(0);
+  });
 });

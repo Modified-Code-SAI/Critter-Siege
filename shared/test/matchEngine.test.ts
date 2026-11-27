@@ -5,6 +5,8 @@ import {
   GALE_SCATTER_REACH,
   GRAVITY,
   MatchEngine,
+  SCATTER_BOMB_SPLIT_BASE_SEC,
+  SCATTER_BOMB_SPLIT_STAGGER_SEC,
   SDF_DIMS,
   SdfWorld,
   computeFallDamage,
@@ -276,7 +278,10 @@ describe("Ballistics & gadget simulation (physics.ts)", () => {
     expect(moleShot.durationSec).toBeGreaterThanOrEqual(0.6);
   });
 
-  it("simulates spore_burst spawning 5 deterministic sub-spore blasts", () => {
+  it("simulates spore_burst (Scatter Bomb) spawning 5 deterministic staggered fragmentation bomblets", () => {
+    expect(SCATTER_BOMB_SPLIT_BASE_SEC).toBe(0.48);
+    expect(SCATTER_BOMB_SPLIT_STAGGER_SEC).toBe(0.035);
+
     const world = new SdfWorld(77, "emerald_spire");
     const sp = world.findSpawnPoints(1)[0];
     expect(sp).toBeDefined();
@@ -299,6 +304,76 @@ describe("Ballistics & gadget simulation (physics.ts)", () => {
     const subSpores = runA.impacts.filter((imp) => imp.isSubSpore === true);
     expect(subSpores).toHaveLength(5);
     expect(runA.impacts).toEqual(runB.impacts);
+
+    // Consecutive bomblet impacts are staggered by SCATTER_BOMB_SPLIT_STAGGER_SEC (0.035s)
+    // and durationSec matches the final bomblet's detonation time
+    const firstTime = subSpores[0]?.time ?? 0;
+    const lastTime = subSpores[subSpores.length - 1]?.time ?? 0;
+    expect(firstTime).toBeGreaterThan(SCATTER_BOMB_SPLIT_BASE_SEC);
+    for (let i = 0; i < subSpores.length; i++) {
+      const expected = Number(
+        (firstTime + i * SCATTER_BOMB_SPLIT_STAGGER_SEC).toFixed(4),
+      );
+      expect(subSpores[i]?.time).toBeCloseTo(expected, 4);
+    }
+    expect(runA.durationSec).toBe(lastTime);
+
+    // Direct critter-hit comparison confirms exact splitTime + SCATTER_BOMB_SPLIT_BASE_SEC offset
+    const target = makeDummyCritter({
+      id: "target",
+      position: { x: sp.x, y: sp.y, z: sp.z },
+    });
+    const directOrigin = { x: sp.x, y: sp.y + 2.2, z: sp.z };
+    const directDir = { x: 0, y: -1, z: 0 };
+    const mortarRef = simulateShot(
+      world,
+      [target],
+      {
+        shooterId: "p1",
+        gadgetId: "gale_mortar",
+        origin: directOrigin,
+        direction: directDir,
+        power: 0.5,
+        species: "norway_rat",
+        equipped: {},
+        apex: null,
+      },
+      { x: 0, y: 0, z: 0 },
+      1.5,
+    );
+    const scatterDirect = simulateShot(
+      world,
+      [target],
+      {
+        shooterId: "p1",
+        gadgetId: "spore_burst",
+        origin: directOrigin,
+        direction: directDir,
+        power: 0.5,
+        species: "norway_rat",
+        equipped: {},
+        apex: null,
+      },
+      { x: 0, y: 0, z: 0 },
+      1.5,
+    );
+    const splitTime = mortarRef.durationSec;
+    const directBomblets = scatterDirect.impacts.filter(
+      (imp) => imp.isSubSpore === true,
+    );
+    expect(directBomblets).toHaveLength(5);
+    for (let i = 0; i < directBomblets.length; i++) {
+      expect(directBomblets[i]?.time).toBe(
+        Number(
+          (
+            splitTime +
+            SCATTER_BOMB_SPLIT_BASE_SEC +
+            i * SCATTER_BOMB_SPLIT_STAGGER_SEC
+          ).toFixed(4),
+        ),
+      );
+    }
+    expect(scatterDirect.durationSec).toBe(directBomblets[4]?.time);
   });
 
   it("simulates quake_club massive knockback and bramble_shell melee thorns back to attacker", () => {

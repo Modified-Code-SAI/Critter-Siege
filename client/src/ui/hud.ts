@@ -194,7 +194,7 @@ const GADGET_SHORT_TOOLTIP: Record<GadgetId, string> = {
   gale_mortar: "Gale Mortar — Wind-curved explosive crater shell",
   quake_club: "Gale Scatter — Wide-cone pneumatic wind shotgun blast",
   vine_grapple: "Vine Grapple — Climb cliffs or rappel safely down (6/rd, 1/turn)",
-  spore_burst: "Spore Burst — Splits into 5 buoyant cluster sub-spores",
+  spore_burst: "Scatter Bomb — Bouncing canister that bursts into 5 fragmentation bomblets",
   burrow_bore: "Burrow Bore — Drills straight through rock walls",
   seeker_firefly: "Seeker Firefly — Guided GPS homing missile onto your Drone Ping",
   gravity_mine: "Gravity Mine — Pulls rivals inward before blast",
@@ -207,7 +207,7 @@ const GADGET_CONCISE_EFFECT: Record<GadgetId, string> = {
   gale_mortar: "Wind-curved explosive mortar · ∞",
   quake_club: "6m wind-shotgun knockback blast · ∞",
   vine_grapple: "Free-action cliff zip & rappel",
-  spore_burst: "Splits into 5 fungal sub-spores",
+  spore_burst: "Bursts into 5 fragmentation bomblets",
   burrow_bore: "Drills 0.6s through solid rock",
   seeker_firefly: "Guided GPS homing missile",
   gravity_mine: "Vortex implosion yanks rivals",
@@ -264,11 +264,15 @@ function getGadgetSvgIcon(gadget: GadgetId): string {
         <path d="M14 14c1.5 1.5 3 1.5 4.5 0"/>
       </svg>`;
     case "spore_burst":
-      return `<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
-        <circle cx="12" cy="7" r="3" fill="currentColor" opacity="0.3"/>
-        <circle cx="7" cy="16" r="3" fill="currentColor" opacity="0.3"/>
-        <circle cx="17" cy="16" r="3" fill="currentColor" opacity="0.3"/>
-        <path d="M12 10v3M9.5 14.5l2.5-1.5 2.5 1.5" stroke-linecap="round"/>
+      return `<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <rect x="8.5" y="9" width="7" height="8" rx="2" fill="currentColor" opacity="0.25"/>
+        <path d="M8.5 13h7M10.5 9V7.5h3V9"/>
+        <path d="M12 6V3.5M6.5 9.5L4 7.5M17.5 9.5L20 7.5M6.5 17.5L4.5 19.5M17.5 17.5L19.5 19.5"/>
+        <circle cx="12" cy="3" r="1.1" fill="currentColor"/>
+        <circle cx="3.5" cy="7" r="1.1" fill="currentColor"/>
+        <circle cx="20.5" cy="7" r="1.1" fill="currentColor"/>
+        <circle cx="4" cy="20" r="1.1" fill="currentColor"/>
+        <circle cx="20" cy="20" r="1.1" fill="currentColor"/>
       </svg>`;
     case "burrow_bore":
       return `<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">

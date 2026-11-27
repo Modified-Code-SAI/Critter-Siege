@@ -33,6 +33,12 @@ export const GALE_SCATTER_REACH = 6.0;
 /** Minimum normalized dot product (~31.8° half-angle / ~63.6° full spread) for Gale Scatter cone hits beyond point-blank. */
 export const GALE_SCATTER_CONE_MIN_DOT = 0.85;
 
+/** Base delay in seconds from Scatter Bomb canister split to the first fragmentation bomblet detonation. */
+export const SCATTER_BOMB_SPLIT_BASE_SEC = 0.48;
+
+/** Stagger interval in seconds between consecutive Scatter Bomb fragmentation bomblet detonations. */
+export const SCATTER_BOMB_SPLIT_STAGGER_SEC = 0.035;
+
 /** Minimum vertical drop in meters onto solid rock before fall damage applies. */
 export const FALL_DAMAGE_THRESHOLD_M = 7.5;
 /** Fall damage dealt per meter dropped beyond the safe threshold. */
@@ -934,6 +940,7 @@ export function simulateShot(
   } else if (params.gadgetId === "spore_burst") {
     const count = gadget.subSporeCount ?? 5;
     const spreadRadius = 2.4 * mapCarveScale;
+    const splitTime = durationSec;
     for (let i = 0; i < count; i++) {
       const angle = (i * Math.PI * 2) / count;
       const sx = impactPos.x + Math.cos(angle) * spreadRadius;
@@ -951,7 +958,13 @@ export function simulateShot(
       };
       carveOps.push(subCarve);
       impacts.push({
-        time: Number((durationSec + 0.18).toFixed(4)),
+        time: Number(
+          (
+            splitTime +
+            SCATTER_BOMB_SPLIT_BASE_SEC +
+            i * SCATTER_BOMB_SPLIT_STAGGER_SEC
+          ).toFixed(4),
+        ),
         position: subPos,
         carveOp: subCarve,
         damageRadius: 2.9 * mapCarveScale,
@@ -960,7 +973,13 @@ export function simulateShot(
         isSubSpore: true,
       });
     }
-    durationSec = Number((durationSec + 0.18).toFixed(4));
+    durationSec = Number(
+      (
+        splitTime +
+        SCATTER_BOMB_SPLIT_BASE_SEC +
+        Math.max(0, count - 1) * SCATTER_BOMB_SPLIT_STAGGER_SEC
+      ).toFixed(4),
+    );
   } else {
     const isPull = params.gadgetId === "gravity_mine";
     const carveRadius = Number((gadget.carveRadius * carveMult).toFixed(4));

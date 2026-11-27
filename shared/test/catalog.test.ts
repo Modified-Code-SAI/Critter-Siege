@@ -308,6 +308,10 @@ describe("Critter Siege catalogs & stats", () => {
     });
 
     expect(GADGET_CATALOG.spore_burst).toMatchObject({
+      id: "spore_burst",
+      name: "Scatter Bomb",
+      description:
+        "Bouncing iron canister that bursts into 5 fragmentation bomblets to pepper wide ridges.",
       chargesPerRound: 2,
       startingCharges: 2,
       shopCost: 50,
@@ -319,6 +323,7 @@ describe("Critter Siege catalogs & stats", () => {
       knockback: 12,
       subSporeCount: 5,
     });
+    expect(GADGET_CATALOG.spore_burst.description).not.toMatch(/fungal|spore/i);
 
     expect(GADGET_CATALOG.burrow_bore).toMatchObject({
       chargesPerRound: 2,

@@ -368,9 +368,9 @@ export const GADGET_CATALOG: Readonly<Record<GadgetId, GadgetDefinition>> = {
   },
   spore_burst: {
     id: "spore_burst",
-    name: "Spore Burst",
+    name: "Scatter Bomb",
     description:
-      "Splits into 5 buoyant fungal sub-spores on impact to pepper wide ridges.",
+      "Bouncing iron canister that bursts into 5 fragmentation bomblets to pepper wide ridges.",
     bonusLobbyOnly: false,
     unlockCost: 0,
     chargesPerRound: 2,

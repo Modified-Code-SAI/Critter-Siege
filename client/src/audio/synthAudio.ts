@@ -175,9 +175,11 @@ export class SynthAudio {
     }
 
     if (gadgetId === "spore_burst") {
-      // Bouncy organic spore pop
-      this.playTone(ctx, master, "sine", 240, 560, 0.11, 0.25, now);
-      this.playTone(ctx, master, "triangle", 480, 320, 0.09, 0.14, now + 0.06);
+      // Scatter Bomb: heavy iron canister mortar launch thump + metallic latch clack + air burst
+      this.playTone(ctx, master, "sine", 142, 44, 0.24, 0.4, now);
+      this.playTone(ctx, master, "triangle", 980, 420, 0.055, 0.2, now);
+      this.playTone(ctx, master, "sine", 1640, 1180, 0.04, 0.11, now + 0.008);
+      this.playFilteredNoise(ctx, master, "bandpass", 1250, 320, 0.2, 0.26, 1.1, now);
       return;
     }
 
@@ -413,6 +415,35 @@ export class SynthAudio {
     this.playTone(ctx, master, "sawtooth", 115, 88, 0.065, 0.13, now);
     this.playTone(ctx, master, "triangle", 172, 130, 0.06, 0.09, now);
     this.playFilteredNoise(ctx, master, "bandpass", 1350, 720, 0.06, 0.17, 1.8, now);
+  }
+
+  /** Crisp metallic iron-on-rock clang when a Scatter Bomb canister bounces off terrain. */
+  public playScatterBounce(): void {
+    const ready = this.ensureReady();
+    if (!ready) return;
+    const { ctx, master } = ready;
+    const now = ctx.currentTime;
+
+    this.playFilteredNoise(ctx, master, "bandpass", 2800, 1150, 0.055, 0.24, 2.2, now);
+    this.playTone(ctx, master, "triangle", 860, 740, 0.14, 0.2, now);
+    this.playTone(ctx, master, "sine", 1520, 1340, 0.18, 0.14, now + 0.004);
+    this.playTone(ctx, master, "sine", 2380, 2120, 0.11, 0.08, now + 0.006);
+  }
+
+  /** Punchy metallic canister-crack + shrapnel pop burst when Scatter Bomb splits into 5 bomblets. */
+  public playScatterSplit(): void {
+    const ready = this.ensureReady();
+    if (!ready) return;
+    const { ctx, master } = ready;
+    const now = ctx.currentTime;
+
+    // Heavy iron casing crack
+    this.playTone(ctx, master, "sine", 190, 58, 0.15, 0.34, now);
+    this.playTone(ctx, master, "triangle", 1180, 520, 0.09, 0.22, now);
+    this.playFilteredNoise(ctx, master, "bandpass", 3400, 980, 0.14, 0.3, 1.5, now);
+    // Shrapnel ejection pop
+    this.playTone(ctx, master, "sine", 1680, 1120, 0.06, 0.12, now + 0.028);
+    this.playFilteredNoise(ctx, master, "highpass", 2600, 1400, 0.1, 0.16, 1.2, now + 0.025);
   }
 
   /** Tactile soft UI button click. */
