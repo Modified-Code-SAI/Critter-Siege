@@ -1,5 +1,10 @@
+import type { ThemeId } from "@critter/shared";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { MusicEngine, type MusicMood } from "../src/audio/musicEngine.js";
+import {
+  MusicEngine,
+  type MusicMood,
+  type MusicStingerKind,
+} from "../src/audio/musicEngine.js";
 import { SynthAudio } from "../src/audio/synthAudio.js";
 
 interface MockAudioParam {
@@ -30,15 +35,47 @@ interface MockOscillatorNode {
   frequency: MockAudioParam;
   detune: MockAudioParam;
   connect: ReturnType<typeof vi.fn>;
+  disconnect: ReturnType<typeof vi.fn>;
   start: ReturnType<typeof vi.fn>;
   stop: ReturnType<typeof vi.fn>;
 }
 
 interface MockBufferSourceNode {
   buffer: AudioBuffer | null;
+  loop: boolean;
   connect: ReturnType<typeof vi.fn>;
+  disconnect: ReturnType<typeof vi.fn>;
   start: ReturnType<typeof vi.fn>;
   stop: ReturnType<typeof vi.fn>;
+}
+
+interface MockConvolverNode {
+  buffer: AudioBuffer | null;
+  normalize: boolean;
+  connect: ReturnType<typeof vi.fn>;
+  disconnect: ReturnType<typeof vi.fn>;
+}
+
+interface MockDelayNode {
+  delayTime: MockAudioParam;
+  connect: ReturnType<typeof vi.fn>;
+  disconnect: ReturnType<typeof vi.fn>;
+}
+
+interface MockStereoPannerNode {
+  pan: MockAudioParam;
+  connect: ReturnType<typeof vi.fn>;
+  disconnect: ReturnType<typeof vi.fn>;
+}
+
+interface MockCompressorNode {
+  threshold: MockAudioParam;
+  knee: MockAudioParam;
+  ratio: MockAudioParam;
+  attack: MockAudioParam;
+  release: MockAudioParam;
+  connect: ReturnType<typeof vi.fn>;
+  disconnect: ReturnType<typeof vi.fn>;
 }
 
 interface MockAudioContextHarness {
@@ -46,49 +83,78 @@ interface MockAudioContextHarness {
   gains: MockGainNode[];
   filters: MockFilterNode[];
   oscillators: MockOscillatorNode[];
+  bufferSources: MockBufferSourceNode[];
+  convolvers: MockConvolverNode[];
+  delays: MockDelayNode[];
+  panners: MockStereoPannerNode[];
+  compressors: MockCompressorNode[];
+  recordedParamNumbers: number[];
   closeSpy: ReturnType<typeof vi.fn>;
   advanceTime: (deltaSec: number) => void;
 }
 
-function createMockParam(initial = 0): MockAudioParam {
+function createMockParam(
+  initial: number,
+  recordedParamNumbers: number[],
+): MockAudioParam {
+  const record = (...nums: number[]): void => {
+    for (const n of nums) {
+      recordedParamNumbers.push(n);
+    }
+  };
   const param: MockAudioParam = {
     value: initial,
-    setValueAtTime: vi.fn((val: number) => {
+    setValueAtTime: vi.fn((val: number, time: number) => {
+      record(val, time);
       param.value = val;
     }),
-    linearRampToValueAtTime: vi.fn((val: number) => {
+    linearRampToValueAtTime: vi.fn((val: number, time: number) => {
+      record(val, time);
       param.value = val;
     }),
-    exponentialRampToValueAtTime: vi.fn((val: number) => {
+    exponentialRampToValueAtTime: vi.fn((val: number, time: number) => {
+      record(val, time);
       param.value = val;
     }),
-    setTargetAtTime: vi.fn((val: number) => {
+    setTargetAtTime: vi.fn((val: number, time: number, tc: number) => {
+      record(val, time, tc);
       param.value = val;
     }),
-    cancelScheduledValues: vi.fn(),
+    cancelScheduledValues: vi.fn((time: number) => {
+      record(time);
+    }),
   };
   return param;
 }
 
-function createMockAudioContext(): MockAudioContextHarness {
+function createMockAudioContext(options?: {
+  minimal?: boolean;
+}): MockAudioContextHarness {
+  const minimal = options?.minimal ?? false;
   let currentTime = 1.0;
   const gains: MockGainNode[] = [];
   const filters: MockFilterNode[] = [];
   const oscillators: MockOscillatorNode[] = [];
+  const bufferSources: MockBufferSourceNode[] = [];
+  const convolvers: MockConvolverNode[] = [];
+  const delays: MockDelayNode[] = [];
+  const panners: MockStereoPannerNode[] = [];
+  const compressors: MockCompressorNode[] = [];
+  const recordedParamNumbers: number[] = [];
   const closeSpy = vi.fn(() => Promise.resolve());
 
-  const mock = {
+  const baseMock: Record<string, unknown> = {
     get currentTime(): number {
       return currentTime;
     },
     sampleRate: 44100,
     state: "running" as AudioContextState,
-    destination: { connect: vi.fn() },
+    destination: { connect: vi.fn(), disconnect: vi.fn() },
     resume: vi.fn(() => Promise.resolve()),
     close: closeSpy,
     createGain: vi.fn(() => {
       const node: MockGainNode = {
-        gain: createMockParam(1),
+        gain: createMockParam(1, recordedParamNumbers),
         connect: vi.fn(),
         disconnect: vi.fn(),
       };
@@ -98,8 +164,8 @@ function createMockAudioContext(): MockAudioContextHarness {
     createBiquadFilter: vi.fn(() => {
       const node: MockFilterNode = {
         type: "lowpass",
-        frequency: createMockParam(12000),
-        Q: createMockParam(1),
+        frequency: createMockParam(12000, recordedParamNumbers),
+        Q: createMockParam(1, recordedParamNumbers),
         connect: vi.fn(),
         disconnect: vi.fn(),
       };
@@ -109,36 +175,101 @@ function createMockAudioContext(): MockAudioContextHarness {
     createOscillator: vi.fn(() => {
       const node: MockOscillatorNode = {
         type: "sine",
-        frequency: createMockParam(440),
-        detune: createMockParam(0),
+        frequency: createMockParam(440, recordedParamNumbers),
+        detune: createMockParam(0, recordedParamNumbers),
         connect: vi.fn(),
+        disconnect: vi.fn(),
         start: vi.fn(),
         stop: vi.fn(),
       };
       oscillators.push(node);
       return node;
     }),
-    createBuffer: vi.fn((_channels: number, length: number, sampleRate: number) => {
-      const data = new Float32Array(length);
-      return {
-        sampleRate,
-        length,
-        getChannelData: () => data,
+    createBuffer: vi.fn(
+      (numberOfChannels: number, length: number, sampleRate: number) => {
+        const channels: Float32Array[] = [];
+        for (let c = 0; c < numberOfChannels; c++) {
+          channels.push(new Float32Array(length));
+        }
+        return {
+          sampleRate,
+          length,
+          numberOfChannels,
+          duration: length / sampleRate,
+          getChannelData: (idx: number) =>
+            channels[idx] ?? channels[0] ?? new Float32Array(length),
+        };
+      },
+    ),
+    createBufferSource: vi.fn((): MockBufferSourceNode => {
+      const node: MockBufferSourceNode = {
+        buffer: null,
+        loop: false,
+        connect: vi.fn(),
+        disconnect: vi.fn(),
+        start: vi.fn(),
+        stop: vi.fn(),
       };
+      bufferSources.push(node);
+      return node;
     }),
-    createBufferSource: vi.fn((): MockBufferSourceNode => ({
-      buffer: null,
-      connect: vi.fn(),
-      start: vi.fn(),
-      stop: vi.fn(),
-    })),
   };
 
+  if (!minimal) {
+    baseMock.createConvolver = vi.fn(() => {
+      const node: MockConvolverNode = {
+        buffer: null,
+        normalize: true,
+        connect: vi.fn(),
+        disconnect: vi.fn(),
+      };
+      convolvers.push(node);
+      return node;
+    });
+    baseMock.createDelay = vi.fn(() => {
+      const node: MockDelayNode = {
+        delayTime: createMockParam(0.3, recordedParamNumbers),
+        connect: vi.fn(),
+        disconnect: vi.fn(),
+      };
+      delays.push(node);
+      return node;
+    });
+    baseMock.createStereoPanner = vi.fn(() => {
+      const node: MockStereoPannerNode = {
+        pan: createMockParam(0, recordedParamNumbers),
+        connect: vi.fn(),
+        disconnect: vi.fn(),
+      };
+      panners.push(node);
+      return node;
+    });
+    baseMock.createDynamicsCompressor = vi.fn(() => {
+      const node: MockCompressorNode = {
+        threshold: createMockParam(-14, recordedParamNumbers),
+        knee: createMockParam(18, recordedParamNumbers),
+        ratio: createMockParam(3.2, recordedParamNumbers),
+        attack: createMockParam(0.014, recordedParamNumbers),
+        release: createMockParam(0.22, recordedParamNumbers),
+        connect: vi.fn(),
+        disconnect: vi.fn(),
+      };
+      compressors.push(node);
+      return node;
+    });
+  }
+
   return {
-    ctx: mock as unknown as AudioContext,
+    ctx: baseMock as unknown as AudioContext,
     gains,
     filters,
     oscillators,
+    bufferSources,
+    convolvers,
+    delays,
+    panners,
+    compressors,
+    recordedParamNumbers,
     closeSpy,
     advanceTime: (deltaSec: number) => {
       currentTime += deltaSec;
@@ -146,33 +277,47 @@ function createMockAudioContext(): MockAudioContextHarness {
   };
 }
 
-describe("MusicEngine & SynthAudio adaptive soundtrack and SFX", () => {
+describe("MusicEngine & SynthAudio atmospheric adaptive soundtrack and SFX", () => {
   afterEach(() => {
     vi.useRealTimers();
   });
 
-  it("switches all 6 MusicEngine moods with exact BPMs, handles mute/duck/stingers, and disposes cleanly in headless Node", () => {
+  it("supports all 7 moods with grounded BPMs, all 4 biome themes, stingers, and safe headless Node execution", () => {
     const engine = new MusicEngine();
 
     const expectedMoods: ReadonlyArray<readonly [MusicMood, number]> = [
-      ["lobby", 112],
-      ["battle", 124],
-      ["intense", 138],
-      ["shop", 114],
-      ["flood", 148],
-      ["victory", 120],
+      ["lobby", 74],
+      ["battle", 86],
+      ["intense", 102],
+      ["shop", 72],
+      ["flood", 114],
+      ["victory", 80],
+      ["defeat", 68],
     ];
 
     expect(engine.getMood()).toBe("lobby");
-    expect(engine.getBpm()).toBe(112);
+    expect(engine.getBpm()).toBe(74);
+    expect(engine.getTargetBpm()).toBe(74);
 
     for (const [mood, bpm] of expectedMoods) {
       engine.setMood(mood);
       expect(engine.getMood()).toBe(mood);
       expect(engine.getBpm()).toBe(bpm);
+      expect(engine.getTargetBpm()).toBe(bpm);
     }
 
-    // Independent music mute vs master mute
+    const themes: readonly ThemeId[] = [
+      "emerald_spire",
+      "canyon_arch",
+      "twin_pillars",
+      "mountain_spine",
+    ];
+    for (const theme of themes) {
+      engine.setTheme(theme);
+      expect(engine.getContext().theme).toBe(theme);
+    }
+
+    // Independent music mute vs master mute state
     expect(engine.isMusicMuted()).toBe(false);
     expect(engine.toggleMusicMute()).toBe(true);
     expect(engine.isMusicMuted()).toBe(true);
@@ -182,63 +327,148 @@ describe("MusicEngine & SynthAudio adaptive soundtrack and SFX", () => {
     expect(engine.isMusicMuted()).toBe(false);
     engine.setMasterMuted(false);
 
-    // Safe headless start, ducking, stingers, stop, and dispose
+    // Safe headless start, context updates, ducking, all 5 stingers, stop, and dispose
+    const stingers: readonly MusicStingerKind[] = [
+      "ko",
+      "round_end",
+      "flood_alarm",
+      "purchase",
+      "evolution",
+    ];
     expect(() => {
       engine.start();
+      engine.setContext({
+        mood: "battle",
+        theme: "canyon_arch",
+        isCharging: true,
+        chargePower: 0.85,
+        isShotFlight: true,
+        isDroneView: true,
+        windSpeed: 14,
+      });
       engine.duck(0.35, 0.5);
-      engine.playStinger("ko");
-      engine.playStinger("round_end");
-      engine.playStinger("flood_alarm");
-      engine.playStinger("purchase");
+      for (const kind of stingers) {
+        engine.playStinger(kind);
+      }
+      engine.playStinger("evolution", true);
       engine.stop();
       engine.dispose();
       // Subsequent calls after dispose must safely no-op
       engine.start();
+      engine.setMood("flood");
+      engine.setTheme("mountain_spine");
+      engine.setContext({ isCharging: true });
       engine.duck(0.4, 0.3);
       engine.playStinger("ko");
     }).not.toThrow();
   });
 
-  it("drives lookahead WebAudio scheduling, sweeps shop low-pass to 1150 Hz, ducks cleanly, and clears all timers on dispose", () => {
+  it("conducts vertical stems, smooth tempo glide, shop filter veil, micro-moments, and key-aware stingers on full AudioContext", () => {
     vi.useFakeTimers();
-    const harness = createMockAudioContext();
-    const engine = new MusicEngine(() => harness.ctx);
+    const harness = createMockAudioContext({ minimal: false });
+    const customOutput = { connect: vi.fn(), disconnect: vi.fn() } as unknown as AudioNode;
+    const engine = new MusicEngine(
+      () => harness.ctx,
+      () => customOutput,
+    );
 
     engine.start();
     expect(vi.getTimerCount()).toBe(1);
+    expect(harness.convolvers.length).toBe(1);
+    expect(harness.delays.length).toBe(2);
+    expect(harness.compressors.length).toBe(1);
+    expect(harness.compressors[0]?.connect).toHaveBeenCalledWith(customOutput);
 
-    // Music bus creates duckGain, musicGain, and lowpass musicFilter
-    const duckGain = harness.gains[0];
-    const musicGain = harness.gains[1];
-    const musicFilter = harness.filters[0];
+    // Core StudioAudioBus node indices (created deterministically at bus init)
+    const reverbWetGain = harness.gains[4];
+    const duckGain = harness.gains[5];
+    const musicToneFilter = harness.filters[0];
+    expect(reverbWetGain).toBeDefined();
     expect(duckGain).toBeDefined();
-    expect(musicGain).toBeDefined();
-    expect(musicFilter).toBeDefined();
+    expect(musicToneFilter).toBeDefined();
 
-    // Mood sweep to shop lowers filter to 1150 Hz, then battle opens to 16000 Hz
+    // Shop mood lowers filter veil to <= 1450 Hz (1350 Hz)
     engine.setMood("shop");
-    expect(musicFilter?.frequency.setTargetAtTime).toHaveBeenCalledWith(
-      1150,
-      expect.any(Number),
-      expect.any(Number),
-    );
+    expect(musicToneFilter?.frequency.value).toBeLessThanOrEqual(1450);
 
+    // Battle opens tone filter cleanly
     engine.setMood("battle");
-    expect(musicFilter?.frequency.setTargetAtTime).toHaveBeenCalledWith(
-      16000,
-      expect.any(Number),
-      expect.any(Number),
-    );
+    const battleFilterHz = musicToneFilter?.frequency.value ?? 0;
+    expect(battleFilterHz).toBeGreaterThan(10000);
 
-    // Advance lookahead scheduler across multiple moods to verify procedural voice synthesis
-    for (const mood of ["battle", "intense", "flood", "victory"] as const) {
-      engine.setMood(mood);
+    // Enemy turn subtly softens cutoff vs player turn
+    engine.setContext({ isMyTurn: false });
+    expect(musicToneFilter?.frequency.value ?? 0).toBeLessThan(battleFilterHz);
+    engine.setContext({ isMyTurn: true });
+
+    // Smooth tempo glide while running: battle (86) -> intense (102)
+    // First settle current BPM to battle target (86)
+    for (let i = 0; i < 45; i++) {
       harness.advanceTime(0.12);
-      vi.advanceTimersByTime(30);
+      vi.advanceTimersByTime(25);
     }
-    expect(harness.oscillators.length).toBeGreaterThan(6);
+    expect(engine.getBpm()).toBeCloseTo(86, 1);
 
-    // Ducking reduces duckGain temporarily and schedules recovery
+    engine.setMood("intense");
+    expect(engine.getTargetBpm()).toBe(102);
+    // Does not snap abruptly before scheduler ticks
+    expect(engine.getBpm()).toBeCloseTo(86, 1);
+
+    // After a couple steps, tempo is partway through the smooth glide
+    harness.advanceTime(0.24);
+    vi.advanceTimersByTime(25);
+    expect(engine.getBpm()).toBeGreaterThan(86.5);
+    expect(engine.getBpm()).toBeLessThan(101.5);
+
+    // Over subsequent steps, tempo glides and snaps cleanly to 102 BPM
+    for (let i = 0; i < 50; i++) {
+      harness.advanceTime(0.14);
+      vi.advanceTimersByTime(25);
+    }
+    expect(engine.getBpm()).toBe(102);
+
+    // Micro-moment telemetry: Shot Cam breath & Tactical Drone Recon expand reverb space
+    const baseReverbWet = reverbWetGain?.gain.value ?? 0;
+    engine.setContext({ isShotFlight: true });
+    expect(reverbWetGain?.gain.value ?? 0).toBeGreaterThan(baseReverbWet + 0.08);
+    engine.setContext({ isShotFlight: false, isDroneView: true });
+    expect(reverbWetGain?.gain.value ?? 0).toBeGreaterThan(baseReverbWet + 0.05);
+    engine.setContext({ isDroneView: false });
+
+    // Micro-moment telemetry: charging above 50% triggers charge shimmer voices
+    const oscBeforeCharge = harness.oscillators.length;
+    engine.setContext({
+      mood: "battle",
+      isCharging: true,
+      chargePower: 0.9,
+    });
+    for (let i = 0; i < 6; i++) {
+      harness.advanceTime(0.18);
+      vi.advanceTimersByTime(25);
+    }
+    expect(harness.oscillators.length).toBeGreaterThan(oscBeforeCharge + 4);
+    engine.setContext({ isCharging: false, chargePower: 0 });
+
+    // Immediate transitions across all biomes & dramatic moods synthesize voices cleanly
+    const themes: readonly ThemeId[] = [
+      "emerald_spire",
+      "canyon_arch",
+      "twin_pillars",
+      "mountain_spine",
+    ];
+    for (const theme of themes) {
+      engine.setMood("lobby");
+      engine.setTheme(theme);
+      harness.advanceTime(0.2);
+      vi.advanceTimersByTime(25);
+    }
+    for (const mood of ["flood", "victory", "defeat"] as const) {
+      engine.setMood(mood);
+      harness.advanceTime(0.22);
+      vi.advanceTimersByTime(25);
+    }
+
+    // Ducking smoothly dips duckGain and schedules recovery to 1.0
     engine.duck(0.35, 0.55);
     expect(duckGain?.gain.setTargetAtTime).toHaveBeenCalledWith(
       expect.closeTo(0.65, 2),
@@ -251,31 +481,173 @@ describe("MusicEngine & SynthAudio adaptive soundtrack and SFX", () => {
       expect.any(Number),
     );
 
-    // Stingers synthesize cleanly
+    // All 5 key-aware stingers synthesize cleanly, with apexBonus adding extra overtone halo
     const oscBeforeStingers = harness.oscillators.length;
     engine.playStinger("ko");
     engine.playStinger("round_end");
     engine.playStinger("flood_alarm");
     engine.playStinger("purchase");
-    expect(harness.oscillators.length).toBeGreaterThan(oscBeforeStingers);
+    const oscAfterBase4 = harness.oscillators.length;
+    expect(oscAfterBase4).toBeGreaterThan(oscBeforeStingers + 8);
 
-    // Independent mute vs master mute updates musicGain cleanly
-    engine.setMusicMuted(true);
-    expect(musicGain?.gain.setTargetAtTime).toHaveBeenLastCalledWith(
-      0,
-      expect.any(Number),
-      expect.any(Number),
-    );
-    engine.setMusicMuted(false);
-    expect(musicGain?.gain.value).toBeGreaterThan(0);
+    const beforeEvoBase = harness.oscillators.length;
+    engine.playStinger("evolution", false);
+    const evoBaseDelta = harness.oscillators.length - beforeEvoBase;
 
-    // Dispose clears interval cleanly and does NOT close shared external AudioContext
+    const beforeEvoApex = harness.oscillators.length;
+    engine.playStinger("evolution", true);
+    const evoApexDelta = harness.oscillators.length - beforeEvoApex;
+    expect(evoApexDelta).toBeGreaterThan(evoBaseDelta);
+
     engine.dispose();
     expect(vi.getTimerCount()).toBe(0);
     expect(harness.closeSpy).not.toHaveBeenCalled();
   });
 
-  it("integrates MusicEngine into SynthAudio with independent music mute, new SFX methods, and clean dispose", () => {
+  it("works cleanly on a minimal mock AudioContext lacking convolver, delay, panner, and compressor (Review Focus #1)", () => {
+    vi.useFakeTimers();
+    const minimal = createMockAudioContext({ minimal: true });
+    const engine = new MusicEngine(() => minimal.ctx);
+
+    expect(() => {
+      engine.start();
+      engine.setContext({
+        mood: "battle",
+        theme: "twin_pillars",
+        isCharging: true,
+        chargePower: 0.85,
+        windSpeed: 10,
+      });
+      for (let i = 0; i < 8; i++) {
+        minimal.advanceTime(0.16);
+        vi.advanceTimersByTime(25);
+      }
+      engine.setMood("shop");
+      engine.setMood("flood");
+      engine.playStinger("flood_alarm");
+      engine.playStinger("evolution", true);
+      engine.duck(0.3, 0.4);
+      engine.dispose();
+    }).not.toThrow();
+
+    expect(minimal.convolvers.length).toBe(0);
+    expect(minimal.delays.length).toBe(0);
+    expect(minimal.panners.length).toBe(0);
+    expect(minimal.compressors.length).toBe(0);
+    expect(minimal.oscillators.length).toBeGreaterThan(6);
+    expect(minimal.bufferSources.length).toBeGreaterThanOrEqual(3);
+    expect(vi.getTimerCount()).toBe(0);
+    expect(minimal.closeSpy).not.toHaveBeenCalled();
+  });
+
+  it("keeps island ambience alive on Music Mute (N), zeroes both on Master Mute (M), and tears down cleanly on dispose (Review Focus #3)", () => {
+    vi.useFakeTimers();
+    const harness = createMockAudioContext({ minimal: false });
+    const engine = new MusicEngine(() => harness.ctx);
+
+    // Even when starting with music already muted (N), ambience must attach and run
+    engine.setMusicMuted(true);
+    engine.start();
+
+    const musicMuteGain = harness.gains[6];
+    const ambienceMuteGain = harness.gains[7];
+    expect(musicMuteGain).toBeDefined();
+    expect(ambienceMuteGain).toBeDefined();
+
+    // Music muted -> musicMuteGain = 0, ambienceMuteGain > 0, and ambience loop sources started
+    expect(musicMuteGain?.gain.value).toBe(0);
+    expect(ambienceMuteGain?.gain.value ?? 0).toBeGreaterThan(0);
+    const ambienceSources = harness.bufferSources.filter((src) => src.loop);
+    expect(ambienceSources.length).toBe(3);
+
+    // Master mute (M) drives BOTH music and ambience to 0
+    engine.setMasterMuted(true);
+    expect(musicMuteGain?.gain.value).toBe(0);
+    expect(ambienceMuteGain?.gain.value).toBe(0);
+
+    // Unmuting master while musicMute stays true restores ambience while music stays 0
+    engine.setMasterMuted(false);
+    expect(musicMuteGain?.gain.value).toBe(0);
+    expect(ambienceMuteGain?.gain.value ?? 0).toBeGreaterThan(0);
+
+    // Unmuting music restores music gain too
+    engine.setMusicMuted(false);
+    expect(musicMuteGain?.gain.value ?? 0).toBeGreaterThan(0);
+    expect(ambienceMuteGain?.gain.value ?? 0).toBeGreaterThan(0);
+
+    // Dispose clears timer, stops ambience sources, disconnects bus, and never closes external AudioContext
+    engine.dispose();
+    expect(vi.getTimerCount()).toBe(0);
+    for (const src of ambienceSources) {
+      expect(src.stop).toHaveBeenCalled();
+    }
+    expect(musicMuteGain?.disconnect).toHaveBeenCalled();
+    expect(ambienceMuteGain?.disconnect).toHaveBeenCalled();
+    expect(harness.closeSpy).not.toHaveBeenCalled();
+  });
+
+  it("clamps non-finite telemetry safely and recovers from +60s background tab sleep without hanging (Review Focus #5)", () => {
+    vi.useFakeTimers();
+    const harness = createMockAudioContext({ minimal: false });
+    const engine = new MusicEngine(() => harness.ctx);
+
+    engine.start();
+
+    // Feed non-finite telemetry and duck arguments
+    expect(() => {
+      engine.setContext({
+        mood: "battle",
+        round: Number.NaN,
+        maxRounds: Number.POSITIVE_INFINITY,
+        chargePower: Number.NaN,
+        hpRatio: Number.NEGATIVE_INFINITY,
+        windSpeed: Number.POSITIVE_INFINITY,
+        waterLevel: Number.NaN,
+        floodIntensity: Number.POSITIVE_INFINITY,
+        isCharging: true,
+      });
+      engine.duck(Number.NaN, Number.POSITIVE_INFINITY);
+    }).not.toThrow();
+
+    const sanitized = engine.getContext();
+    expect(Number.isFinite(sanitized.round)).toBe(true);
+    expect(Number.isFinite(sanitized.maxRounds)).toBe(true);
+    expect(Number.isFinite(sanitized.chargePower)).toBe(true);
+    expect(Number.isFinite(sanitized.hpRatio)).toBe(true);
+    expect(Number.isFinite(sanitized.windSpeed)).toBe(true);
+    expect(Number.isFinite(sanitized.waterLevel)).toBe(true);
+    expect(Number.isFinite(sanitized.floodIntensity)).toBe(true);
+    expect(Number.isFinite(engine.getBpm())).toBe(true);
+
+    // Run a couple normal ticks first
+    harness.advanceTime(0.15);
+    vi.advanceTimersByTime(25);
+
+    // Simulate a +60 second background-tab clock jump in a single tick
+    const oscBeforeWakeup = harness.oscillators.length;
+    harness.advanceTime(60.0);
+    vi.advanceTimersByTime(25);
+    const oscAfterWakeup = harness.oscillators.length;
+
+    // Must recover smoothly instead of catch-up bursting hundreds of steps
+    expect(oscAfterWakeup - oscBeforeWakeup).toBeLessThan(60);
+
+    // Subsequent normal ticks continue scheduling smoothly
+    harness.advanceTime(0.2);
+    vi.advanceTimersByTime(25);
+    expect(harness.oscillators.length).toBeGreaterThanOrEqual(oscAfterWakeup);
+
+    // Every AudioParam number ever passed across the entire run must be strictly finite
+    expect(harness.recordedParamNumbers.length).toBeGreaterThan(0);
+    for (const num of harness.recordedParamNumbers) {
+      expect(Number.isFinite(num)).toBe(true);
+    }
+
+    engine.dispose();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("integrates MusicEngine into SynthAudio with independent music mute, SFX methods, and clean dispose", () => {
     const audio = new SynthAudio();
 
     expect(audio.isMuted()).toBe(false);
@@ -310,6 +682,8 @@ describe("MusicEngine & SynthAudio adaptive soundtrack and SFX", () => {
       expect(audio.getMusicMood()).toBe("flood");
       audio.setMusicMood("victory");
       expect(audio.getMusicMood()).toBe("victory");
+      audio.setMusicMood("defeat");
+      expect(audio.getMusicMood()).toBe("defeat");
 
       audio.duckMusic(0.35, 0.55);
       audio.playExplosion(3.2);
@@ -322,6 +696,7 @@ describe("MusicEngine & SynthAudio adaptive soundtrack and SFX", () => {
       audio.playStinger("round_end");
       audio.playStinger("flood_alarm");
       audio.playStinger("purchase");
+      audio.playStinger("evolution");
     }).not.toThrow();
 
     audio.dispose();
