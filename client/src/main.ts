@@ -28,7 +28,7 @@ import { EnvironmentProps } from "./scene/environmentProps.js";
 import { preloadAllSpeciesModels } from "./scene/modelLoader.js";
 import { TerrainRenderer } from "./scene/terrainRenderer.js";
 import { VfxSystem } from "./scene/vfx.js";
-import { WorldScene } from "./scene/worldScene.js";
+import { WorldScene, getThemeAtmosphere } from "./scene/worldScene.js";
 import {
   HudController,
   type HudCompassState,
@@ -36,6 +36,12 @@ import {
   type MatchEssenceBreakdown,
   type SelectableCameraMode,
 } from "./ui/hud.js";
+
+/** Compute the normalized directional sun vector matching a biome theme's atmosphere preset. */
+export function getThemeSunDirection(theme: ThemeId): THREE.Vector3 {
+  const { sunOffset } = getThemeAtmosphere(theme);
+  return new THREE.Vector3(sunOffset.x, sunOffset.y, sunOffset.z).normalize();
+}
 
 const STANDARD_GADGETS: readonly GadgetId[] = [
   "gale_mortar",
@@ -421,6 +427,8 @@ class CritterSiegeApp {
   private activeWorldKey = "";
   private appliedCarveCount = 0;
   private appliedCrumbleTurn = 0;
+  private lastShorelineWaterLevel = 1.8;
+  private shadowFocusPos: Vec3 = { x: WORLD_CENTER_X, y: 8, z: WORLD_CENTER_Z };
 
   private readonly onWindowResizeBound: () => void;
   private readonly onWindowKeyDownBound: (e: KeyboardEvent) => void;
@@ -515,7 +523,15 @@ class CritterSiegeApp {
       this.activeWorld.worldHeight,
       this.activeWorld.worldDepth,
     );
+    this.worldScene.setTheme(this.activeWorld.theme);
+    this.worldScene.setWaterLevel(1.8);
+    this.worldScene.updateShorelineFromWorld(this.activeWorld, 1.8);
+    this.lastShorelineWaterLevel = 1.8;
     this.terrainRenderer = new TerrainRenderer(this.activeWorld);
+    this.terrainRenderer.setWaterLevel(1.8);
+    this.terrainRenderer.setSunDirection(
+      getThemeSunDirection(this.activeWorld.theme),
+    );
     this.worldScene.scene.add(this.terrainRenderer.group);
 
     const previewSpawns = this.activeWorld.findSpawnPoints(
@@ -953,6 +969,10 @@ class CritterSiegeApp {
         this.activeWorld.worldHeight,
         this.activeWorld.worldDepth,
       );
+      this.worldScene.setTheme(this.activeWorld.theme);
+      this.terrainRenderer.setSunDirection(
+        getThemeSunDirection(this.activeWorld.theme),
+      );
       this.vfx.setWorldBounds(
         this.activeWorld.worldWidth,
         this.activeWorld.worldHeight,
@@ -966,6 +986,9 @@ class CritterSiegeApp {
       }
       this.syncSuddenDeathCrumble(state, false);
       this.terrainRenderer.rebuildAll(this.activeWorld);
+      this.terrainRenderer.setWaterLevel(state.waterLevel);
+      this.worldScene.updateShorelineFromWorld(this.activeWorld, state.waterLevel);
+      this.lastShorelineWaterLevel = state.waterLevel;
       this.input.setRaycastTargets([this.terrainRenderer.group]);
 
       const avoidPoints: Vec3[] = [
@@ -998,6 +1021,11 @@ class CritterSiegeApp {
     }
 
     this.worldScene.setWaterLevel(state.waterLevel);
+    this.terrainRenderer.setWaterLevel(state.waterLevel);
+    if (Math.abs(state.waterLevel - this.lastShorelineWaterLevel) >= 0.1) {
+      this.worldScene.updateShorelineFromWorld(this.activeWorld, state.waterLevel);
+      this.lastShorelineWaterLevel = state.waterLevel;
+    }
     this.syncCritterRigsFromState(state);
 
     // Snap local movement state when turn/round changes or when not actively controlling
@@ -1334,8 +1362,13 @@ class CritterSiegeApp {
     }
     this.appliedCarveCount = state.carveLog.length;
     if (dirty.size > 0) {
-      this.terrainRenderer.rebuildChunks(this.activeWorld, Array.from(dirty));
+      const dirtyList = Array.from(dirty);
+      this.terrainRenderer.rebuildChunks(this.activeWorld, dirtyList);
       this.environmentProps.pruneAfterCarve(this.activeWorld, state.waterLevel);
+      if (dirtyList.some((key) => key.includes(",0,"))) {
+        this.worldScene.updateShorelineFromWorld(this.activeWorld, state.waterLevel);
+        this.lastShorelineWaterLevel = state.waterLevel;
+      }
     }
   }
 
@@ -1367,8 +1400,13 @@ class CritterSiegeApp {
     }
     this.appliedCrumbleTurn = state.turnNumber;
     if (rebuildNow && dirty.size > 0) {
-      this.terrainRenderer.rebuildChunks(this.activeWorld, Array.from(dirty));
+      const dirtyList = Array.from(dirty);
+      this.terrainRenderer.rebuildChunks(this.activeWorld, dirtyList);
       this.environmentProps.pruneAfterCarve(this.activeWorld, state.waterLevel);
+      if (dirtyList.some((key) => key.includes(",0,"))) {
+        this.worldScene.updateShorelineFromWorld(this.activeWorld, state.waterLevel);
+        this.lastShorelineWaterLevel = state.waterLevel;
+      }
     }
   }
 
@@ -1523,17 +1561,22 @@ class CritterSiegeApp {
 
     if (!this.inMatch || !this.matchState) {
       this.updateLobbyBackdrop(dtSec);
+      this.worldScene.setShadowFocus(this.shadowFocusPos);
       this.worldScene.render(this.cameraRig.camera);
       return;
     }
 
     this.updateActiveMatchFrame(dtSec, nowMs);
+    this.worldScene.setShadowFocus(this.shadowFocusPos);
     this.worldScene.render(this.cameraRig.camera);
   }
 
   private updateLobbyBackdrop(dtSec: number): void {
-    this.vfx.updateWindRibbons({ x: 2.4, y: 0, z: 1.1 }, dtSec);
+    const previewWind: Vec3 = { x: 2.4, y: 0, z: 1.1 };
+    this.vfx.updateWindRibbons(previewWind, dtSec);
+    this.environmentProps.updateWind(previewWind, this.elapsedSec);
     this.environmentProps.syncHazards(this.previewHazards, this.elapsedSec);
+    this.shadowFocusPos = this.lobbyHeroPos;
 
     // Frame the rotating 3D GLB showcase hero critter on the right-center sunlit ridge
     // with the sweeping sculpted island, trees, arches, and ocean stretching behind it!
@@ -1695,8 +1738,9 @@ class CritterSiegeApp {
       );
     }
 
-    // Sync VFX wind ribbons, Evo Pods, and animated interactive hazards
+    // Sync VFX wind ribbons, wind-swayed foliage, Evo Pods, and animated interactive hazards
     this.vfx.updateWindRibbons(state.wind, dtSec);
+    this.environmentProps.updateWind(state.wind, this.elapsedSec);
     this.vfx.syncEvoPods(state.evoPods, this.elapsedSec);
     this.environmentProps.syncHazards(state.hazards ?? [], this.elapsedSec);
 
@@ -1711,6 +1755,8 @@ class CritterSiegeApp {
         : focusCritter
           ? activeGlidePositions.get(focusCritter.id) ?? focusCritter.position
           : { x: this.activeWorld.centerX, y: 9, z: this.activeWorld.centerZ };
+    this.shadowFocusPos =
+      state.phase === "RESOLVING" && shotPos ? shotPos : focusPos;
     const viewerYaw = canMove ? moveInput.yaw : focusCritter?.yaw ?? 0;
 
     this.cameraRig.update({
@@ -2328,13 +2374,20 @@ class CritterSiegeApp {
       this.activeWorld.worldHeight,
       this.activeWorld.worldDepth,
     );
+    this.worldScene.setTheme(this.activeWorld.theme);
+    this.terrainRenderer.setSunDirection(
+      getThemeSunDirection(this.activeWorld.theme),
+    );
     this.vfx.setWorldBounds(
       this.activeWorld.worldWidth,
       this.activeWorld.worldHeight,
       this.activeWorld.worldDepth,
     );
     this.terrainRenderer.rebuildAll(this.activeWorld);
+    this.terrainRenderer.setWaterLevel(1.8);
     this.worldScene.setWaterLevel(1.8);
+    this.worldScene.updateShorelineFromWorld(this.activeWorld, 1.8);
+    this.lastShorelineWaterLevel = 1.8;
 
     const previewSpawns = this.activeWorld.findSpawnPoints(
       LOBBY_SHOWCASE_SPECIES.length,

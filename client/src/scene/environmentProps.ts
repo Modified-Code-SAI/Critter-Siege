@@ -29,7 +29,20 @@ interface HazardVisual {
   pulseMaterials: THREE.MeshStandardMaterial[];
   warningRing?: THREE.Mesh;
   steamPuffs?: THREE.Mesh[];
+  glowHalo?: THREE.Sprite;
+  glowBaseScale?: number;
+  groundPool?: THREE.Mesh;
+  groundPoolBaseOpacity?: number;
   phaseOffset: number;
+}
+
+interface WindSwayOptions {
+  cacheKey: string;
+  minY: number;
+  heightSpan: number;
+  amp: number;
+  freq: number;
+  baseSway: number;
 }
 
 /** Quantitative scenery & hazard counts for diagnostics and tests. */
@@ -39,6 +52,619 @@ export interface EnvironmentPropCounts {
   boulders: number;
   landmarks: number;
   activeHazards: number;
+}
+
+function clamp01(v: number): number {
+  return v < 0 ? 0 : v > 1 ? 1 : v;
+}
+
+/**
+ * Bake a smooth vertical vertex-color AO gradient onto `geometry` using its Y bounds
+ * so foliage crowns have cool shaded undersides & sunlit tips, and trunks/rocks feel grounded.
+ */
+function bakeVerticalVertexGradient(
+  geometry: THREE.BufferGeometry,
+  bottomRgb: readonly [number, number, number],
+  topRgb: readonly [number, number, number],
+): void {
+  const pos = geometry.getAttribute("position");
+  if (!(pos instanceof THREE.BufferAttribute) || pos.count === 0) {
+    return;
+  }
+
+  let minY = Number.POSITIVE_INFINITY;
+  let maxY = Number.NEGATIVE_INFINITY;
+  for (let i = 0; i < pos.count; i++) {
+    const y = pos.getY(i);
+    if (y < minY) minY = y;
+    if (y > maxY) maxY = y;
+  }
+
+  const spanY = Math.max(1e-5, maxY - minY);
+  const colors = new Float32Array(pos.count * 3);
+  for (let i = 0; i < pos.count; i++) {
+    const t = clamp01((pos.getY(i) - minY) / spanY);
+    const smoothT = t * t * (3.0 - 2.0 * t);
+    colors[i * 3] = clamp01(
+      bottomRgb[0] + (topRgb[0] - bottomRgb[0]) * smoothT,
+    );
+    colors[i * 3 + 1] = clamp01(
+      bottomRgb[1] + (topRgb[1] - bottomRgb[1]) * smoothT,
+    );
+    colors[i * 3 + 2] = clamp01(
+      bottomRgb[2] + (topRgb[2] - bottomRgb[2]) * smoothT,
+    );
+  }
+  geometry.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+}
+
+/**
+ * Deterministically displace boulder vertices along their normalized direction
+ * so shared rocks read as weathered sculpted stone rather than uniform polyhedra.
+ */
+function perturbBoulderGeometry(geometry: THREE.BufferGeometry): void {
+  const pos = geometry.getAttribute("position");
+  if (!(pos instanceof THREE.BufferAttribute) || pos.count === 0) {
+    return;
+  }
+
+  for (let i = 0; i < pos.count; i++) {
+    const vx = pos.getX(i);
+    const vy = pos.getY(i);
+    const vz = pos.getZ(i);
+    const len = Math.hypot(vx, vy, vz);
+    if (len < 1e-6) {
+      continue;
+    }
+    const nx = vx / len;
+    const ny = vy / len;
+    const nz = vz / len;
+
+    const waveA = Math.sin(nx * 3.7 + ny * 2.9 - nz * 4.1) * 0.12;
+    const waveB = Math.cos(nz * 5.3 - nx * 4.4 + ny * 3.1) * 0.065;
+    const ridge = Math.sin((nx - nz) * 6.1 + ny * 2.2) * 0.035;
+    const flatBase = ny < -0.22 ? 1.0 + (ny + 0.22) * 0.18 : 1.0;
+    const scale = Math.max(0.72, (1.0 + waveA + waveB + ridge) * flatBase);
+
+    pos.setXYZ(i, vx * scale, vy * scale, vz * scale);
+  }
+
+  pos.needsUpdate = true;
+  geometry.computeVertexNormals();
+}
+
+/**
+ * Build a compact 3-blade splayed tapered grass cluster (BufferGeometry, zero BoxGeometry)
+ * anchored at y = 0 with grounded dark-base-to-sunlit-tip vertex colors.
+ */
+function createSculptedGrassTuftGeometry(): THREE.BufferGeometry {
+  const positions: number[] = [];
+  const colors: number[] = [];
+  const indices: number[] = [];
+
+  const bladeSpecs: ReadonlyArray<{
+    angle: number;
+    height: number;
+    lean: number;
+    width: number;
+    offset: number;
+  }> = [
+    { angle: 0.15, height: 0.48, lean: 0.17, width: 0.072, offset: 0.025 },
+    { angle: 2.22, height: 0.43, lean: 0.19, width: 0.068, offset: 0.028 },
+    { angle: 4.35, height: 0.39, lean: 0.16, width: 0.064, offset: 0.024 },
+  ];
+
+  const baseColor: readonly [number, number, number] = [0.46, 0.62, 0.42];
+  const midColor: readonly [number, number, number] = [0.74, 0.88, 0.62];
+  const tipColor: readonly [number, number, number] = [0.98, 1.0, 0.78];
+
+  const pushVert = (
+    x: number,
+    y: number,
+    z: number,
+    rgb: readonly [number, number, number],
+  ): number => {
+    const idx = positions.length / 3;
+    positions.push(x, y, z);
+    colors.push(rgb[0], rgb[1], rgb[2]);
+    return idx;
+  };
+
+  for (const blade of bladeSpecs) {
+    const dirX = Math.cos(blade.angle);
+    const dirZ = Math.sin(blade.angle);
+    const sideX = -dirZ;
+    const sideZ = dirX;
+
+    const bx = dirX * blade.offset;
+    const bz = dirZ * blade.offset;
+    const mx = bx + dirX * blade.lean * 0.42;
+    const my = blade.height * 0.54;
+    const mz = bz + dirZ * blade.lean * 0.42;
+    const tx = bx + dirX * blade.lean;
+    const ty = blade.height;
+    const tz = bz + dirZ * blade.lean;
+
+    const w0 = blade.width * 0.5;
+    const w1 = blade.width * 0.32;
+    const fold = blade.width * 0.22;
+
+    // Slight V-fold along center spine gives natural 3D light catch from all camera angles
+    const bL = pushVert(bx - sideX * w0, 0, bz - sideZ * w0, baseColor);
+    const bC = pushVert(bx + dirX * fold, 0, bz + dirZ * fold, baseColor);
+    const bR = pushVert(bx + sideX * w0, 0, bz + sideZ * w0, baseColor);
+
+    const mL = pushVert(mx - sideX * w1, my, mz - sideZ * w1, midColor);
+    const mC = pushVert(
+      mx + dirX * (fold * 0.7),
+      my,
+      mz + dirZ * (fold * 0.7),
+      midColor,
+    );
+    const mR = pushVert(mx + sideX * w1, my, mz + sideZ * w1, midColor);
+
+    const tip = pushVert(tx, ty, tz, tipColor);
+
+    // Lower left & right quads + upper left & right tapered tip triangles
+    indices.push(
+      bL,
+      bC,
+      mC,
+      bL,
+      mC,
+      mL,
+      bC,
+      bR,
+      mR,
+      bC,
+      mR,
+      mC,
+      mL,
+      mC,
+      tip,
+      mC,
+      mR,
+      tip,
+    );
+  }
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+  geo.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
+  geo.setIndex(indices);
+  geo.computeVertexNormals();
+  return geo;
+}
+
+/** Create ONE shared radial-gradient glow texture (CanvasTexture in browser, 16x16 DataTexture in Node). */
+function createSharedGlowTexture(): THREE.Texture {
+  if (typeof document !== "undefined") {
+    const size = 64;
+    const canvas = document.createElement("canvas");
+    canvas.width = size;
+    canvas.height = size;
+    const ctx = canvas.getContext("2d");
+    if (ctx) {
+      const half = size * 0.5;
+      const grad = ctx.createRadialGradient(half, half, 0, half, half, half);
+      grad.addColorStop(0.0, "rgba(255, 255, 255, 1.0)");
+      grad.addColorStop(0.28, "rgba(255, 255, 255, 0.62)");
+      grad.addColorStop(0.62, "rgba(255, 255, 255, 0.16)");
+      grad.addColorStop(1.0, "rgba(255, 255, 255, 0.0)");
+      ctx.fillStyle = grad;
+      ctx.fillRect(0, 0, size, size);
+
+      const tex = new THREE.CanvasTexture(canvas);
+      tex.needsUpdate = true;
+      return tex;
+    }
+  }
+
+  const size = 16;
+  const data = new Uint8Array(size * size * 4);
+  const center = (size - 1) * 0.5;
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const dx = (x - center) / center;
+      const dy = (y - center) / center;
+      const dist = Math.hypot(dx, dy);
+      const falloff = Math.pow(Math.max(0, 1.0 - dist), 2.2);
+      const alpha = Math.round(clamp01(falloff) * 255);
+      const idx = (y * size + x) * 4;
+      data[idx] = 255;
+      data[idx + 1] = 255;
+      data[idx + 2] = 255;
+      data[idx + 3] = alpha;
+    }
+  }
+  const tex = new THREE.DataTexture(data, size, size, THREE.RGBAFormat);
+  tex.magFilter = THREE.LinearFilter;
+  tex.minFilter = THREE.LinearFilter;
+  tex.needsUpdate = true;
+  return tex;
+}
+
+/** Wrap-around 2D canvas drawing helper so 256x256 procedural prop paint tiles stay seamless. */
+function drawTiledCanvas(
+  size: number,
+  x: number,
+  y: number,
+  margin: number,
+  drawFn: (dx: number, dy: number) => void,
+): void {
+  const oxList: number[] = [0];
+  if (x < margin) {
+    oxList.push(size);
+  } else if (x > size - margin) {
+    oxList.push(-size);
+  }
+  const oyList: number[] = [0];
+  if (y < margin) {
+    oyList.push(size);
+  } else if (y > size - margin) {
+    oyList.push(-size);
+  }
+  for (const ox of oxList) {
+    for (const oy of oyList) {
+      drawFn(x + ox, y + oy);
+    }
+  }
+}
+
+/**
+ * Create 3 shared hand-painted storybook 256x256 CanvasTextures (32x32 DataTexture headless fallback)
+ * for foliage canopies, bark trunks, and chiseled boulders. Owned & disposed once by EnvironmentProps.
+ */
+function createHandPaintedPropTextures(): {
+  foliagePaintTexture: THREE.Texture;
+  barkPaintTexture: THREE.Texture;
+  rockPaintTexture: THREE.Texture;
+} {
+  const configure = (tex: THREE.Texture): THREE.Texture => {
+    tex.wrapS = THREE.RepeatWrapping;
+    tex.wrapT = THREE.RepeatWrapping;
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.anisotropy = 4;
+    tex.needsUpdate = true;
+    return tex;
+  };
+
+  if (typeof document !== "undefined") {
+    const size = 256;
+    const foliageCanvas = document.createElement("canvas");
+    foliageCanvas.width = size;
+    foliageCanvas.height = size;
+    const barkCanvas = document.createElement("canvas");
+    barkCanvas.width = size;
+    barkCanvas.height = size;
+    const rockCanvas = document.createElement("canvas");
+    rockCanvas.width = size;
+    rockCanvas.height = size;
+
+    const fCtx = foliageCanvas.getContext("2d");
+    const bCtx = barkCanvas.getContext("2d");
+    const rCtx = rockCanvas.getContext("2d");
+
+    if (fCtx && bCtx && rCtx) {
+      // 1. Hand-painted gouache leafy dapple clusters (chartreuse-gold -> mid-green -> cool teal-emerald)
+      const fRng = createSeededRng(0x5f31a7);
+      fCtx.fillStyle = "#95c879";
+      fCtx.fillRect(0, 0, size, size);
+
+      const washPalette: readonly string[] = [
+        "#48766a",
+        "#5c9178",
+        "#9fd080",
+        "#b6dd8e",
+        "#d8ef97",
+      ];
+      for (let i = 0; i < 42; i++) {
+        const x = fRng() * size;
+        const y = fRng() * size;
+        const rx = 20 + fRng() * 34;
+        const ry = 14 + fRng() * 24;
+        const angle = fRng() * Math.PI;
+        const color = washPalette[Math.floor(fRng() * washPalette.length)] ?? "#9fd080";
+        const alpha = 0.28 + fRng() * 0.24;
+        drawTiledCanvas(size, x, y, Math.max(rx, ry) + 4, (dx, dy) => {
+          fCtx.save();
+          fCtx.translate(dx, dy);
+          fCtx.rotate(angle);
+          fCtx.globalAlpha = alpha;
+          fCtx.fillStyle = color;
+          fCtx.beginPath();
+          fCtx.ellipse(0, 0, rx, ry, 0, 0, Math.PI * 2);
+          fCtx.fill();
+          fCtx.restore();
+        });
+      }
+
+      const leafPalette: readonly string[] = [
+        "#48766a",
+        "#5d947b",
+        "#86be78",
+        "#9fd080",
+        "#c5e68e",
+        "#e8f5a2",
+      ];
+      for (let i = 0; i < 210; i++) {
+        const x = fRng() * size;
+        const y = fRng() * size;
+        const len = 8 + fRng() * 16;
+        const wid = 4 + fRng() * 8;
+        const angle = fRng() * Math.PI * 2;
+        const color = leafPalette[Math.floor(fRng() * leafPalette.length)] ?? "#9fd080";
+        const alpha = 0.45 + fRng() * 0.42;
+        drawTiledCanvas(size, x, y, len + 4, (dx, dy) => {
+          fCtx.save();
+          fCtx.translate(dx, dy);
+          fCtx.rotate(angle);
+          fCtx.globalAlpha = alpha;
+          fCtx.fillStyle = color;
+          fCtx.beginPath();
+          fCtx.ellipse(0, 0, len * 0.5, wid * 0.5, 0, 0, Math.PI * 2);
+          fCtx.fill();
+          fCtx.restore();
+        });
+      }
+      fCtx.globalAlpha = 1.0;
+
+      // 2. Warm hand-painted vertical bark grain ridges, burnt-sienna strokes & dark wood crevices
+      const bRng = createSeededRng(0x8c24d1);
+      bCtx.fillStyle = "#9b6440";
+      bCtx.fillRect(0, 0, size, size);
+
+      const barkStripes: readonly string[] = [
+        "#7d482a",
+        "#9f6540",
+        "#b87c4f",
+        "#c98e5e",
+        "#8a5030",
+      ];
+      const ridgeCount = 16;
+      for (let r = 0; r < ridgeCount; r++) {
+        const baseX = (r / ridgeCount) * size;
+        const col = barkStripes[r % barkStripes.length] ?? "#9f6540";
+        const ridgeW = size / ridgeCount + 4;
+        bCtx.fillStyle = col;
+        bCtx.globalAlpha = 0.68;
+        bCtx.beginPath();
+        for (let step = 0; step <= 32; step++) {
+          const v = step / 32;
+          const y = v * size;
+          const wobble =
+            Math.sin(v * Math.PI * 2 * 2 + r * 1.4) * 4.5 +
+            Math.cos(v * Math.PI * 2 * 4 - r * 2.1) * 2.0;
+          const x = baseX + wobble;
+          if (step === 0) {
+            bCtx.moveTo(x, y);
+          } else {
+            bCtx.lineTo(x, y);
+          }
+        }
+        for (let step = 32; step >= 0; step--) {
+          const v = step / 32;
+          const y = v * size;
+          const wobble =
+            Math.sin(v * Math.PI * 2 * 2 + r * 1.4) * 4.5 +
+            Math.cos(v * Math.PI * 2 * 4 - r * 2.1) * 2.0;
+          bCtx.lineTo(baseX + wobble + ridgeW, y);
+        }
+        bCtx.closePath();
+        bCtx.fill();
+      }
+
+      // Vertical sunlit grain highlights & deep painted bark crevices
+      for (let r = 0; r < ridgeCount; r++) {
+        const baseX = (r / ridgeCount) * size;
+        for (const ox of [-size, 0, size]) {
+          // Sunlit warm ridge edge
+          bCtx.save();
+          bCtx.strokeStyle = "#deb181";
+          bCtx.lineWidth = 2.4;
+          bCtx.globalAlpha = 0.56;
+          bCtx.beginPath();
+          for (let step = 0; step <= 32; step++) {
+            const v = step / 32;
+            const y = v * size;
+            const x =
+              baseX +
+              ox +
+              3.2 +
+              Math.sin(v * Math.PI * 2 * 2 + r * 1.4) * 4.5 +
+              Math.cos(v * Math.PI * 2 * 4 - r * 2.1) * 2.0;
+            if (step === 0) bCtx.moveTo(x, y);
+            else bCtx.lineTo(x, y);
+          }
+          bCtx.stroke();
+
+          // Dark recessed wood crevice
+          bCtx.strokeStyle = "#3f2113";
+          bCtx.lineWidth = r % 3 === 0 ? 3.2 : 2.1;
+          bCtx.globalAlpha = 0.85;
+          bCtx.beginPath();
+          for (let step = 0; step <= 32; step++) {
+            const v = step / 32;
+            const y = v * size;
+            const x =
+              baseX +
+              ox +
+              Math.sin(v * Math.PI * 2 * 2 + r * 1.4) * 4.5 +
+              Math.cos(v * Math.PI * 2 * 4 - r * 2.1) * 2.0;
+            if (step === 0) bCtx.moveTo(x, y);
+            else bCtx.lineTo(x, y);
+          }
+          bCtx.stroke();
+          bCtx.restore();
+        }
+      }
+
+      // Subtle painted bark chips & wood knot accents
+      for (let i = 0; i < 45; i++) {
+        const x = bRng() * size;
+        const y = bRng() * size;
+        const rx = 2.5 + bRng() * 4.5;
+        const ry = 10 + bRng() * 20;
+        const tone = i % 3 === 0 ? "#d9a976" : i % 2 === 0 ? "#69381f" : "#ae6f44";
+        drawTiledCanvas(size, x, y, ry + 4, (dx, dy) => {
+          bCtx.save();
+          bCtx.globalAlpha = 0.34;
+          bCtx.fillStyle = tone;
+          bCtx.beginPath();
+          bCtx.ellipse(dx, dy, rx, ry, 0, 0, Math.PI * 2);
+          bCtx.fill();
+          bCtx.restore();
+        });
+      }
+      bCtx.globalAlpha = 1.0;
+
+      // 3. Hand-painted chiseled stone facets, warm ochre/cream edge highlights & hairline fissures
+      const rRng = createSeededRng(0x3a91e5);
+      rCtx.fillStyle = "#b4aba0";
+      rCtx.fillRect(0, 0, size, size);
+
+      const facetColors: readonly string[] = [
+        "#d8c39f",
+        "#c9b18d",
+        "#b9b0a6",
+        "#9d968e",
+        "#828a96",
+        "#e6d5b4",
+      ];
+      for (let i = 0; i < 95; i++) {
+        const x = rRng() * size;
+        const y = rRng() * size;
+        const rad = 14 + rRng() * 28;
+        const sides = 5 + Math.floor(rRng() * 3);
+        const rot = rRng() * Math.PI * 2;
+        const fill = facetColors[Math.floor(rRng() * facetColors.length)] ?? "#b9b0a6";
+        const alpha = 0.34 + rRng() * 0.3;
+
+        drawTiledCanvas(size, x, y, rad + 6, (dx, dy) => {
+          rCtx.save();
+          rCtx.translate(dx, dy);
+          rCtx.rotate(rot);
+          rCtx.globalAlpha = alpha;
+          rCtx.fillStyle = fill;
+          rCtx.beginPath();
+          for (let s = 0; s < sides; s++) {
+            const a = (s / sides) * Math.PI * 2;
+            const rScale = 0.72 + ((s * 37 + i) % 5) * 0.08;
+            const vx = Math.cos(a) * rad * rScale;
+            const vy = Math.sin(a) * rad * rScale;
+            if (s === 0) rCtx.moveTo(vx, vy);
+            else rCtx.lineTo(vx, vy);
+          }
+          rCtx.closePath();
+          rCtx.fill();
+
+          // Warm cream chiseled edge glint on sunlit stone facet
+          if (i % 2 === 0) {
+            rCtx.globalAlpha = 0.5;
+            rCtx.strokeStyle = "#f2e5cb";
+            rCtx.lineWidth = 2.0;
+            rCtx.stroke();
+          }
+          rCtx.restore();
+        });
+      }
+
+      // Crisp dark hairline stone fissure cracks + subtle cream highlight lip
+      for (let i = 0; i < 28; i++) {
+        const x = rRng() * size;
+        const y = rRng() * size;
+        const angle = rRng() * Math.PI * 2;
+        const len1 = 16 + rRng() * 26;
+        const len2 = 12 + rRng() * 22;
+        const bend = (rRng() - 0.5) * 0.9;
+        const margin = len1 + len2 + 6;
+
+        drawTiledCanvas(size, x, y, margin, (dx, dy) => {
+          const x1 = dx + Math.cos(angle) * len1;
+          const y1 = dy + Math.sin(angle) * len1;
+          const x2 = x1 + Math.cos(angle + bend) * len2;
+          const y2 = y1 + Math.sin(angle + bend) * len2;
+
+          rCtx.save();
+          rCtx.lineCap = "round";
+          rCtx.strokeStyle = "#f0e1c4";
+          rCtx.lineWidth = 2.1;
+          rCtx.globalAlpha = 0.55;
+          rCtx.beginPath();
+          rCtx.moveTo(dx + 1.8, dy + 1.8);
+          rCtx.lineTo(x1 + 1.8, y1 + 1.8);
+          rCtx.lineTo(x2 + 1.8, y2 + 1.8);
+          rCtx.stroke();
+
+          rCtx.strokeStyle = "#463d38";
+          rCtx.lineWidth = 1.9;
+          rCtx.globalAlpha = 0.82;
+          rCtx.beginPath();
+          rCtx.moveTo(dx, dy);
+          rCtx.lineTo(x1, y1);
+          rCtx.lineTo(x2, y2);
+          rCtx.stroke();
+          rCtx.restore();
+        });
+      }
+      rCtx.globalAlpha = 1.0;
+
+      return {
+        foliagePaintTexture: configure(new THREE.CanvasTexture(foliageCanvas)),
+        barkPaintTexture: configure(new THREE.CanvasTexture(barkCanvas)),
+        rockPaintTexture: configure(new THREE.CanvasTexture(rockCanvas)),
+      };
+    }
+  }
+
+  // Compact deterministic 32x32 DataTexture fallback for headless Node / Vitest
+  const size = 32;
+  const foliageData = new Uint8Array(size * size * 4);
+  const barkData = new Uint8Array(size * size * 4);
+  const rockData = new Uint8Array(size * size * 4);
+  const tau = Math.PI * 2;
+
+  for (let py = 0; py < size; py++) {
+    const v = py / size;
+    for (let px = 0; px < size; px++) {
+      const u = px / size;
+      const idx = (py * size + px) * 4;
+
+      const leafWave =
+        0.5 +
+        0.3 * Math.sin(u * tau * 3 + Math.cos(v * tau * 3)) +
+        0.2 * Math.cos(v * tau * 5 - u * tau * 2);
+      foliageData[idx] = Math.round(clamp01(0.38 + leafWave * 0.52) * 255);
+      foliageData[idx + 1] = Math.round(clamp01(0.56 + leafWave * 0.4) * 255);
+      foliageData[idx + 2] = Math.round(clamp01(0.42 + leafWave * 0.22) * 255);
+      foliageData[idx + 3] = 255;
+
+      const barkGroove = 0.5 + 0.5 * Math.sin(u * tau * 6 + Math.sin(v * tau * 2) * 0.8);
+      barkData[idx] = Math.round(clamp01(0.42 + barkGroove * 0.4) * 255);
+      barkData[idx + 1] = Math.round(clamp01(0.25 + barkGroove * 0.28) * 255);
+      barkData[idx + 2] = Math.round(clamp01(0.15 + barkGroove * 0.18) * 255);
+      barkData[idx + 3] = 255;
+
+      const stoneFacet =
+        0.5 + 0.35 * Math.sin(u * tau * 4 + v * tau * 3) * Math.cos(v * tau * 4 - u * tau * 2);
+      rockData[idx] = Math.round(clamp01(0.58 + stoneFacet * 0.32) * 255);
+      rockData[idx + 1] = Math.round(clamp01(0.55 + stoneFacet * 0.3) * 255);
+      rockData[idx + 2] = Math.round(clamp01(0.5 + stoneFacet * 0.28) * 255);
+      rockData[idx + 3] = 255;
+    }
+  }
+
+  return {
+    foliagePaintTexture: configure(
+      new THREE.DataTexture(foliageData, size, size, THREE.RGBAFormat),
+    ),
+    barkPaintTexture: configure(
+      new THREE.DataTexture(barkData, size, size, THREE.RGBAFormat),
+    ),
+    rockPaintTexture: configure(
+      new THREE.DataTexture(rockData, size, size, THREE.RGBAFormat),
+    ),
+  };
 }
 
 function disposeObjectTree(root: THREE.Object3D): void {
@@ -61,6 +687,9 @@ function disposeObjectTree(root: THREE.Object3D): void {
     }
     if (node instanceof THREE.InstancedMesh || node instanceof THREE.Mesh) {
       geos.add(node.geometry);
+      addMat(node.material);
+    } else if (node instanceof THREE.Sprite) {
+      // Dispose per-sprite SpriteMaterial without disposing the class-owned shared glowTexture
       addMat(node.material);
     }
     for (const child of node.children) {
@@ -122,15 +751,23 @@ function distSq3(a: Vec3, b: Vec3): number {
 }
 
 /**
- * Lush instanced 3D scenery (multi-tier pine/oak trees, flowering bushes, wildflower
- * clusters, sculpted mossy boulders, ancient stone ruins, glowing lantern posts) AND
- * animated 3D visuals for interactive environmental hazards with non-floating carve pruning.
+ * Lush instanced 3D scenery (wind-swayed multi-tier pine/oak trees, sculpted grass tufts,
+ * flowering shrubs, organically weathered boulders, ancient stone ruins, additive-glow lanterns)
+ * AND animated 3D visuals for interactive environmental hazards with non-floating carve pruning.
  */
 export class EnvironmentProps {
   public readonly group: THREE.Group;
 
   private readonly sceneryGroup: THREE.Group;
   private readonly hazardGroup: THREE.Group;
+  private readonly glowTexture: THREE.Texture;
+  private readonly foliagePaintTexture: THREE.Texture;
+  private readonly barkPaintTexture: THREE.Texture;
+  private readonly rockPaintTexture: THREE.Texture;
+  private readonly windTimeUniform: { value: number } = { value: 0 };
+  private readonly windVecUniform: { value: THREE.Vector2 } = {
+    value: new THREE.Vector2(1.0, 0.35),
+  };
 
   private readonly anchors: TrackedPropAnchor[] = [];
   private readonly hazardVisuals = new Map<string, HazardVisual>();
@@ -156,7 +793,23 @@ export class EnvironmentProps {
     this.hazardGroup.name = "interactive_hazards";
     this.group.add(this.hazardGroup);
 
+    this.glowTexture = createSharedGlowTexture();
+    const paintTextures = createHandPaintedPropTextures();
+    this.foliagePaintTexture = paintTextures.foliagePaintTexture;
+    this.barkPaintTexture = paintTextures.barkPaintTexture;
+    this.rockPaintTexture = paintTextures.rockPaintTexture;
+
     this.rebuild(world, waterLevel, avoidPoints);
+  }
+
+  /** Advance lightweight GPU vertex-shader wind sway for instanced foliage & meadows. */
+  public updateWind(wind: Vec3, elapsedSec: number): void {
+    if (Number.isFinite(elapsedSec)) {
+      this.windTimeUniform.value = elapsedSec;
+    }
+    const wx = Number.isFinite(wind.x) ? wind.x : 0;
+    const wz = Number.isFinite(wind.z) ? wind.z : 0;
+    this.windVecUniform.value.set(wx, wz);
   }
 
   /** Rebuild all deterministic instanced scenery for a new world, round, or theme. */
@@ -374,7 +1027,7 @@ export class EnvironmentProps {
 
   /**
    * Synchronize and animate live 3D hazard visuals (pulsing Blast Barrels,
-   * bubbling Thermal Steam Geysers, and glowing Bramble Thorn Patches).
+   * Spark Mines, bubbling Thermal Steam Geysers, and glowing Bramble Thorn Patches).
    * Detonated/inactive hazards are removed and GPU-disposed cleanly.
    */
   public syncHazards(
@@ -479,7 +1132,7 @@ export class EnvironmentProps {
     return result;
   }
 
-  /** Dispose all instanced scenery meshes, landmarks, and active hazard meshes cleanly. */
+  /** Dispose all instanced scenery meshes, landmarks, active hazards, and shared textures cleanly. */
   public dispose(): void {
     this.clearScenery();
     for (const visual of this.hazardVisuals.values()) {
@@ -487,6 +1140,10 @@ export class EnvironmentProps {
       disposeObjectTree(visual.group);
     }
     this.hazardVisuals.clear();
+    this.glowTexture.dispose();
+    this.foliagePaintTexture.dispose();
+    this.barkPaintTexture.dispose();
+    this.rockPaintTexture.dispose();
   }
 
   private clearScenery(): void {
@@ -499,6 +1156,103 @@ export class EnvironmentProps {
     this.landmarkCount = 0;
   }
 
+  private applyWindSway(
+    material: THREE.MeshStandardMaterial,
+    opts: WindSwayOptions,
+  ): void {
+    const minYStr = opts.minY.toFixed(3);
+    const spanStr = Math.max(0.05, opts.heightSpan).toFixed(3);
+    const ampStr = opts.amp.toFixed(4);
+    const freqStr = opts.freq.toFixed(3);
+    const baseStr = opts.baseSway.toFixed(3);
+
+    const resolvedCacheKey = `${opts.cacheKey}_${minYStr}_${spanStr}_${ampStr}_${freqStr}_${baseStr}`;
+    material.customProgramCacheKey = (): string => resolvedCacheKey;
+    material.onBeforeCompile = (shader): void => {
+      shader.uniforms.uWindTime = this.windTimeUniform;
+      shader.uniforms.uWindVec = this.windVecUniform;
+
+      shader.vertexShader = shader.vertexShader
+        .replace(
+          "#include <common>",
+          `#include <common>
+uniform float uWindTime;
+uniform vec2 uWindVec;`,
+        )
+        .replace(
+          "#include <begin_vertex>",
+          `#include <begin_vertex>
+#ifdef USE_INSTANCING
+  vec3 windAnchor = instanceMatrix[3].xyz;
+#else
+  vec3 windAnchor = modelMatrix[3].xyz;
+#endif
+float windSpeed = length( uWindVec );
+vec2 windDir = windSpeed > 0.001 ? ( uWindVec / windSpeed ) : vec2( 0.86, 0.51 );
+float windMag = clamp( 0.45 + windSpeed * 0.14, 0.35, 1.65 );
+float windPhase = uWindTime * ${freqStr} + windAnchor.x * 0.27 + windAnchor.z * 0.23;
+float windWave = sin( windPhase ) + 0.35 * sin( windPhase * 2.13 + windAnchor.x * 0.11 );
+float swayH = clamp( ( position.y - (${minYStr}) ) / ${spanStr}, 0.0, 1.0 );
+float swayWeight = mix( ${baseStr}, 1.0, swayH * swayH );
+vec2 swayXZ = ( windDir * ( 0.32 + windWave * 0.68 ) + vec2( -windDir.y, windDir.x ) * cos( windPhase * 0.85 ) * 0.24 ) * ( ${ampStr} * windMag * swayWeight );
+#ifdef USE_INSTANCING
+  float windRLen = length( instanceMatrix[0].xyz );
+  float windFLen = length( instanceMatrix[2].xyz );
+  if ( windRLen > 0.0001 && windFLen > 0.0001 ) {
+    vec3 worldSway = vec3( swayXZ.x, 0.0, swayXZ.y );
+    transformed.x += dot( worldSway, instanceMatrix[0].xyz / windRLen );
+    transformed.z += dot( worldSway, instanceMatrix[2].xyz / windFLen );
+  }
+#else
+  transformed.x += swayXZ.x;
+  transformed.z += swayXZ.y;
+#endif`,
+        );
+    };
+  }
+
+  private createGlowHaloSprite(
+    colorHex: number,
+    scale: number,
+    opacity: number,
+  ): THREE.Sprite {
+    const mat = new THREE.SpriteMaterial({
+      map: this.glowTexture,
+      color: colorHex,
+      transparent: true,
+      opacity,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    });
+    const sprite = new THREE.Sprite(mat);
+    sprite.scale.set(scale, scale, 1);
+    return sprite;
+  }
+
+  private createGroundLightPool(
+    colorHex: number,
+    radius: number,
+    opacity: number,
+  ): THREE.Mesh {
+    const geo = new THREE.CircleGeometry(radius, 24);
+    const mat = new THREE.MeshBasicMaterial({
+      map: this.glowTexture,
+      color: colorHex,
+      transparent: true,
+      opacity,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      polygonOffset: true,
+      polygonOffsetFactor: -2,
+    });
+    const pool = new THREE.Mesh(geo, mat);
+    pool.rotation.x = -Math.PI * 0.5;
+    pool.position.y = 0.06;
+    pool.castShadow = false;
+    pool.receiveShadow = false;
+    return pool;
+  }
+
   private buildInstancedPines(
     spots: ReadonlyArray<{ pos: Vec3; scale: number; rotY: number; tint: number }>,
   ): void {
@@ -506,8 +1260,11 @@ export class EnvironmentProps {
     if (count === 0) return;
 
     const trunkGeo = new THREE.CylinderGeometry(0.11, 0.24, 1.45, 7);
+    bakeVerticalVertexGradient(trunkGeo, [0.66, 0.64, 0.62], [1.0, 1.0, 0.98]);
     const trunkMat = new THREE.MeshStandardMaterial({
-      color: 0x6f4b32,
+      color: 0xb68b67,
+      map: this.barkPaintTexture,
+      vertexColors: true,
       roughness: 0.92,
       metalness: 0.02,
     });
@@ -518,17 +1275,31 @@ export class EnvironmentProps {
     const tier1Geo = new THREE.ConeGeometry(1.18, 1.65, 8);
     const tier2Geo = new THREE.ConeGeometry(0.92, 1.45, 8);
     const tier3Geo = new THREE.ConeGeometry(0.62, 1.25, 7);
+    bakeVerticalVertexGradient(tier1Geo, [0.56, 0.72, 0.78], [1.06, 1.04, 0.88]);
+    bakeVerticalVertexGradient(tier2Geo, [0.56, 0.72, 0.78], [1.06, 1.04, 0.88]);
+    bakeVerticalVertexGradient(tier3Geo, [0.56, 0.72, 0.78], [1.06, 1.04, 0.88]);
 
+    // Share ONE wind-swayed painterly foliage material across all 3 pine canopy tiers
     const foliageMat = new THREE.MeshStandardMaterial({
       color: 0xffffff,
+      map: this.foliagePaintTexture,
+      vertexColors: true,
       roughness: 0.84,
       metalness: 0.02,
       flatShading: true,
     });
+    this.applyWindSway(foliageMat, {
+      cacheKey: "critter_foliage_wind_pine_v1",
+      minY: -0.85,
+      heightSpan: 1.7,
+      amp: 0.085,
+      freq: 1.75,
+      baseSway: 0.34,
+    });
 
     const tier1 = new THREE.InstancedMesh(tier1Geo, foliageMat, count);
-    const tier2 = new THREE.InstancedMesh(tier2Geo, foliageMat.clone(), count);
-    const tier3 = new THREE.InstancedMesh(tier3Geo, foliageMat.clone(), count);
+    const tier2 = new THREE.InstancedMesh(tier2Geo, foliageMat, count);
+    const tier3 = new THREE.InstancedMesh(tier3Geo, foliageMat, count);
     for (const m of [tier1, tier2, tier3]) {
       m.castShadow = true;
       m.receiveShadow = true;
@@ -564,11 +1335,11 @@ export class EnvironmentProps {
       tier3.setMatrixAt(i, dummy.matrix);
 
       const hShift = 0.34 + sp.tint * 0.06;
-      color.setHSL(hShift, 0.56, 0.24 + sp.tint * 0.07);
+      color.setHSL(hShift, 0.56, 0.33 + sp.tint * 0.07);
       tier1.setColorAt(i, color);
-      color.setHSL(hShift - 0.01, 0.58, 0.3 + sp.tint * 0.07);
+      color.setHSL(hShift - 0.01, 0.58, 0.39 + sp.tint * 0.07);
       tier2.setColorAt(i, color);
-      color.setHSL(hShift - 0.02, 0.62, 0.36 + sp.tint * 0.07);
+      color.setHSL(hShift - 0.02, 0.62, 0.46 + sp.tint * 0.07);
       tier3.setColorAt(i, color);
 
       this.anchors.push({
@@ -600,8 +1371,11 @@ export class EnvironmentProps {
     if (count === 0) return;
 
     const trunkGeo = new THREE.CylinderGeometry(0.15, 0.28, 1.65, 8);
+    bakeVerticalVertexGradient(trunkGeo, [0.66, 0.64, 0.62], [1.0, 1.0, 0.98]);
     const trunkMat = new THREE.MeshStandardMaterial({
-      color: 0x7b563a,
+      color: 0xc29570,
+      map: this.barkPaintTexture,
+      vertexColors: true,
       roughness: 0.9,
       metalness: 0.02,
     });
@@ -611,18 +1385,30 @@ export class EnvironmentProps {
 
     const crownMainGeo = new THREE.IcosahedronGeometry(1.05, 1);
     const crownSideGeo = new THREE.IcosahedronGeometry(0.76, 1);
+    bakeVerticalVertexGradient(crownMainGeo, [0.56, 0.72, 0.78], [1.06, 1.04, 0.88]);
+    bakeVerticalVertexGradient(crownSideGeo, [0.56, 0.72, 0.78], [1.06, 1.04, 0.88]);
 
-    const makeLeafMat = (): THREE.MeshStandardMaterial =>
-      new THREE.MeshStandardMaterial({
-        color: 0xffffff,
-        roughness: 0.82,
-        metalness: 0.02,
-        flatShading: true,
-      });
+    // Share ONE lush smooth painterly wind-swayed leaf material across all 3 oak crowns
+    const leafMat = new THREE.MeshStandardMaterial({
+      color: 0xffffff,
+      map: this.foliagePaintTexture,
+      vertexColors: true,
+      roughness: 0.82,
+      metalness: 0.02,
+      flatShading: false,
+    });
+    this.applyWindSway(leafMat, {
+      cacheKey: "critter_foliage_wind_oak_v1",
+      minY: -1.05,
+      heightSpan: 2.1,
+      amp: 0.085,
+      freq: 1.75,
+      baseSway: 0.34,
+    });
 
-    const crownMain = new THREE.InstancedMesh(crownMainGeo, makeLeafMat(), count);
-    const crownSideA = new THREE.InstancedMesh(crownSideGeo, makeLeafMat(), count);
-    const crownSideB = new THREE.InstancedMesh(crownSideGeo.clone(), makeLeafMat(), count);
+    const crownMain = new THREE.InstancedMesh(crownMainGeo, leafMat, count);
+    const crownSideA = new THREE.InstancedMesh(crownSideGeo, leafMat, count);
+    const crownSideB = new THREE.InstancedMesh(crownSideGeo, leafMat, count);
     for (const m of [crownMain, crownSideA, crownSideB]) {
       m.castShadow = true;
       m.receiveShadow = true;
@@ -669,11 +1455,11 @@ export class EnvironmentProps {
       crownSideB.setMatrixAt(i, dummy.matrix);
 
       const hue = 0.25 + sp.tint * 0.08;
-      color.setHSL(hue, 0.58, 0.36 + sp.tint * 0.08);
+      color.setHSL(hue, 0.56, 0.45 + sp.tint * 0.08);
       crownMain.setColorAt(i, color);
-      color.setHSL(hue + 0.02, 0.55, 0.31 + sp.tint * 0.07);
+      color.setHSL(hue + 0.02, 0.54, 0.4 + sp.tint * 0.07);
       crownSideA.setColorAt(i, color);
-      color.setHSL(hue - 0.02, 0.64, 0.42 + sp.tint * 0.08);
+      color.setHSL(hue - 0.02, 0.62, 0.51 + sp.tint * 0.08);
       crownSideB.setColorAt(i, color);
 
       this.anchors.push({
@@ -715,8 +1501,12 @@ export class EnvironmentProps {
     if (count === 0) return;
 
     const rockGeo = new THREE.DodecahedronGeometry(0.56, 1);
+    perturbBoulderGeometry(rockGeo);
+    bakeVerticalVertexGradient(rockGeo, [0.64, 0.68, 0.74], [1.0, 1.0, 0.96]);
     const rockMat = new THREE.MeshStandardMaterial({
       color: 0xffffff,
+      map: this.rockPaintTexture,
+      vertexColors: true,
       roughness: 0.88,
       metalness: 0.05,
       flatShading: true,
@@ -726,11 +1516,14 @@ export class EnvironmentProps {
     rocks.receiveShadow = true;
 
     const mossGeo = new THREE.SphereGeometry(0.42, 8, 6);
+    bakeVerticalVertexGradient(mossGeo, [0.56, 0.72, 0.78], [1.06, 1.04, 0.88]);
     const mossMat = new THREE.MeshStandardMaterial({
-      color: 0x4b8f38,
+      color: 0x62ab4c,
+      map: this.foliagePaintTexture,
+      vertexColors: true,
       roughness: 0.9,
       metalness: 0.02,
-      flatShading: true,
+      flatShading: false,
     });
     const mossCaps = new THREE.InstancedMesh(mossGeo, mossMat, count);
     mossCaps.receiveShadow = true;
@@ -748,11 +1541,11 @@ export class EnvironmentProps {
       dummy.updateMatrix();
       rocks.setMatrixAt(i, dummy.matrix);
 
-      // Warm sandstone/slate palette variation
+      // Warm sandstone/slate palette variation lifted slightly for rockPaintTexture
       if (sp.tint < 0.45) {
-        color.setHSL(0.07, 0.34, 0.44 + sp.tint * 0.16);
+        color.setHSL(0.07, 0.34, 0.52 + sp.tint * 0.16);
       } else {
-        color.setHSL(0.58, 0.1, 0.42 + sp.tint * 0.14);
+        color.setHSL(0.58, 0.12, 0.5 + sp.tint * 0.14);
       }
       rocks.setColorAt(i, color);
 
@@ -797,23 +1590,46 @@ export class EnvironmentProps {
     if (count === 0) return;
 
     const shrubGeo = new THREE.IcosahedronGeometry(0.42, 1);
+    bakeVerticalVertexGradient(shrubGeo, [0.56, 0.72, 0.78], [1.06, 1.04, 0.88]);
     const shrubMat = new THREE.MeshStandardMaterial({
       color: 0xffffff,
+      map: this.foliagePaintTexture,
+      vertexColors: true,
       roughness: 0.86,
       metalness: 0.02,
-      flatShading: true,
+      flatShading: false,
+    });
+    this.applyWindSway(shrubMat, {
+      cacheKey: "critter_foliage_wind_shrub_v1",
+      minY: -0.42,
+      heightSpan: 0.84,
+      amp: 0.045,
+      freq: 2.25,
+      baseSway: 0.0,
     });
     const shrubs = new THREE.InstancedMesh(shrubGeo, shrubMat, count);
-    shrubs.castShadow = true;
+    shrubs.castShadow = false;
     shrubs.receiveShadow = true;
 
-    const tuftGeo = new THREE.ConeGeometry(0.085, 0.46, 5);
+    const tuftGeo = createSculptedGrassTuftGeometry();
     const tuftMat = new THREE.MeshStandardMaterial({
-      color: 0x4ca63c,
-      roughness: 0.85,
+      color: 0x62b844,
+      vertexColors: true,
+      roughness: 0.86,
       metalness: 0.0,
+      side: THREE.DoubleSide,
+    });
+    this.applyWindSway(tuftMat, {
+      cacheKey: "critter_foliage_wind_flora_v1",
+      minY: 0.0,
+      heightSpan: 0.48,
+      amp: 0.095,
+      freq: 2.65,
+      baseSway: 0.0,
     });
     const tufts = new THREE.InstancedMesh(tuftGeo, tuftMat, count);
+    tufts.castShadow = false;
+    tufts.receiveShadow = true;
 
     const flowerGeo = new THREE.OctahedronGeometry(0.11, 0);
     const flowerMat = new THREE.MeshStandardMaterial({
@@ -824,6 +1640,8 @@ export class EnvironmentProps {
       metalness: 0.02,
     });
     const flowers = new THREE.InstancedMesh(flowerGeo, flowerMat, count);
+    flowers.castShadow = false;
+    flowers.receiveShadow = true;
 
     const flowerPalette = [0xffd84a, 0xff7062, 0x6ce5ff, 0xd896ff];
     const dummy = new THREE.Object3D();
@@ -841,20 +1659,20 @@ export class EnvironmentProps {
         dummy.updateMatrix();
         shrubs.setMatrixAt(i, dummy.matrix);
 
-        color.setHSL(0.27 + (i % 7) * 0.014, 0.6, 0.34 + (i % 5) * 0.03);
+        color.setHSL(0.27 + (i % 7) * 0.014, 0.58, 0.43 + (i % 5) * 0.03);
         shrubs.setColorAt(i, color);
         tufts.setMatrixAt(i, ZERO_MATRIX);
       } else {
-        dummy.position.set(sp.pos.x, sp.pos.y + 0.2 * s, sp.pos.z);
-        dummy.rotation.set(0.16, sp.rotY, -0.12);
-        dummy.scale.set(1.25 * s, 1.0 * s, 1.25 * s);
+        dummy.position.set(sp.pos.x, sp.pos.y - 0.02 * s, sp.pos.z);
+        dummy.rotation.set(0, sp.rotY, 0);
+        dummy.scale.set(1.18 * s, 1.05 * s, 1.18 * s);
         dummy.updateMatrix();
         tufts.setMatrixAt(i, dummy.matrix);
         shrubs.setMatrixAt(i, ZERO_MATRIX);
       }
 
       if (sp.hasFlowers) {
-        const yOff = sp.kind === "shrub" ? 0.46 * s : 0.32 * s;
+        const yOff = sp.kind === "shrub" ? 0.46 * s : 0.34 * s;
         dummy.position.set(
           sp.pos.x + Math.cos(sp.rotY) * 0.14 * s,
           sp.pos.y + yOff,
@@ -909,9 +1727,10 @@ export class EnvironmentProps {
       let glbKind: PropLandmarkKind | undefined;
 
       if (sp.kind === "lantern") {
-        // Warm glowing island lantern post (shared wood/iron materials)
+        // Warm glowing island lantern post + additive amber-gold halo + luminous ground light pool
         const woodMat = new THREE.MeshStandardMaterial({
-          color: 0x6b472e,
+          color: 0xb48562,
+          map: this.barkPaintTexture,
           roughness: 0.86,
           metalness: 0.05,
         });
@@ -960,12 +1779,19 @@ export class EnvironmentProps {
         );
         crystal.position.set(0.48, 1.98, 0);
 
-        group.add(post, footing, arm, roof, crystal);
+        const lanternHalo = this.createGlowHaloSprite(0xffbe55, 1.48, 0.72);
+        lanternHalo.position.set(0.48, 1.98, 0);
+
+        const lanternPool = this.createGroundLightPool(0xffc857, 1.65, 0.38);
+        lanternPool.position.set(0.36, 0.06, 0);
+
+        group.add(post, footing, arm, roof, crystal, lanternHalo, lanternPool);
       } else if (sp.kind === "watchtower") {
         glbKind = "watchtower";
         // Sculpted procedural lookout tower fallback (replaced asynchronously by watchtower.glb)
         const timberMat = new THREE.MeshStandardMaterial({
-          color: 0x7c5335,
+          color: 0xb98a64,
+          map: this.barkPaintTexture,
           roughness: 0.88,
           metalness: 0.04,
           flatShading: true,
@@ -1003,13 +1829,15 @@ export class EnvironmentProps {
         glbKind = "gnarled_pine";
         // Sculpted gnarled cliff pine fallback (replaced asynchronously by gnarled_pine.glb)
         const barkMat = new THREE.MeshStandardMaterial({
-          color: 0x5c3e2a,
+          color: 0xa67c58,
+          map: this.barkPaintTexture,
           roughness: 0.92,
           metalness: 0.02,
           flatShading: true,
         });
         const needleMat = new THREE.MeshStandardMaterial({
-          color: 0x2f6d43,
+          color: 0x529264,
+          map: this.foliagePaintTexture,
           roughness: 0.84,
           metalness: 0.02,
           flatShading: true,
@@ -1041,7 +1869,8 @@ export class EnvironmentProps {
         glbKind = "ruin_arch";
         // Ancient carved stone ruin fallback (replaced asynchronously by ruin_arch.glb)
         const stoneMat = new THREE.MeshStandardMaterial({
-          color: 0xc2b7a3,
+          color: 0xd9cebc,
+          map: this.rockPaintTexture,
           roughness: 0.88,
           metalness: 0.04,
           flatShading: true,
@@ -1109,7 +1938,7 @@ export class EnvironmentProps {
       (hazard.position.x * 0.7 + hazard.position.z * 0.5) % (Math.PI * 2);
 
     if (hazard.type === "blast_barrel") {
-      // Bulging sculpted explosive barrel via LatheGeometry + forged hoops + glowing core
+      // Bulging sculpted explosive barrel via LatheGeometry + forged hoops + glowing core, halo & ground pool
       const profile = [
         new THREE.Vector2(0.01, 0.0),
         new THREE.Vector2(0.4, 0.0),
@@ -1163,6 +1992,9 @@ export class EnvironmentProps {
       const emberTop = new THREE.Mesh(new THREE.SphereGeometry(0.18, 10, 8), coreMat);
       emberTop.position.y = 1.24;
 
+      const glowHalo = this.createGlowHaloSprite(0xff8424, 1.35, 0.72);
+      glowHalo.position.y = 1.24;
+
       const warningRing = new THREE.Mesh(
         new THREE.TorusGeometry(0.74, 0.032, 8, 24),
         new THREE.MeshBasicMaterial({
@@ -1175,20 +2007,27 @@ export class EnvironmentProps {
       warningRing.rotation.x = Math.PI * 0.5;
       warningRing.position.y = 0.08;
 
-      group.add(body, lowHoop, highHoop, emberTop, warningRing);
+      const groundPool = this.createGroundLightPool(0xff8c28, 1.8, 0.42);
+
+      group.add(body, lowHoop, highHoop, emberTop, glowHalo, warningRing, groundPool);
       return {
         type: hazard.type,
         group,
         pulseMaterials,
         warningRing,
+        glowHalo,
+        glowBaseScale: 1.35,
+        groundPool,
+        groundPoolBaseOpacity: 0.42,
         phaseOffset,
       };
     }
 
     if (hazard.type === "steam_geyser") {
-      // Sculpted volcanic geothermal vent + glowing spring pool + rising steam puffs
+      // Sculpted volcanic geothermal vent + glowing spring pool + cyan halo, ground pool & rising steam puffs
       const rockMat = new THREE.MeshStandardMaterial({
-        color: 0x5c6670,
+        color: 0x76828e,
+        map: this.rockPaintTexture,
         roughness: 0.9,
         metalness: 0.08,
         flatShading: true,
@@ -1223,6 +2062,11 @@ export class EnvironmentProps {
       );
       pool.position.y = 0.32;
 
+      const glowHalo = this.createGlowHaloSprite(0x46f0ff, 1.85, 0.48);
+      glowHalo.position.y = 0.44;
+
+      const groundPool = this.createGroundLightPool(0x32f0ff, 2.1, 0.38);
+
       const steamPuffs: THREE.Mesh[] = [];
       for (let i = 0; i < 4; i++) {
         const puff = new THREE.Mesh(
@@ -1239,18 +2083,22 @@ export class EnvironmentProps {
         steamPuffs.push(puff);
       }
 
-      group.add(mound, rim, pool);
+      group.add(mound, rim, pool, glowHalo, groundPool);
       return {
         type: hazard.type,
         group,
         pulseMaterials,
         steamPuffs,
+        glowHalo,
+        glowBaseScale: 1.85,
+        groundPool,
+        groundPoolBaseOpacity: 0.38,
         phaseOffset,
       };
     }
 
     if (hazard.type === "spark_mine") {
-      // Sculpted proximity Spark Mine: dark forged metallic dome + pulsing crimson LED beacon + glowing sensor ring
+      // Sculpted proximity Spark Mine: dark metallic dome + pulsing crimson LED beacon + crimson halo + glowing sensor ring + fiery ground pool
       const hullMat = new THREE.MeshStandardMaterial({
         color: 0x262d38,
         roughness: 0.36,
@@ -1302,6 +2150,9 @@ export class EnvironmentProps {
       beacon.name = "spark_mine_beacon";
       beacon.position.y = 0.51;
 
+      const glowHalo = this.createGlowHaloSprite(0xff2954, 1.18, 0.78);
+      glowHalo.position.y = 0.52;
+
       const prongMat = new THREE.MeshStandardMaterial({
         color: 0x525d70,
         emissive: 0xb91c1c,
@@ -1336,17 +2187,23 @@ export class EnvironmentProps {
       warningRing.rotation.x = Math.PI * 0.5;
       warningRing.position.y = 0.08;
 
-      group.add(baseRing, dome, ledCollar, beacon, warningRing);
+      const groundPool = this.createGroundLightPool(0xff3824, 2.2, 0.48);
+
+      group.add(baseRing, dome, ledCollar, beacon, glowHalo, warningRing, groundPool);
       return {
         type: hazard.type,
         group,
         pulseMaterials,
         warningRing,
+        glowHalo,
+        glowBaseScale: 1.18,
+        groundPool,
+        groundPoolBaseOpacity: 0.48,
         phaseOffset,
       };
     }
 
-    // 'thorn_patch': Tangled bramble vine coils + sharp conical thorns + glowing magenta spores
+    // 'thorn_patch': Tangled bramble vine coils + sharp conical thorns + glowing magenta spores, halo & ground pool
     const vineMat = new THREE.MeshStandardMaterial({
       color: 0x3b1f3d,
       roughness: 0.85,
@@ -1405,13 +2262,32 @@ export class EnvironmentProps {
       }
     }
 
-    group.add(outerCoil, innerCoil);
+    const glowHalo = this.createGlowHaloSprite(0xf248e6, 1.72, 0.52);
+    glowHalo.position.y = 0.48;
+
+    const groundPool = this.createGroundLightPool(0xe048ff, 1.9, 0.35);
+
+    group.add(outerCoil, innerCoil, glowHalo, groundPool);
     return {
       type: hazard.type,
       group,
       pulseMaterials,
+      glowHalo,
+      glowBaseScale: 1.72,
+      groundPool,
+      groundPoolBaseOpacity: 0.35,
       phaseOffset,
     };
+  }
+
+  private pulseGroundPool(visual: HazardVisual, pulseVal: number): void {
+    if (!visual.groundPool) return;
+    const s = 0.92 + pulseVal * 0.18;
+    visual.groundPool.scale.set(s, s, 1);
+    if (visual.groundPool.material instanceof THREE.MeshBasicMaterial) {
+      const baseOp = visual.groundPoolBaseOpacity ?? 0.4;
+      visual.groundPool.material.opacity = baseOp * (0.72 + pulseVal * 0.52);
+    }
   }
 
   private animateHazardVisual(visual: HazardVisual, elapsedSec: number): void {
@@ -1431,6 +2307,13 @@ export class EnvironmentProps {
         const ringScale = 0.92 + pulse * 0.24;
         visual.warningRing.scale.set(ringScale, ringScale, 1);
       }
+      if (visual.glowHalo) {
+        const base = visual.glowBaseScale ?? 1.35;
+        const s = base * (0.88 + pulse * 0.28);
+        visual.glowHalo.scale.set(s, s, 1);
+        visual.glowHalo.material.opacity = 0.48 + pulse * 0.36;
+      }
+      this.pulseGroundPool(visual, pulse);
       return;
     }
 
@@ -1448,14 +2331,29 @@ export class EnvironmentProps {
         const ringScale = 0.9 + pulse * 0.28;
         visual.warningRing.scale.set(ringScale, ringScale, 1);
       }
+      if (visual.glowHalo) {
+        const base = visual.glowBaseScale ?? 1.18;
+        const s = base * (0.84 + pulse * 0.38);
+        visual.glowHalo.scale.set(s, s, 1);
+        visual.glowHalo.material.opacity = 0.44 + pulse * 0.46;
+      }
+      this.pulseGroundPool(visual, pulse);
       return;
     }
 
     if (visual.type === "steam_geyser") {
+      const pulse = 0.5 + 0.5 * Math.sin(phase);
       const poolMat = visual.pulseMaterials[0];
       if (poolMat) {
         poolMat.emissiveIntensity = 0.95 + Math.sin(phase) * 0.35;
       }
+      if (visual.glowHalo) {
+        const base = visual.glowBaseScale ?? 1.85;
+        const s = base * (0.92 + pulse * 0.18);
+        visual.glowHalo.scale.set(s, s, 1);
+        visual.glowHalo.material.opacity = 0.34 + pulse * 0.22;
+      }
+      this.pulseGroundPool(visual, pulse);
       if (visual.steamPuffs) {
         const count = visual.steamPuffs.length;
         for (let i = 0; i < count; i++) {
@@ -1479,9 +2377,17 @@ export class EnvironmentProps {
       return;
     }
 
+    const sporePulse = 0.5 + 0.5 * Math.sin(phase * 1.15);
     const sporeMat = visual.pulseMaterials[0];
     if (sporeMat) {
       sporeMat.emissiveIntensity = 0.85 + Math.sin(phase * 1.15) * 0.55;
     }
+    if (visual.glowHalo) {
+      const base = visual.glowBaseScale ?? 1.72;
+      const s = base * (0.9 + sporePulse * 0.22);
+      visual.glowHalo.scale.set(s, s, 1);
+      visual.glowHalo.material.opacity = 0.34 + sporePulse * 0.28;
+    }
+    this.pulseGroundPool(visual, sporePulse);
   }
 }

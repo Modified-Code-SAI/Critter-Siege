@@ -6,6 +6,21 @@ const WORLD_SPAN_Y = SDF_DIMS.ny * SDF_DIMS.voxelSize;
 const WORLD_SPAN_Z = SDF_DIMS.nz * SDF_DIMS.voxelSize;
 const POLLEN_MOTE_COUNT = 110;
 const WIND_RIBBON_COUNT = 22;
+const INSTANCE_POOL_CAPACITY = 96;
+const GLOW_SPRITE_POOL_CAPACITY = 48;
+const SMOKE_SPRITE_POOL_CAPACITY = 64;
+
+const ZERO_MATRIX = new THREE.Matrix4().makeScale(0, 0, 0);
+const WHITE_COLOR = new THREE.Color(0xffffff);
+const FORWARD_Z = new THREE.Vector3(0, 0, 1);
+
+const ROCK_SHARD_PALETTE: readonly number[] = [
+  0xb96c43,
+  0x9a5938,
+  0x7a7673,
+  0xc98b5b,
+  0x5e6268,
+];
 
 interface DynamicParticle {
   mesh: THREE.Mesh;
@@ -19,7 +34,45 @@ interface DynamicParticle {
   endScale: number;
   baseScaleVec: THREE.Vector3;
   baseOpacity: number;
-  kind: "shard" | "smoke" | "shockwave" | "flash" | "droplet" | "spark" | "beam";
+  kind: "shockwave" | "beam";
+}
+
+interface PooledInstanceSlot {
+  active: boolean;
+  position: THREE.Vector3;
+  velocity: THREE.Vector3;
+  rotation: THREE.Euler;
+  spin: THREE.Vector3;
+  gravity: number;
+  age: number;
+  maxAge: number;
+  startScale: number;
+  endScale: number;
+  baseScaleVec: THREE.Vector3;
+}
+
+interface InstancedParticlePool {
+  mesh: THREE.InstancedMesh;
+  slots: PooledInstanceSlot[];
+  cursor: number;
+}
+
+interface PooledSpriteSlot {
+  active: boolean;
+  sprite: THREE.Sprite;
+  velocity: THREE.Vector3;
+  gravity: number;
+  age: number;
+  maxAge: number;
+  startScale: number;
+  endScale: number;
+  baseOpacity: number;
+  rotationSpeed: number;
+}
+
+interface SpriteParticlePool {
+  slots: PooledSpriteSlot[];
+  cursor: number;
 }
 
 interface EvoPodVisual {
@@ -27,6 +80,7 @@ interface EvoPodVisual {
   podCore: THREE.Mesh;
   parachuteGroup: THREE.Group;
   beaconMesh: THREE.Mesh;
+  groundPoolMesh?: THREE.Mesh;
 }
 
 interface WindRibbon {
@@ -36,14 +90,9 @@ interface WindRibbon {
   phase: number;
 }
 
-const FORWARD_Z = new THREE.Vector3(0, 0, 1);
-const ROCK_SHARD_PALETTE: readonly number[] = [
-  0xb96c43,
-  0x9a5938,
-  0x7a7673,
-  0xc98b5b,
-  0x5e6268,
-];
+function clamp01(v: number): number {
+  return v < 0 ? 0 : v > 1 ? 1 : v;
+}
 
 function disposeMaterial(material: THREE.Material | THREE.Material[]): void {
   if (Array.isArray(material)) {
@@ -71,6 +120,9 @@ function disposeObjectTree(root: THREE.Object3D): void {
     if (obj instanceof THREE.Mesh || obj instanceof THREE.Line) {
       geos.add(obj.geometry);
       addMat(obj.material);
+    } else if (obj instanceof THREE.Sprite) {
+      // Dispose per-sprite SpriteMaterial without disposing class-owned shared textures
+      addMat(obj.material);
     }
   });
   for (const g of geos) {
@@ -92,15 +144,235 @@ function wrapCoord(v: number, min: number, max: number): number {
   return v;
 }
 
+/** Shared smooth radial glow texture for additive blast flashes, comet halos, and sparks. */
+function createGlowTexture(): THREE.Texture {
+  if (typeof document !== "undefined") {
+    const size = 64;
+    const half = size * 0.5;
+    const canvas = document.createElement("canvas");
+    canvas.width = size;
+    canvas.height = size;
+    const ctx = canvas.getContext("2d");
+    if (ctx) {
+      const grad = ctx.createRadialGradient(half, half, 0, half, half, half);
+      grad.addColorStop(0.0, "rgba(255, 255, 255, 1.0)");
+      grad.addColorStop(0.24, "rgba(255, 255, 255, 0.78)");
+      grad.addColorStop(0.54, "rgba(255, 255, 255, 0.24)");
+      grad.addColorStop(0.84, "rgba(255, 255, 255, 0.04)");
+      grad.addColorStop(1.0, "rgba(255, 255, 255, 0.0)");
+      ctx.fillStyle = grad;
+      ctx.fillRect(0, 0, size, size);
+      const tex = new THREE.CanvasTexture(canvas);
+      tex.needsUpdate = true;
+      return tex;
+    }
+  }
+
+  const size = 16;
+  const data = new Uint8Array(size * size * 4);
+  const center = (size - 1) * 0.5;
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const dist = Math.hypot((x - center) / center, (y - center) / center);
+      const alpha = Math.round(clamp01(Math.pow(Math.max(0, 1 - dist), 2.4)) * 255);
+      const idx = (y * size + x) * 4;
+      data[idx] = 255;
+      data[idx + 1] = 255;
+      data[idx + 2] = 255;
+      data[idx + 3] = alpha;
+    }
+  }
+  const tex = new THREE.DataTexture(data, size, size, THREE.RGBAFormat);
+  tex.magFilter = THREE.LinearFilter;
+  tex.minFilter = THREE.LinearFilter;
+  tex.needsUpdate = true;
+  return tex;
+}
+
+/** Shared multi-lobe billowing cloud puff radial texture for soft explosion smoke & geyser steam. */
+function createSmokeTexture(): THREE.Texture {
+  if (typeof document !== "undefined") {
+    const size = 96;
+    const canvas = document.createElement("canvas");
+    canvas.width = size;
+    canvas.height = size;
+    const ctx = canvas.getContext("2d");
+    if (ctx) {
+      ctx.clearRect(0, 0, size, size);
+      const lobes: ReadonlyArray<readonly [number, number, number, number]> = [
+        [0.5, 0.5, 0.42, 0.72],
+        [0.37, 0.44, 0.28, 0.55],
+        [0.64, 0.46, 0.27, 0.52],
+        [0.48, 0.36, 0.26, 0.58],
+        [0.54, 0.62, 0.28, 0.48],
+      ];
+      for (const [cx, cy, rad, peak] of lobes) {
+        const px = cx * size;
+        const py = cy * size;
+        const pr = rad * size;
+        const grad = ctx.createRadialGradient(px, py, pr * 0.08, px, py, pr);
+        grad.addColorStop(0.0, `rgba(255, 255, 255, ${peak.toFixed(2)})`);
+        grad.addColorStop(0.55, `rgba(242, 244, 248, ${(peak * 0.45).toFixed(2)})`);
+        grad.addColorStop(1.0, "rgba(230, 236, 242, 0.0)");
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, 0, size, size);
+      }
+      const tex = new THREE.CanvasTexture(canvas);
+      tex.needsUpdate = true;
+      return tex;
+    }
+  }
+
+  const size = 16;
+  const data = new Uint8Array(size * size * 4);
+  const center = (size - 1) * 0.5;
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const dist = Math.hypot((x - center) / center, (y - center) / center);
+      const puff = clamp01(1.0 - dist * dist);
+      const idx = (y * size + x) * 4;
+      data[idx] = 250;
+      data[idx + 1] = 250;
+      data[idx + 2] = 252;
+      data[idx + 3] = Math.round(puff * 235);
+    }
+  }
+  const tex = new THREE.DataTexture(data, size, size, THREE.RGBAFormat);
+  tex.magFilter = THREE.LinearFilter;
+  tex.minFilter = THREE.LinearFilter;
+  tex.needsUpdate = true;
+  return tex;
+}
+
+/** Shared crisp soft-edged round bokeh texture so ambient sunlit pollen motes never look square. */
+function createBokehTexture(): THREE.Texture {
+  if (typeof document !== "undefined") {
+    const size = 32;
+    const half = size * 0.5;
+    const canvas = document.createElement("canvas");
+    canvas.width = size;
+    canvas.height = size;
+    const ctx = canvas.getContext("2d");
+    if (ctx) {
+      const grad = ctx.createRadialGradient(half, half, 0, half, half, half);
+      grad.addColorStop(0.0, "rgba(255, 255, 255, 1.0)");
+      grad.addColorStop(0.55, "rgba(255, 252, 235, 0.85)");
+      grad.addColorStop(0.82, "rgba(255, 240, 190, 0.28)");
+      grad.addColorStop(1.0, "rgba(255, 235, 180, 0.0)");
+      ctx.fillStyle = grad;
+      ctx.fillRect(0, 0, size, size);
+      const tex = new THREE.CanvasTexture(canvas);
+      tex.needsUpdate = true;
+      return tex;
+    }
+  }
+
+  const size = 16;
+  const data = new Uint8Array(size * size * 4);
+  const center = (size - 1) * 0.5;
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const dist = Math.hypot((x - center) / center, (y - center) / center);
+      const softCircle = clamp01((1.0 - dist) * 2.2);
+      const idx = (y * size + x) * 4;
+      data[idx] = 255;
+      data[idx + 1] = 252;
+      data[idx + 2] = 235;
+      data[idx + 3] = Math.round(softCircle * 255);
+    }
+  }
+  const tex = new THREE.DataTexture(data, size, size, THREE.RGBAFormat);
+  tex.magFilter = THREE.LinearFilter;
+  tex.minFilter = THREE.LinearFilter;
+  tex.needsUpdate = true;
+  return tex;
+}
+
+function createInstancedPool(
+  geometry: THREE.BufferGeometry,
+  material: THREE.Material,
+  capacity: number,
+  name: string,
+  castShadow: boolean,
+): InstancedParticlePool {
+  const mesh = new THREE.InstancedMesh(geometry, material, capacity);
+  mesh.name = name;
+  mesh.castShadow = castShadow;
+  mesh.receiveShadow = false;
+  mesh.frustumCulled = false;
+
+  const slots: PooledInstanceSlot[] = [];
+  for (let i = 0; i < capacity; i++) {
+    mesh.setMatrixAt(i, ZERO_MATRIX);
+    mesh.setColorAt(i, WHITE_COLOR);
+    slots.push({
+      active: false,
+      position: new THREE.Vector3(),
+      velocity: new THREE.Vector3(),
+      rotation: new THREE.Euler(),
+      spin: new THREE.Vector3(),
+      gravity: 0,
+      age: 0,
+      maxAge: 1,
+      startScale: 1,
+      endScale: 0.1,
+      baseScaleVec: new THREE.Vector3(1, 1, 1),
+    });
+  }
+  mesh.instanceMatrix.needsUpdate = true;
+  if (mesh.instanceColor) {
+    mesh.instanceColor.needsUpdate = true;
+  }
+
+  return { mesh, slots, cursor: 0 };
+}
+
+function createSpritePool(
+  texture: THREE.Texture,
+  capacity: number,
+  additive: boolean,
+  parent: THREE.Group,
+): SpriteParticlePool {
+  const slots: PooledSpriteSlot[] = [];
+  for (let i = 0; i < capacity; i++) {
+    const mat = new THREE.SpriteMaterial({
+      map: texture,
+      color: 0xffffff,
+      transparent: true,
+      opacity: 0,
+      depthWrite: false,
+      ...(additive ? { blending: THREE.AdditiveBlending } : {}),
+    });
+    const sprite = new THREE.Sprite(mat);
+    sprite.visible = false;
+    sprite.frustumCulled = false;
+    parent.add(sprite);
+    slots.push({
+      active: false,
+      sprite,
+      velocity: new THREE.Vector3(),
+      gravity: 0,
+      age: 0,
+      maxAge: 1,
+      startScale: 1,
+      endScale: 1,
+      baseOpacity: 1,
+      rotationSpeed: 0,
+    });
+  }
+  return { slots, cursor: 0 };
+}
+
 /**
- * Stylized 3D VFX system for Critter Siege: jagged rock-shard blasts, Blast Barrel
- * chain-explosions, Thermal Geyser steam bursts, ocean splashes, drifting golden
- * sunlit pollen motes, parachuting Evo Pods, scaled wind ribbons, and drone pings.
+ * Stylized 3D VFX system for Critter Siege: pooled InstancedMesh jagged rock shards,
+ * additive billboard blast flashes & comet halos, soft billowing smoke/steam plumes,
+ * round bokeh pollen motes, parachuting Evo Pods, scaled wind ribbons, and drone pings.
  */
 export class VfxSystem {
   public readonly group: THREE.Group;
 
   private readonly particleGroup: THREE.Group;
+  private readonly poolGroup: THREE.Group;
   private readonly evoPodGroup: THREE.Group;
   private readonly windGroup: THREE.Group;
   private readonly pollenPoints: THREE.Points;
@@ -108,17 +380,29 @@ export class VfxSystem {
   private readonly pollenSpeeds: Float32Array;
   private lastWind: Vec3 = { x: 1.0, y: 0, z: 0.4 };
 
+  private readonly glowTexture: THREE.Texture;
+  private readonly smokeTexture: THREE.Texture;
+  private readonly bokehTexture: THREE.Texture;
+
   private readonly sharedGeos: {
     shardDodeca: THREE.DodecahedronGeometry;
     shardTetra: THREE.TetrahedronGeometry;
-    smoke: THREE.SphereGeometry;
     droplet: THREE.SphereGeometry;
     shockRing: THREE.TorusGeometry;
-    flash: THREE.SphereGeometry;
     spark: THREE.OctahedronGeometry;
     ribbon: THREE.CylinderGeometry;
     grappleBeam: THREE.CylinderGeometry;
   };
+
+  private readonly dodecaShardPool: InstancedParticlePool;
+  private readonly tetraShardPool: InstancedParticlePool;
+  private readonly sparkPool: InstancedParticlePool;
+  private readonly dropletPool: InstancedParticlePool;
+  private readonly glowSpritePool: SpriteParticlePool;
+  private readonly smokeSpritePool: SpriteParticlePool;
+
+  private readonly dummyObj = new THREE.Object3D();
+  private readonly scratchColor = new THREE.Color();
 
   private readonly particles: DynamicParticle[] = [];
   private readonly evoPods: Map<string, EvoPodVisual> = new Map();
@@ -127,7 +411,9 @@ export class VfxSystem {
   private readonly projectileGroup: THREE.Group;
   private readonly projectileCoreMat: THREE.MeshStandardMaterial;
   private readonly projectileRingMat: THREE.MeshBasicMaterial;
+  private readonly projectileHalo: THREE.Sprite;
   private lastProjectilePos: THREE.Vector3 | null = null;
+  private trailEmitCounter = 0;
 
   private readonly dronePingGroup: THREE.Group;
   private readonly droneOuterRing: THREE.Mesh;
@@ -146,6 +432,10 @@ export class VfxSystem {
     this.particleGroup.name = "vfx_particles";
     this.group.add(this.particleGroup);
 
+    this.poolGroup = new THREE.Group();
+    this.poolGroup.name = "vfx_particle_pools";
+    this.group.add(this.poolGroup);
+
     this.evoPodGroup = new THREE.Group();
     this.evoPodGroup.name = "vfx_evo_pods";
     this.group.add(this.evoPodGroup);
@@ -154,22 +444,95 @@ export class VfxSystem {
     this.windGroup.name = "vfx_wind_ribbons";
     this.group.add(this.windGroup);
 
+    this.glowTexture = createGlowTexture();
+    this.smokeTexture = createSmokeTexture();
+    this.bokehTexture = createBokehTexture();
+
     const ribbonGeo = new THREE.CylinderGeometry(0.02, 0.062, 4.6, 6, 1, true);
     ribbonGeo.rotateX(Math.PI * 0.5);
 
     this.sharedGeos = {
       shardDodeca: new THREE.DodecahedronGeometry(0.18, 0),
       shardTetra: new THREE.TetrahedronGeometry(0.18, 0),
-      smoke: new THREE.SphereGeometry(0.32, 10, 8),
       droplet: new THREE.SphereGeometry(0.11, 8, 6),
       shockRing: new THREE.TorusGeometry(0.5, 0.06, 8, 28),
-      flash: new THREE.SphereGeometry(0.52, 12, 10),
       spark: new THREE.OctahedronGeometry(0.085, 0),
       ribbon: ribbonGeo,
       grappleBeam: new THREE.CylinderGeometry(0.06, 0.06, 1.0, 8, 1, false),
     };
 
-    // Build translucent sunlit wind-stream ribbons spanning the 60m archipelago sky
+    // Pooled InstancedMesh rock shards, additive sparks, and glossy water droplets (zero per-blast churn)
+    const shardMat = new THREE.MeshStandardMaterial({
+      color: 0xffffff,
+      roughness: 0.85,
+      metalness: 0.05,
+      flatShading: true,
+    });
+    this.dodecaShardPool = createInstancedPool(
+      this.sharedGeos.shardDodeca,
+      shardMat,
+      INSTANCE_POOL_CAPACITY,
+      "vfx_pool_dodeca_shards",
+      true,
+    );
+    this.tetraShardPool = createInstancedPool(
+      this.sharedGeos.shardTetra,
+      shardMat,
+      INSTANCE_POOL_CAPACITY,
+      "vfx_pool_tetra_shards",
+      true,
+    );
+
+    const sparkMat = new THREE.MeshBasicMaterial({
+      color: 0xffffff,
+      transparent: true,
+      opacity: 0.95,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    });
+    this.sparkPool = createInstancedPool(
+      this.sharedGeos.spark,
+      sparkMat,
+      INSTANCE_POOL_CAPACITY,
+      "vfx_pool_sparks",
+      false,
+    );
+
+    const dropletMat = new THREE.MeshStandardMaterial({
+      color: 0xffffff,
+      roughness: 0.16,
+      metalness: 0.08,
+    });
+    this.dropletPool = createInstancedPool(
+      this.sharedGeos.droplet,
+      dropletMat,
+      INSTANCE_POOL_CAPACITY,
+      "vfx_pool_droplets",
+      false,
+    );
+
+    this.poolGroup.add(
+      this.dodecaShardPool.mesh,
+      this.tetraShardPool.mesh,
+      this.sparkPool.mesh,
+      this.dropletPool.mesh,
+    );
+
+    // Pooled additive glow & billowing smoke billboard sprites
+    this.glowSpritePool = createSpritePool(
+      this.glowTexture,
+      GLOW_SPRITE_POOL_CAPACITY,
+      true,
+      this.poolGroup,
+    );
+    this.smokeSpritePool = createSpritePool(
+      this.smokeTexture,
+      SMOKE_SPRITE_POOL_CAPACITY,
+      false,
+      this.poolGroup,
+    );
+
+    // Build translucent sunlit wind-stream ribbons spanning the archipelago sky
     for (let i = 0; i < WIND_RIBBON_COUNT; i++) {
       const mat = new THREE.MeshBasicMaterial({
         color: 0xffffff,
@@ -193,7 +556,7 @@ export class VfxSystem {
       });
     }
 
-    // Drifting golden sunlit ambient pollen motes floating lazily above the archipelago
+    // Drifting golden sunlit ambient pollen motes rendered as soft round bokeh orbs
     const pollenPositions = new Float32Array(POLLEN_MOTE_COUNT * 3);
     const pollenColors = new Float32Array(POLLEN_MOTE_COUNT * 3);
     this.pollenPhases = new Float32Array(POLLEN_MOTE_COUNT);
@@ -217,10 +580,12 @@ export class VfxSystem {
     pollenGeo.setAttribute("position", new THREE.BufferAttribute(pollenPositions, 3));
     pollenGeo.setAttribute("color", new THREE.BufferAttribute(pollenColors, 3));
     const pollenMat = new THREE.PointsMaterial({
-      size: 0.26,
+      size: 0.38,
+      map: this.bokehTexture,
       vertexColors: true,
       transparent: true,
-      opacity: 0.72,
+      opacity: 0.82,
+      blending: THREE.AdditiveBlending,
       depthWrite: false,
       sizeAttenuation: true,
     });
@@ -228,7 +593,7 @@ export class VfxSystem {
     this.pollenPoints.name = "vfx_pollen_motes";
     this.group.add(this.pollenPoints);
 
-    // Glowing projectile energy shell
+    // Glowing projectile energy shell + soft additive comet halo
     this.projectileGroup = new THREE.Group();
     this.projectileGroup.name = "vfx_projectile";
     this.projectileGroup.visible = false;
@@ -236,7 +601,7 @@ export class VfxSystem {
     this.projectileCoreMat = new THREE.MeshStandardMaterial({
       color: 0xffb347,
       emissive: 0xff8c24,
-      emissiveIntensity: 1.2,
+      emissiveIntensity: 1.35,
       roughness: 0.2,
       metalness: 0.1,
     });
@@ -254,7 +619,19 @@ export class VfxSystem {
       new THREE.TorusGeometry(0.34, 0.036, 8, 20),
       this.projectileRingMat,
     );
-    this.projectileGroup.add(projCore, projRing);
+    const projHaloMat = new THREE.SpriteMaterial({
+      map: this.glowTexture,
+      color: 0xffb347,
+      transparent: true,
+      opacity: 0.85,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    });
+    this.projectileHalo = new THREE.Sprite(projHaloMat);
+    this.projectileHalo.name = "vfx_projectile_halo";
+    this.projectileHalo.scale.set(1.55, 1.55, 1);
+
+    this.projectileGroup.add(projCore, projRing, this.projectileHalo);
     this.group.add(this.projectileGroup);
 
     // Glowing cyan drone recon target ping
@@ -303,8 +680,8 @@ export class VfxSystem {
   }
 
   /**
-   * Spawn a stylized blast with an expanding shockwave ring, smoke puffs,
-   * and 14-22 tumbling jagged rock shards (DodecahedronGeometry / TetrahedronGeometry).
+   * Spawn a stylized blast with an expanding shockwave ring, luminous additive glow flash,
+   * soft billowing smoke billboards, and 14-22 pooled tumbling jagged rock shards.
    */
   public spawnExplosion(
     position: Vec3,
@@ -313,13 +690,14 @@ export class VfxSystem {
   ): void {
     const safeRadius = Number.isFinite(radius) ? Math.max(0.6, radius) : 1.6;
     const accentColor = isPull ? 0x38f2ff : 0xff8a2b;
-    const coreColor = isPull ? 0xa6fbff : 0xffe48f;
+    const coreColor = isPull ? 0xb4fbff : 0xffdf80;
 
     // Expanding shockwave ring
     const ringMat = new THREE.MeshBasicMaterial({
       color: accentColor,
       transparent: true,
       opacity: 0.92,
+      blending: THREE.AdditiveBlending,
       depthWrite: false,
     });
     const ringMesh = new THREE.Mesh(this.sharedGeos.shockRing, ringMat);
@@ -341,139 +719,98 @@ export class VfxSystem {
       kind: "shockwave",
     });
 
-    // Core flash sphere
-    const flashMat = new THREE.MeshBasicMaterial({
-      color: coreColor,
-      transparent: true,
-      opacity: 0.9,
-      depthWrite: false,
-    });
-    const flashMesh = new THREE.Mesh(this.sharedGeos.flash, flashMat);
-    flashMesh.position.set(position.x, position.y, position.z);
-    this.particleGroup.add(flashMesh);
-    this.particles.push({
-      mesh: flashMesh,
-      material: flashMat,
-      velocity: new THREE.Vector3(0, 0.4, 0),
-      spin: new THREE.Vector3(0, 0, 0),
+    // Luminous additive core flash + outer warm bloom halo
+    this.emitSpriteFromPool(this.glowSpritePool, {
+      x: position.x,
+      y: position.y + 0.18,
+      z: position.z,
+      vx: 0,
+      vy: 0.5,
+      vz: 0,
       gravity: 0,
-      age: 0,
-      maxAge: 0.26,
-      startScale: 0.45,
-      endScale: safeRadius * 1.15,
-      baseScaleVec: new THREE.Vector3(1, 1, 1),
-      baseOpacity: 0.9,
-      kind: "flash",
+      maxAge: 0.28,
+      startScale: safeRadius * 1.15,
+      endScale: safeRadius * 2.95,
+      colorHex: coreColor,
+      baseOpacity: 0.95,
+      rotationSpeed: 0,
+    });
+    this.emitSpriteFromPool(this.glowSpritePool, {
+      x: position.x,
+      y: position.y + 0.25,
+      z: position.z,
+      vx: 0,
+      vy: 0.8,
+      vz: 0,
+      gravity: 0,
+      maxAge: 0.42,
+      startScale: safeRadius * 1.4,
+      endScale: safeRadius * 3.4,
+      colorHex: accentColor,
+      baseOpacity: 0.65,
+      rotationSpeed: 0,
     });
 
-    // Rising stylized smoke puffs
-    const smokeCount = 6;
+    // Soft billowing smoke cloud billboards
+    const smokeCount = 7;
     for (let i = 0; i < smokeCount; i++) {
       const angle = (i / smokeCount) * Math.PI * 2 + this.nextRand() * 0.5;
-      const spread = (0.35 + this.nextRand() * 0.65) * safeRadius * 0.4;
-      const smokeMat = new THREE.MeshStandardMaterial({
-        color: isPull ? 0xb4f3ff : 0xf4eee6,
-        roughness: 0.95,
-        metalness: 0.0,
-        transparent: true,
-        opacity: 0.72,
-      });
-      const smokeMesh = new THREE.Mesh(this.sharedGeos.smoke, smokeMat);
-      smokeMesh.position.set(
-        position.x + Math.cos(angle) * spread,
-        position.y + 0.15 + this.nextRand() * 0.35,
-        position.z + Math.sin(angle) * spread,
-      );
-      this.particleGroup.add(smokeMesh);
-      this.particles.push({
-        mesh: smokeMesh,
-        material: smokeMat,
-        velocity: new THREE.Vector3(
-          Math.cos(angle) * (0.8 + this.nextRand() * 1.0),
-          1.4 + this.nextRand() * 1.6,
-          Math.sin(angle) * (0.8 + this.nextRand() * 1.0),
-        ),
-        spin: new THREE.Vector3(0.4, 0.6, 0.3),
-        gravity: -0.6,
-        age: 0,
-        maxAge: 0.75 + this.nextRand() * 0.35,
-        startScale: 0.45,
-        endScale: 1.55 + safeRadius * 0.25,
-        baseScaleVec: new THREE.Vector3(1, 1, 1),
-        baseOpacity: 0.72,
-        kind: "smoke",
+      const spread = (0.32 + this.nextRand() * 0.6) * safeRadius * 0.42;
+      const smokeTint = isPull
+        ? 0xb4f3ff
+        : i % 2 === 0
+          ? 0xf4ece2
+          : 0xd9cfc4;
+      this.emitSpriteFromPool(this.smokeSpritePool, {
+        x: position.x + Math.cos(angle) * spread,
+        y: position.y + 0.18 + this.nextRand() * 0.35,
+        z: position.z + Math.sin(angle) * spread,
+        vx: Math.cos(angle) * (0.75 + this.nextRand() * 0.95),
+        vy: 1.35 + this.nextRand() * 1.55,
+        vz: Math.sin(angle) * (0.75 + this.nextRand() * 0.95),
+        gravity: -0.55,
+        maxAge: 0.8 + this.nextRand() * 0.4,
+        startScale: 0.9 + safeRadius * 0.22,
+        endScale: 2.8 + safeRadius * 0.55,
+        colorHex: smokeTint,
+        baseOpacity: 0.56,
+        rotationSpeed: (this.nextRand() - 0.5) * 1.1,
       });
     }
 
-    // 14-22 tumbling irregular faceted rock shards (NEVER BoxGeometry)
+    // 14-22 pooled tumbling irregular faceted rock shards (DodecahedronGeometry / TetrahedronGeometry)
     const shardCount = 14 + Math.floor(this.nextRand() * 9);
     for (let i = 0; i < shardCount; i++) {
-      const useTetra = i % 3 === 0;
-      const shardGeo = useTetra
-        ? this.sharedGeos.shardTetra
-        : this.sharedGeos.shardDodeca;
+      const pool = i % 3 === 0 ? this.tetraShardPool : this.dodecaShardPool;
       const paletteColor =
         ROCK_SHARD_PALETTE[i % ROCK_SHARD_PALETTE.length] ?? 0xb96c43;
-      const shardMat = new THREE.MeshStandardMaterial({
-        color: paletteColor,
-        roughness: 0.85,
-        metalness: 0.05,
-        flatShading: true,
-        transparent: true,
-        opacity: 1.0,
-      });
-      const shardMesh = new THREE.Mesh(shardGeo, shardMat);
-      shardMesh.castShadow = true;
-
       const theta = this.nextRand() * Math.PI * 2;
       const elev = 0.35 + this.nextRand() * 0.95;
       const speed = (3.4 + this.nextRand() * 5.2) * Math.min(1.6, safeRadius * 0.65);
 
-      shardMesh.position.set(
-        position.x + Math.cos(theta) * 0.25,
-        position.y + 0.12 + this.nextRand() * 0.25,
-        position.z + Math.sin(theta) * 0.25,
-      );
-      shardMesh.rotation.set(
-        this.nextRand() * Math.PI,
-        this.nextRand() * Math.PI,
-        this.nextRand() * Math.PI,
-      );
-
-      // Irregular non-uniform aspect ratios for authentic fractured rock silhouettes
-      const baseScaleVec = new THREE.Vector3(
-        0.55 + this.nextRand() * 0.95,
-        0.45 + this.nextRand() * 0.85,
-        0.5 + this.nextRand() * 0.9,
-      );
-
-      this.particleGroup.add(shardMesh);
-      this.particles.push({
-        mesh: shardMesh,
-        material: shardMat,
-        velocity: new THREE.Vector3(
-          Math.cos(theta) * Math.cos(elev) * speed * (isPull ? -0.4 : 1),
-          Math.sin(elev) * speed + 2.4,
-          Math.sin(theta) * Math.cos(elev) * speed * (isPull ? -0.4 : 1),
-        ),
-        spin: new THREE.Vector3(
-          (this.nextRand() - 0.5) * 14,
-          (this.nextRand() - 0.5) * 14,
-          (this.nextRand() - 0.5) * 14,
-        ),
+      this.emitInstanceFromPool(pool, {
+        x: position.x + Math.cos(theta) * 0.25,
+        y: position.y + 0.12 + this.nextRand() * 0.25,
+        z: position.z + Math.sin(theta) * 0.25,
+        vx: Math.cos(theta) * Math.cos(elev) * speed * (isPull ? -0.4 : 1),
+        vy: Math.sin(elev) * speed + 2.4,
+        vz: Math.sin(theta) * Math.cos(elev) * speed * (isPull ? -0.4 : 1),
+        spinX: (this.nextRand() - 0.5) * 14,
+        spinY: (this.nextRand() - 0.5) * 14,
+        spinZ: (this.nextRand() - 0.5) * 14,
         gravity: 18.0,
-        age: 0,
         maxAge: 0.85 + this.nextRand() * 0.5,
         startScale: 1.0,
-        endScale: 0.15,
-        baseScaleVec,
-        baseOpacity: 1.0,
-        kind: "shard",
+        endScale: 0.12,
+        sx: 0.55 + this.nextRand() * 0.95,
+        sy: 0.45 + this.nextRand() * 0.85,
+        sz: 0.5 + this.nextRand() * 0.9,
+        colorHex: paletteColor,
       });
     }
   }
 
-  /** Spawn a fiery crimson-amber Blast Barrel chain-explosion with double shockwave & ember shower. */
+  /** Spawn a fiery crimson-amber Blast Barrel chain-explosion with double shockwave, fireball glow & pooled ember shower. */
   public spawnBarrelExplosion(position: Vec3, radius = 2.8): void {
     const safeRadius = Number.isFinite(radius) ? Math.max(1.4, radius) : 2.8;
     this.spawnExplosion(position, safeRadius, false);
@@ -483,6 +820,7 @@ export class VfxSystem {
       color: 0xff3d1f,
       transparent: true,
       opacity: 0.95,
+      blending: THREE.AdditiveBlending,
       depthWrite: false,
     });
     const crimsonRing = new THREE.Mesh(this.sharedGeos.shockRing, crimsonRingMat);
@@ -504,36 +842,45 @@ export class VfxSystem {
       kind: "shockwave",
     });
 
-    // Fiery ember octahedron sparks flying in high arcs
+    // Fiery barrel core fireball bloom
+    this.emitSpriteFromPool(this.glowSpritePool, {
+      x: position.x,
+      y: position.y + 0.45,
+      z: position.z,
+      vx: 0,
+      vy: 1.4,
+      vz: 0,
+      gravity: 0,
+      maxAge: 0.46,
+      startScale: safeRadius * 1.45,
+      endScale: safeRadius * 3.8,
+      colorHex: 0xff5a1f,
+      baseOpacity: 0.85,
+      rotationSpeed: 0,
+    });
+
+    // Pooled fiery ember octahedron sparks flying in high arcs
     for (let i = 0; i < 16; i++) {
-      const emberMat = new THREE.MeshBasicMaterial({
-        color: i % 2 === 0 ? 0xffb82e : 0xff4b1f,
-        transparent: true,
-        opacity: 0.95,
-        depthWrite: false,
-      });
-      const emberMesh = new THREE.Mesh(this.sharedGeos.spark, emberMat);
       const angle = (i / 16) * Math.PI * 2 + this.nextRand() * 0.4;
       const spd = 4.2 + this.nextRand() * 5.8;
-      emberMesh.position.set(position.x, position.y + 0.4, position.z);
-      this.particleGroup.add(emberMesh);
-      this.particles.push({
-        mesh: emberMesh,
-        material: emberMat,
-        velocity: new THREE.Vector3(
-          Math.cos(angle) * spd,
-          4.5 + this.nextRand() * 5.5,
-          Math.sin(angle) * spd,
-        ),
-        spin: new THREE.Vector3(8, 10, 7),
+      this.emitInstanceFromPool(this.sparkPool, {
+        x: position.x,
+        y: position.y + 0.4,
+        z: position.z,
+        vx: Math.cos(angle) * spd,
+        vy: 4.5 + this.nextRand() * 5.5,
+        vz: Math.sin(angle) * spd,
+        spinX: 8,
+        spinY: 10,
+        spinZ: 7,
         gravity: 12.5,
-        age: 0,
         maxAge: 0.65 + this.nextRand() * 0.45,
-        startScale: 1.5,
-        endScale: 0.15,
-        baseScaleVec: new THREE.Vector3(1, 1, 1),
-        baseOpacity: 0.95,
-        kind: "spark",
+        startScale: 1.55,
+        endScale: 0.12,
+        sx: 1,
+        sy: 1,
+        sz: 1,
+        colorHex: i % 2 === 0 ? 0xffc83b : 0xff4b1f,
       });
     }
   }
@@ -544,6 +891,7 @@ export class VfxSystem {
       color: 0x7ef9ff,
       transparent: true,
       opacity: 0.9,
+      blending: THREE.AdditiveBlending,
       depthWrite: false,
     });
     const ringMesh = new THREE.Mesh(this.sharedGeos.shockRing, ringMat);
@@ -565,71 +913,64 @@ export class VfxSystem {
       kind: "shockwave",
     });
 
-    // Billowing pressurized steam column
+    // Soft cyan geothermal flash at vent mouth
+    this.emitSpriteFromPool(this.glowSpritePool, {
+      x: position.x,
+      y: position.y + 0.4,
+      z: position.z,
+      vx: 0,
+      vy: 2.2,
+      vz: 0,
+      gravity: 0,
+      maxAge: 0.36,
+      startScale: 1.4,
+      endScale: 3.1,
+      colorHex: 0x6ef7ff,
+      baseOpacity: 0.72,
+      rotationSpeed: 0,
+    });
+
+    // Pooled billowing pressurized steam cloud billboards
     for (let i = 0; i < 12; i++) {
       const a = (i / 12) * Math.PI * 2 + this.nextRand() * 0.35;
-      const steamMat = new THREE.MeshBasicMaterial({
-        color: i % 3 === 0 ? 0xbefaff : 0xf2ffff,
-        transparent: true,
-        opacity: 0.78,
-        depthWrite: false,
-      });
-      const steamMesh = new THREE.Mesh(this.sharedGeos.smoke, steamMat);
-      steamMesh.position.set(
-        position.x + Math.cos(a) * 0.25,
-        position.y + 0.25 + i * 0.12,
-        position.z + Math.sin(a) * 0.25,
-      );
-      this.particleGroup.add(steamMesh);
-      this.particles.push({
-        mesh: steamMesh,
-        material: steamMat,
-        velocity: new THREE.Vector3(
-          Math.cos(a) * (0.4 + this.nextRand() * 0.9),
-          7.5 + this.nextRand() * 5.5,
-          Math.sin(a) * (0.4 + this.nextRand() * 0.9),
-        ),
-        spin: new THREE.Vector3(0.5, 1.2, 0.5),
+      this.emitSpriteFromPool(this.smokeSpritePool, {
+        x: position.x + Math.cos(a) * 0.25,
+        y: position.y + 0.25 + i * 0.12,
+        z: position.z + Math.sin(a) * 0.25,
+        vx: Math.cos(a) * (0.4 + this.nextRand() * 0.9),
+        vy: 7.5 + this.nextRand() * 5.5,
+        vz: Math.sin(a) * (0.4 + this.nextRand() * 0.9),
         gravity: 2.5,
-        age: 0,
         maxAge: 0.72 + this.nextRand() * 0.4,
-        startScale: 0.65,
-        endScale: 2.35,
-        baseScaleVec: new THREE.Vector3(1, 1.15, 1),
-        baseOpacity: 0.78,
-        kind: "smoke",
+        startScale: 1.05,
+        endScale: 3.1,
+        colorHex: i % 3 === 0 ? 0xc2fbff : 0xf4ffff,
+        baseOpacity: 0.58,
+        rotationSpeed: (this.nextRand() - 0.5) * 1.4,
       });
     }
 
-    // Sparkling geothermal spray droplets
+    // Pooled sparkling geothermal spray droplets
     for (let i = 0; i < 10; i++) {
       const a = this.nextRand() * Math.PI * 2;
-      const dropMat = new THREE.MeshBasicMaterial({
-        color: 0x76f7ff,
-        transparent: true,
-        opacity: 0.9,
-        depthWrite: false,
-      });
-      const dropMesh = new THREE.Mesh(this.sharedGeos.droplet, dropMat);
-      dropMesh.position.set(position.x, position.y + 0.3, position.z);
-      this.particleGroup.add(dropMesh);
-      this.particles.push({
-        mesh: dropMesh,
-        material: dropMat,
-        velocity: new THREE.Vector3(
-          Math.cos(a) * (1.2 + this.nextRand() * 1.8),
-          9.5 + this.nextRand() * 5.0,
-          Math.sin(a) * (1.2 + this.nextRand() * 1.8),
-        ),
-        spin: new THREE.Vector3(0, 0, 0),
+      this.emitInstanceFromPool(this.dropletPool, {
+        x: position.x,
+        y: position.y + 0.3,
+        z: position.z,
+        vx: Math.cos(a) * (1.2 + this.nextRand() * 1.8),
+        vy: 9.5 + this.nextRand() * 5.0,
+        vz: Math.sin(a) * (1.2 + this.nextRand() * 1.8),
+        spinX: 0,
+        spinY: 0,
+        spinZ: 0,
         gravity: 15.0,
-        age: 0,
         maxAge: 0.75 + this.nextRand() * 0.35,
         startScale: 1.0,
         endScale: 0.2,
-        baseScaleVec: new THREE.Vector3(1, 1.4, 1),
-        baseOpacity: 0.9,
-        kind: "droplet",
+        sx: 1,
+        sy: 1.4,
+        sz: 1,
+        colorHex: 0x76f7ff,
       });
     }
   }
@@ -661,37 +1002,48 @@ export class VfxSystem {
       kind: "shockwave",
     });
 
+    // Soft sea-spray mist burst
+    for (let i = 0; i < 4; i++) {
+      const a = (i / 4) * Math.PI * 2 + this.nextRand() * 0.5;
+      this.emitSpriteFromPool(this.smokeSpritePool, {
+        x: position.x + Math.cos(a) * 0.35,
+        y: position.y + 0.35,
+        z: position.z + Math.sin(a) * 0.35,
+        vx: Math.cos(a) * 1.1,
+        vy: 2.4 + this.nextRand() * 1.4,
+        vz: Math.sin(a) * 1.1,
+        gravity: 3.5,
+        maxAge: 0.58,
+        startScale: 0.9,
+        endScale: 2.35,
+        colorHex: 0xdffeff,
+        baseOpacity: 0.5,
+        rotationSpeed: (this.nextRand() - 0.5) * 0.8,
+      });
+    }
+
     const dropletCount = 14;
     for (let i = 0; i < dropletCount; i++) {
       const angle = (i / dropletCount) * Math.PI * 2 + this.nextRand() * 0.35;
       const radialSpeed = 1.6 + this.nextRand() * 2.6;
-      const dropMat = new THREE.MeshStandardMaterial({
-        color: i % 2 === 0 ? 0x62f2ff : 0xe4ffff,
-        roughness: 0.2,
-        metalness: 0.05,
-        transparent: true,
-        opacity: 0.9,
-      });
-      const dropMesh = new THREE.Mesh(this.sharedGeos.droplet, dropMat);
-      dropMesh.position.set(position.x, position.y + 0.08, position.z);
-      this.particleGroup.add(dropMesh);
-      this.particles.push({
-        mesh: dropMesh,
-        material: dropMat,
-        velocity: new THREE.Vector3(
-          Math.cos(angle) * radialSpeed,
-          4.2 + this.nextRand() * 3.4,
-          Math.sin(angle) * radialSpeed,
-        ),
-        spin: new THREE.Vector3(0, 0, 0),
+      this.emitInstanceFromPool(this.dropletPool, {
+        x: position.x,
+        y: position.y + 0.08,
+        z: position.z,
+        vx: Math.cos(angle) * radialSpeed,
+        vy: 4.2 + this.nextRand() * 3.4,
+        vz: Math.sin(angle) * radialSpeed,
+        spinX: 0,
+        spinY: 0,
+        spinZ: 0,
         gravity: 16.5,
-        age: 0,
         maxAge: 0.65 + this.nextRand() * 0.35,
         startScale: 1.0,
         endScale: 0.2,
-        baseScaleVec: new THREE.Vector3(1, 1.3, 1),
-        baseOpacity: 0.9,
-        kind: "droplet",
+        sx: 1,
+        sy: 1.3,
+        sz: 1,
+        colorHex: i % 2 === 0 ? 0x62f2ff : 0xe4ffff,
       });
     }
   }
@@ -765,12 +1117,13 @@ export class VfxSystem {
       kind: "beam",
     });
 
-    // Glowing anchor burst rings at origin & destination
+    // Glowing anchor burst rings & soft additive flash at origin & destination
     for (const pt of [start, end]) {
       const ringMat = new THREE.MeshBasicMaterial({
         color: 0x6ee7b7,
         transparent: true,
         opacity: 0.92,
+        blending: THREE.AdditiveBlending,
         depthWrite: false,
       });
       const ringMesh = new THREE.Mesh(this.sharedGeos.shockRing, ringMat);
@@ -791,39 +1144,47 @@ export class VfxSystem {
         baseOpacity: 0.92,
         kind: "shockwave",
       });
+
+      this.emitSpriteFromPool(this.glowSpritePool, {
+        x: pt.x,
+        y: pt.y,
+        z: pt.z,
+        vx: 0,
+        vy: 0.25,
+        vz: 0,
+        gravity: 0,
+        maxAge: 0.32,
+        startScale: 0.9,
+        endScale: 1.85,
+        colorHex: 0x6ee7b7,
+        baseOpacity: 0.78,
+        rotationSpeed: 0,
+      });
     }
 
-    // Trailing emerald rope sparks spaced cleanly along the tether line
+    // Pooled trailing emerald rope sparks spaced cleanly along the tether line
     const sparkCount = Math.min(10, Math.max(4, Math.floor(dist / 2.2)));
     for (let i = 0; i < sparkCount; i++) {
       const frac = (i + 0.5) / sparkCount;
       const pt = start.clone().addScaledVector(delta, frac);
-      const sparkMat = new THREE.MeshBasicMaterial({
-        color: i % 2 === 0 ? 0x34d399 : 0x5eead4,
-        transparent: true,
-        opacity: 0.92,
-        depthWrite: false,
-      });
-      const sparkMesh = new THREE.Mesh(this.sharedGeos.spark, sparkMat);
-      sparkMesh.position.copy(pt);
-      this.particleGroup.add(sparkMesh);
-      this.particles.push({
-        mesh: sparkMesh,
-        material: sparkMat,
-        velocity: new THREE.Vector3(
-          (this.nextRand() - 0.5) * 1.4,
-          0.6 + this.nextRand() * 1.2,
-          (this.nextRand() - 0.5) * 1.4,
-        ),
-        spin: new THREE.Vector3(6, 7, 5),
+      this.emitInstanceFromPool(this.sparkPool, {
+        x: pt.x,
+        y: pt.y,
+        z: pt.z,
+        vx: (this.nextRand() - 0.5) * 1.4,
+        vy: 0.6 + this.nextRand() * 1.2,
+        vz: (this.nextRand() - 0.5) * 1.4,
+        spinX: 6,
+        spinY: 7,
+        spinZ: 5,
         gravity: 3.2,
-        age: 0,
         maxAge: 0.45 + this.nextRand() * 0.25,
         startScale: 1.15,
         endScale: 0.1,
-        baseScaleVec: new THREE.Vector3(1, 1, 1),
-        baseOpacity: 0.92,
-        kind: "spark",
+        sx: 1,
+        sy: 1,
+        sz: 1,
+        colorHex: i % 2 === 0 ? 0x34d399 : 0x5eead4,
       });
     }
   }
@@ -949,6 +1310,19 @@ export class VfxSystem {
       if (!pod.parachuting && visual.beaconMesh.material instanceof THREE.MeshBasicMaterial) {
         visual.beaconMesh.material.opacity = 0.22 + Math.sin(t * 4.0) * 0.1;
       }
+      if (visual.groundPoolMesh) {
+        visual.groundPoolMesh.visible = !pod.parachuting;
+        if (!pod.parachuting) {
+          // Keep luminous ground light pool anchored flat at terrain height (pod.position.y + 0.06)
+          visual.groundPoolMesh.position.y = -0.28 - bob;
+          const poolPulse = 0.5 + 0.5 * Math.sin(t * 3.6);
+          const poolScale = 0.92 + poolPulse * 0.16;
+          visual.groundPoolMesh.scale.set(poolScale, poolScale, 1);
+          if (visual.groundPoolMesh.material instanceof THREE.MeshBasicMaterial) {
+            visual.groundPoolMesh.material.opacity = 0.28 + poolPulse * 0.2;
+          }
+        }
+      }
     }
 
     for (const [id, visual] of this.evoPods.entries()) {
@@ -1029,7 +1403,7 @@ export class VfxSystem {
     }
   }
 
-  /** Position the glowing artillery shell and emit trailing sparks during Shot Cam. */
+  /** Position the glowing artillery shell + comet halo and emit pooled comet sparks & soft trail puffs. */
   public setProjectileVisual(
     position: Vec3 | null,
     gadgetColor?: number,
@@ -1037,6 +1411,7 @@ export class VfxSystem {
     if (!position) {
       this.projectileGroup.visible = false;
       this.lastProjectilePos = null;
+      this.trailEmitCounter = 0;
       return;
     }
 
@@ -1044,6 +1419,7 @@ export class VfxSystem {
     this.projectileCoreMat.color.setHex(color);
     this.projectileCoreMat.emissive.setHex(color);
     this.projectileRingMat.color.setHex(color);
+    this.projectileHalo.material.color.setHex(color);
 
     this.projectileGroup.visible = true;
     this.projectileGroup.position.set(position.x, position.y, position.z);
@@ -1067,12 +1443,12 @@ export class VfxSystem {
     this.dronePingGroup.position.set(position.x, position.y, position.z);
   }
 
-  /** Advance active VFX particle lifetimes, sunlit pollen drift, spins, fades, and cleanup. */
+  /** Advance active VFX particle lifetimes, pooled shards/sprites, sunlit pollen drift, and cleanup. */
   public update(dtSec: number, elapsedSec: number): void {
     const safeDt = Number.isFinite(dtSec) ? Math.max(0, Math.min(dtSec, 0.1)) : 0;
     const t = Number.isFinite(elapsedSec) ? elapsedSec : 0;
 
-    // Gentle sunlit golden pollen motes drifting in the island breeze
+    // Gentle sunlit golden bokeh pollen motes drifting in the island breeze
     const pollenPos = this.pollenPoints.geometry.getAttribute("position");
     if (pollenPos instanceof THREE.BufferAttribute) {
       const wx = this.lastWind.x * 0.22;
@@ -1092,6 +1468,7 @@ export class VfxSystem {
       pollenPos.needsUpdate = true;
     }
 
+    // Advance lightweight shockwave rings & grapple beams in vfx_particles
     for (let i = this.particles.length - 1; i >= 0; i--) {
       const p = this.particles[i];
       if (!p) {
@@ -1131,14 +1508,25 @@ export class VfxSystem {
         p.material instanceof THREE.MeshBasicMaterial ||
         p.material instanceof THREE.MeshStandardMaterial
       ) {
-        const fade = p.kind === "shard" ? Math.min(1, (1 - frac) * 2.2) : 1 - frac;
-        p.material.opacity = Math.max(0, p.baseOpacity * fade);
+        p.material.opacity = Math.max(0, p.baseOpacity * (1 - frac));
       }
     }
+
+    // Advance pooled InstancedMesh particle buffers
+    this.updateInstancedPool(this.dodecaShardPool, safeDt);
+    this.updateInstancedPool(this.tetraShardPool, safeDt);
+    this.updateInstancedPool(this.sparkPool, safeDt);
+    this.updateInstancedPool(this.dropletPool, safeDt);
+
+    // Advance pooled billboard glow & smoke sprites
+    this.updateSpritePool(this.glowSpritePool, safeDt);
+    this.updateSpritePool(this.smokeSpritePool, safeDt);
 
     if (this.projectileGroup.visible) {
       this.projectileGroup.rotation.y += safeDt * 7.5;
       this.projectileGroup.rotation.x += safeDt * 4.5;
+      const haloPulse = 1.45 + Math.sin(t * 18.0) * 0.22;
+      this.projectileHalo.scale.set(haloPulse, haloPulse, 1);
     }
 
     if (this.dronePingGroup.visible) {
@@ -1148,13 +1536,17 @@ export class VfxSystem {
     }
   }
 
-  /** Dispose all active particles, pollen motes, Evo Pods, wind ribbons, markers, and shared geometries. */
+  /** Dispose all active particles, pools, shared textures, pollen motes, Evo Pods, wind ribbons, and markers. */
   public dispose(): void {
     for (const p of this.particles) {
       this.particleGroup.remove(p.mesh);
       p.material.dispose();
     }
     this.particles.length = 0;
+
+    // Dispose pooled InstancedMesh materials & pooled SpriteMaterials cleanly
+    disposeObjectTree(this.poolGroup);
+    this.poolGroup.clear();
 
     for (let i = this.group.children.length - 1; i >= 0; i--) {
       const child = this.group.children[i];
@@ -1189,47 +1581,272 @@ export class VfxSystem {
 
     this.sharedGeos.shardDodeca.dispose();
     this.sharedGeos.shardTetra.dispose();
-    this.sharedGeos.smoke.dispose();
     this.sharedGeos.droplet.dispose();
     this.sharedGeos.shockRing.dispose();
-    this.sharedGeos.flash.dispose();
     this.sharedGeos.spark.dispose();
     this.sharedGeos.ribbon.dispose();
     this.sharedGeos.grappleBeam.dispose();
+
+    this.glowTexture.dispose();
+    this.smokeTexture.dispose();
+    this.bokehTexture.dispose();
+  }
+
+  private emitInstanceFromPool(
+    pool: InstancedParticlePool,
+    cfg: {
+      x: number;
+      y: number;
+      z: number;
+      vx: number;
+      vy: number;
+      vz: number;
+      spinX: number;
+      spinY: number;
+      spinZ: number;
+      gravity: number;
+      maxAge: number;
+      startScale: number;
+      endScale: number;
+      sx: number;
+      sy: number;
+      sz: number;
+      colorHex: number;
+    },
+  ): void {
+    const cap = pool.slots.length;
+    if (cap === 0) return;
+
+    let chosenIdx = -1;
+    for (let step = 0; step < cap; step++) {
+      const idx = (pool.cursor + step) % cap;
+      const candidate = pool.slots[idx];
+      if (candidate && !candidate.active) {
+        chosenIdx = idx;
+        break;
+      }
+    }
+    if (chosenIdx < 0) {
+      chosenIdx = pool.cursor % cap;
+    }
+    pool.cursor = (chosenIdx + 1) % cap;
+
+    const slot = pool.slots[chosenIdx];
+    if (!slot) return;
+
+    slot.active = true;
+    slot.position.set(cfg.x, cfg.y, cfg.z);
+    slot.velocity.set(cfg.vx, cfg.vy, cfg.vz);
+    slot.rotation.set(
+      this.nextRand() * Math.PI,
+      this.nextRand() * Math.PI,
+      this.nextRand() * Math.PI,
+    );
+    slot.spin.set(cfg.spinX, cfg.spinY, cfg.spinZ);
+    slot.gravity = cfg.gravity;
+    slot.age = 0;
+    slot.maxAge = Math.max(0.05, cfg.maxAge);
+    slot.startScale = cfg.startScale;
+    slot.endScale = cfg.endScale;
+    slot.baseScaleVec.set(cfg.sx, cfg.sy, cfg.sz);
+
+    this.dummyObj.position.copy(slot.position);
+    this.dummyObj.rotation.copy(slot.rotation);
+    this.dummyObj.scale.set(
+      cfg.sx * cfg.startScale,
+      cfg.sy * cfg.startScale,
+      cfg.sz * cfg.startScale,
+    );
+    this.dummyObj.updateMatrix();
+    pool.mesh.setMatrixAt(chosenIdx, this.dummyObj.matrix);
+    this.scratchColor.setHex(cfg.colorHex);
+    pool.mesh.setColorAt(chosenIdx, this.scratchColor);
+    pool.mesh.instanceMatrix.needsUpdate = true;
+    if (pool.mesh.instanceColor) {
+      pool.mesh.instanceColor.needsUpdate = true;
+    }
+  }
+
+  private updateInstancedPool(pool: InstancedParticlePool, dtSec: number): void {
+    let dirty = false;
+    for (let i = 0; i < pool.slots.length; i++) {
+      const slot = pool.slots[i];
+      if (!slot || !slot.active) {
+        continue;
+      }
+      slot.age += dtSec;
+      if (slot.age >= slot.maxAge) {
+        slot.active = false;
+        pool.mesh.setMatrixAt(i, ZERO_MATRIX);
+        dirty = true;
+        continue;
+      }
+
+      const frac = slot.age / slot.maxAge;
+      slot.velocity.y -= slot.gravity * dtSec;
+      slot.position.addScaledVector(slot.velocity, dtSec);
+      slot.rotation.x += slot.spin.x * dtSec;
+      slot.rotation.y += slot.spin.y * dtSec;
+      slot.rotation.z += slot.spin.z * dtSec;
+
+      const s = slot.startScale + (slot.endScale - slot.startScale) * frac;
+      this.dummyObj.position.copy(slot.position);
+      this.dummyObj.rotation.copy(slot.rotation);
+      this.dummyObj.scale.set(
+        slot.baseScaleVec.x * s,
+        slot.baseScaleVec.y * s,
+        slot.baseScaleVec.z * s,
+      );
+      this.dummyObj.updateMatrix();
+      pool.mesh.setMatrixAt(i, this.dummyObj.matrix);
+      dirty = true;
+    }
+
+    if (dirty) {
+      pool.mesh.instanceMatrix.needsUpdate = true;
+    }
+  }
+
+  private emitSpriteFromPool(
+    pool: SpriteParticlePool,
+    cfg: {
+      x: number;
+      y: number;
+      z: number;
+      vx: number;
+      vy: number;
+      vz: number;
+      gravity: number;
+      maxAge: number;
+      startScale: number;
+      endScale: number;
+      colorHex: number;
+      baseOpacity: number;
+      rotationSpeed: number;
+    },
+  ): void {
+    const cap = pool.slots.length;
+    if (cap === 0) return;
+
+    let chosenIdx = -1;
+    for (let step = 0; step < cap; step++) {
+      const idx = (pool.cursor + step) % cap;
+      const candidate = pool.slots[idx];
+      if (candidate && !candidate.active) {
+        chosenIdx = idx;
+        break;
+      }
+    }
+    if (chosenIdx < 0) {
+      chosenIdx = pool.cursor % cap;
+    }
+    pool.cursor = (chosenIdx + 1) % cap;
+
+    const slot = pool.slots[chosenIdx];
+    if (!slot) return;
+
+    slot.active = true;
+    slot.velocity.set(cfg.vx, cfg.vy, cfg.vz);
+    slot.gravity = cfg.gravity;
+    slot.age = 0;
+    slot.maxAge = Math.max(0.05, cfg.maxAge);
+    slot.startScale = cfg.startScale;
+    slot.endScale = cfg.endScale;
+    slot.baseOpacity = cfg.baseOpacity;
+    slot.rotationSpeed = cfg.rotationSpeed;
+
+    slot.sprite.visible = true;
+    slot.sprite.position.set(cfg.x, cfg.y, cfg.z);
+    slot.sprite.scale.set(cfg.startScale, cfg.startScale, 1);
+    slot.sprite.material.color.setHex(cfg.colorHex);
+    slot.sprite.material.opacity = cfg.baseOpacity;
+    slot.sprite.material.rotation = this.nextRand() * Math.PI * 2;
+  }
+
+  private updateSpritePool(pool: SpriteParticlePool, dtSec: number): void {
+    for (const slot of pool.slots) {
+      if (!slot.active) {
+        continue;
+      }
+      slot.age += dtSec;
+      if (slot.age >= slot.maxAge) {
+        slot.active = false;
+        slot.sprite.visible = false;
+        slot.sprite.material.opacity = 0;
+        continue;
+      }
+
+      const frac = slot.age / slot.maxAge;
+      slot.velocity.y -= slot.gravity * dtSec;
+      slot.sprite.position.addScaledVector(slot.velocity, dtSec);
+      const s = slot.startScale + (slot.endScale - slot.startScale) * frac;
+      slot.sprite.scale.set(s, s, 1);
+      slot.sprite.material.rotation += slot.rotationSpeed * dtSec;
+      // Smooth ease-out alpha decay
+      const fade = (1.0 - frac) * (1.0 - frac * 0.35);
+      slot.sprite.material.opacity = Math.max(0, slot.baseOpacity * fade);
+    }
   }
 
   private spawnProjectileSpark(position: Vec3, color: number): void {
-    const sparkMat = new THREE.MeshBasicMaterial({
-      color,
-      transparent: true,
-      opacity: 0.9,
-      depthWrite: false,
-    });
-    const sparkMesh = new THREE.Mesh(this.sharedGeos.spark, sparkMat);
-    sparkMesh.position.set(
-      position.x + (this.nextRand() - 0.5) * 0.12,
-      position.y + (this.nextRand() - 0.5) * 0.12,
-      position.z + (this.nextRand() - 0.5) * 0.12,
-    );
-    this.particleGroup.add(sparkMesh);
-    this.particles.push({
-      mesh: sparkMesh,
-      material: sparkMat,
-      velocity: new THREE.Vector3(
-        (this.nextRand() - 0.5) * 0.8,
-        0.4 + this.nextRand() * 0.6,
-        (this.nextRand() - 0.5) * 0.8,
-      ),
-      spin: new THREE.Vector3(4, 5, 3),
+    this.trailEmitCounter += 1;
+
+    // Pooled glowing comet spark shard
+    this.emitInstanceFromPool(this.sparkPool, {
+      x: position.x + (this.nextRand() - 0.5) * 0.12,
+      y: position.y + (this.nextRand() - 0.5) * 0.12,
+      z: position.z + (this.nextRand() - 0.5) * 0.12,
+      vx: (this.nextRand() - 0.5) * 0.8,
+      vy: 0.35 + this.nextRand() * 0.55,
+      vz: (this.nextRand() - 0.5) * 0.8,
+      spinX: 4,
+      spinY: 5,
+      spinZ: 3,
       gravity: 1.5,
-      age: 0,
       maxAge: 0.34,
-      startScale: 1.0,
+      startScale: 1.05,
       endScale: 0.1,
-      baseScaleVec: new THREE.Vector3(1, 1, 1),
-      baseOpacity: 0.9,
-      kind: "spark",
+      sx: 1,
+      sy: 1,
+      sz: 1,
+      colorHex: color,
     });
+
+    // Soft additive glowing comet trail mote
+    this.emitSpriteFromPool(this.glowSpritePool, {
+      x: position.x,
+      y: position.y,
+      z: position.z,
+      vx: (this.nextRand() - 0.5) * 0.3,
+      vy: 0.15,
+      vz: (this.nextRand() - 0.5) * 0.3,
+      gravity: 0,
+      maxAge: 0.24,
+      startScale: 0.72,
+      endScale: 0.16,
+      colorHex: color,
+      baseOpacity: 0.65,
+      rotationSpeed: 0,
+    });
+
+    // Gentle wispy smoke puff on alternating trail emissions
+    if (this.trailEmitCounter % 2 === 0) {
+      this.emitSpriteFromPool(this.smokeSpritePool, {
+        x: position.x,
+        y: position.y,
+        z: position.z,
+        vx: (this.nextRand() - 0.5) * 0.4,
+        vy: 0.45 + this.nextRand() * 0.35,
+        vz: (this.nextRand() - 0.5) * 0.4,
+        gravity: -0.2,
+        maxAge: 0.48,
+        startScale: 0.42,
+        endScale: 1.15,
+        colorHex: 0xf6f2ec,
+        baseOpacity: 0.34,
+        rotationSpeed: (this.nextRand() - 0.5) * 0.9,
+      });
+    }
   }
 
   private createEvoPodVisual(
@@ -1393,7 +2010,28 @@ export class VfxSystem {
     beaconMesh.position.y = 1.35;
     group.add(beaconMesh);
 
-    return { group, podCore, parachuteGroup, beaconMesh };
+    // Subtle luminous additive ground light pool matching crate color (evo_dna cyan, med_berry emerald, super_gadget gold)
+    const groundPoolMesh = new THREE.Mesh(
+      new THREE.CircleGeometry(1.55, 24),
+      new THREE.MeshBasicMaterial({
+        map: this.glowTexture,
+        color: palette.beacon,
+        transparent: true,
+        opacity: 0.38,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+        polygonOffset: true,
+        polygonOffsetFactor: -2,
+      }),
+    );
+    groundPoolMesh.name = "evo_pod_ground_pool";
+    groundPoolMesh.rotation.x = -Math.PI * 0.5;
+    groundPoolMesh.position.y = 0.06;
+    groundPoolMesh.castShadow = false;
+    groundPoolMesh.receiveShadow = false;
+    group.add(groundPoolMesh);
+
+    return { group, podCore, parachuteGroup, beaconMesh, groundPoolMesh };
   }
 
   private nextRand(): number {

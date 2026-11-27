@@ -50,13 +50,25 @@ function disposeTemplateTree(root: THREE.Object3D): void {
   });
 }
 
-function tuneGlbMaterial(material: THREE.Material): void {
+function tuneGlbMaterial(material: THREE.Material, isCritter: boolean): void {
   if (material instanceof THREE.MeshStandardMaterial) {
     material.roughness = Math.max(0.48, Math.min(0.92, material.roughness));
     material.metalness = Math.min(0.22, Math.max(0.0, material.metalness));
-    material.envMapIntensity = 0.85;
+    material.envMapIntensity = isCritter ? 1.05 : 0.95;
     if (material.map) {
       material.map.colorSpace = THREE.SRGBColorSpace;
+    }
+    if (isCritter) {
+      material.customProgramCacheKey = (): string => "critter_glb_rim_v1";
+      material.onBeforeCompile = (shader): void => {
+        shader.fragmentShader = shader.fragmentShader.replace(
+          "#include <opaque_fragment>",
+          `float rimDot = clamp( 1.0 - max( dot( normalize( normal ), normalize( vViewPosition ) ), 0.0 ), 0.0, 1.0 );
+float rim = pow( rimDot, 3.1 ) * 0.24;
+outgoingLight += vec3( 1.0, 0.95, 0.84 ) * rim;
+#include <opaque_fragment>`,
+        );
+      };
     }
   }
 }
@@ -93,10 +105,10 @@ export function normalizeGlbModel(
       obj.frustumCulled = true;
       if (Array.isArray(obj.material)) {
         for (const mat of obj.material) {
-          tuneGlbMaterial(mat);
+          tuneGlbMaterial(mat, true);
         }
       } else {
-        tuneGlbMaterial(obj.material);
+        tuneGlbMaterial(obj.material, true);
       }
     }
   });
@@ -207,10 +219,10 @@ export function normalizePropGlbModel(
       obj.frustumCulled = true;
       if (Array.isArray(obj.material)) {
         for (const mat of obj.material) {
-          tuneGlbMaterial(mat);
+          tuneGlbMaterial(mat, false);
         }
       } else {
-        tuneGlbMaterial(obj.material);
+        tuneGlbMaterial(obj.material, false);
       }
     }
   });

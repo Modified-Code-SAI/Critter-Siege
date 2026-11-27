@@ -1,5 +1,10 @@
 import * as THREE from "three";
-import { SDF_DIMS } from "@critter/shared";
+import {
+  SDF_DIMS,
+  type SdfWorld,
+  type ThemeId,
+  type Vec3,
+} from "@critter/shared";
 
 const DEFAULT_WORLD_SPAN_X = SDF_DIMS.nx * SDF_DIMS.voxelSize;
 const DEFAULT_WORLD_SPAN_Y = SDF_DIMS.ny * SDF_DIMS.voxelSize;
@@ -17,6 +22,9 @@ const GRAND_FOG_DENSITY = 0.0022;
 const BASE_OCEAN_SPAN = 420;
 const BASE_CLOUD_RADIUS = DEFAULT_WORLD_SPAN_X * 1.12;
 const BASE_SKY_RADIUS = Math.max(260, DEFAULT_WORLD_HALF * 9.5);
+const SHADOW_MAP_SIZE = 2048;
+const GRAND_FOCUS_SHADOW_HALF = 46.0;
+const SHORELINE_TEX_RES = 128;
 
 /** Dynamically scaled visual parameters computed for a 60m Duel or 144m Grand world. */
 export interface WorldSceneMetrics {
@@ -27,6 +35,155 @@ export interface WorldSceneMetrics {
   cloudRadius: number;
   isletMinDist: number;
   isletMaxDist: number;
+}
+
+/** Curated sunlit sky, lighting, cloud, distant-islet, and ocean palette tailored per biome. */
+export interface ThemeAtmosphere {
+  theme: ThemeId;
+  skyZenith: number;
+  skyMid: number;
+  skyHorizon: number;
+  oceanBounce: number;
+  sunColor: number;
+  sunIntensity: number;
+  sunOffset: { x: number; y: number; z: number };
+  sunCoreColor: number;
+  sunHaloColor: number;
+  hemiSkyColor: number;
+  hemiGroundColor: number;
+  hemiIntensity: number;
+  fillColor: number;
+  fillIntensity: number;
+  fogColor: number;
+  cloudHighlight: number;
+  cloudShadow: number;
+  oceanShallow: number;
+  oceanMid: number;
+  oceanDeep: number;
+  oceanFoam: number;
+  isletRockColor: number;
+  isletGrassColor: number;
+  isletPineColor: number;
+}
+
+const THEME_ATMOSPHERES: Readonly<Record<ThemeId, ThemeAtmosphere>> = {
+  emerald_spire: {
+    theme: "emerald_spire",
+    skyZenith: 0x1a72d4,
+    skyMid: 0x6ec6fa,
+    skyHorizon: 0xffe9c4,
+    oceanBounce: 0x1a95b8,
+    sunColor: 0xffe6be,
+    sunIntensity: 2.48,
+    sunOffset: { x: 1.25, y: 1.65, z: 0.95 },
+    sunCoreColor: 0xfff8de,
+    sunHaloColor: 0xffd27a,
+    hemiSkyColor: 0x9ce0ff,
+    hemiGroundColor: 0x2f5a6e,
+    hemiIntensity: 0.36,
+    fillColor: 0x4ca8e8,
+    fillIntensity: 0.2,
+    fogColor: 0xdbeeff,
+    cloudHighlight: 0xfff8e6,
+    cloudShadow: 0x7ca2cc,
+    oceanShallow: 0x1ed8d4,
+    oceanMid: 0x0c88ba,
+    oceanDeep: 0x0a3d80,
+    oceanFoam: 0xefffff,
+    isletRockColor: 0x8b7e78,
+    isletGrassColor: 0x5c9c64,
+    isletPineColor: 0x3b7652,
+  },
+  canyon_arch: {
+    theme: "canyon_arch",
+    skyZenith: 0x225eb8,
+    skyMid: 0x76b4ea,
+    skyHorizon: 0xffd49e,
+    oceanBounce: 0x26859b,
+    sunColor: 0xffd096,
+    sunIntensity: 2.58,
+    sunOffset: { x: 1.48, y: 1.32, z: 0.78 },
+    sunCoreColor: 0xfff2d2,
+    sunHaloColor: 0xffb35c,
+    hemiSkyColor: 0xb6dbff,
+    hemiGroundColor: 0x484f72,
+    hemiIntensity: 0.34,
+    fillColor: 0x5c9ce0,
+    fillIntensity: 0.2,
+    fogColor: 0xf4dec8,
+    cloudHighlight: 0xffeed2,
+    cloudShadow: 0x8984b0,
+    oceanShallow: 0x22c8bd,
+    oceanMid: 0x107a9e,
+    oceanDeep: 0x0c3c6b,
+    oceanFoam: 0xfff9ef,
+    isletRockColor: 0xa67456,
+    isletGrassColor: 0x7a9652,
+    isletPineColor: 0x486e46,
+  },
+  twin_pillars: {
+    theme: "twin_pillars",
+    skyZenith: 0x1465c8,
+    skyMid: 0x5ec9f5,
+    skyHorizon: 0xdff6ff,
+    oceanBounce: 0x1999bd,
+    sunColor: 0xffeed2,
+    sunIntensity: 2.46,
+    sunOffset: { x: 1.05, y: 1.82, z: 1.12 },
+    sunCoreColor: 0xfffdf0,
+    sunHaloColor: 0xffe49c,
+    hemiSkyColor: 0x94e0ff,
+    hemiGroundColor: 0x295970,
+    hemiIntensity: 0.38,
+    fillColor: 0x52b6ec,
+    fillIntensity: 0.18,
+    fogColor: 0xd6f0ff,
+    cloudHighlight: 0xfff9ea,
+    cloudShadow: 0x739fc8,
+    oceanShallow: 0x20e0da,
+    oceanMid: 0x0b90c6,
+    oceanDeep: 0x08408a,
+    oceanFoam: 0xf2ffff,
+    isletRockColor: 0x828488,
+    isletGrassColor: 0x54a068,
+    isletPineColor: 0x347458,
+  },
+  mountain_spine: {
+    theme: "mountain_spine",
+    skyZenith: 0x1b4fa8,
+    skyMid: 0x6eaee6,
+    skyHorizon: 0xe6effa,
+    oceanBounce: 0x24739e,
+    sunColor: 0xffeccd,
+    sunIntensity: 2.4,
+    sunOffset: { x: 1.18, y: 1.55, z: -1.05 },
+    sunCoreColor: 0xfffbee,
+    sunHaloColor: 0xffdfa0,
+    hemiSkyColor: 0xaed8ff,
+    hemiGroundColor: 0x354e70,
+    hemiIntensity: 0.4,
+    fillColor: 0x6ba6ea,
+    fillIntensity: 0.22,
+    fogColor: 0xdce8f6,
+    cloudHighlight: 0xfff8ec,
+    cloudShadow: 0x7892bf,
+    oceanShallow: 0x2cc2c8,
+    oceanMid: 0x1477ab,
+    oceanDeep: 0x0a3469,
+    oceanFoam: 0xf0f9ff,
+    isletRockColor: 0x737d8c,
+    isletGrassColor: 0x4f8c66,
+    isletPineColor: 0x2c5e4b,
+  },
+};
+
+/** Return the curated sunlit atmosphere palette for any island biome theme. */
+export function getThemeAtmosphere(theme: ThemeId): ThemeAtmosphere {
+  const palette = THEME_ATMOSPHERES[theme] ?? THEME_ATMOSPHERES.emerald_spire;
+  return {
+    ...palette,
+    sunOffset: { ...palette.sunOffset },
+  };
 }
 
 /** Compute ocean, sun-shadow, fog, cloud, and distant-islet metrics for any world width. */
@@ -42,6 +199,110 @@ export function computeWorldSceneMetrics(worldSize: number): WorldSceneMetrics {
     isletMinDist: safeSize * 1.15,
     isletMaxDist: safeSize * 1.6,
   };
+}
+
+function clamp01(value: number): number {
+  return value < 0 ? 0 : value > 1 ? 1 : value;
+}
+
+/**
+ * Sample the SDF waterline and submerged shelf into a smoothed RGBA lookup buffer
+ * (`R` = shoreline proximity: 0 inside solid rock, ~0.18 at coastline, 1.0 at >= 9m open water;
+ *  `G` = submerged seabed proximity for turquoise cove shallows).
+ */
+export function buildShorelineDepthData(
+  world: SdfWorld,
+  waterLevel: number,
+  resolution = SHORELINE_TEX_RES,
+): Uint8Array {
+  const res = Math.max(
+    4,
+    Math.min(512, Math.floor(Number.isFinite(resolution) ? resolution : SHORELINE_TEX_RES)),
+  );
+  const safeWaterY = Number.isFinite(waterLevel) ? waterLevel : DEFAULT_WATER_LEVEL;
+  const worldW = Math.max(1, world.worldWidth);
+  const worldD = Math.max(1, world.worldDepth);
+  const vs = Math.max(0.05, world.dims.voxelSize);
+
+  // Stay inside the non-border interior of the SDF voxel grid so BORDER_AIR_MIN (1.5m)
+  // never clamps true open-ocean distances down to 1.5m near world edges or the keel floor.
+  const minX = vs * 2.0;
+  const maxX = Math.max(minX, (world.dims.nx - 3.001) * vs);
+  const minZ = vs * 2.0;
+  const maxZ = Math.max(minZ, (world.dims.nz - 3.001) * vs);
+  const minY = vs * 2.0;
+  const maxY = Math.max(minY, (world.dims.ny - 3.001) * vs);
+
+  const ySurf = Math.max(minY, Math.min(maxY, safeWaterY + 0.15));
+  const ySub = Math.max(minY, Math.min(maxY, safeWaterY - 1.1));
+
+  const texelCount = res * res;
+  const rawR = new Float32Array(texelCount);
+  const rawG = new Float32Array(texelCount);
+
+  for (let iz = 0; iz < res; iz++) {
+    const wz = ((iz + 0.5) / res) * worldD;
+    const sz = Math.max(minZ, Math.min(maxZ, wz));
+    const dzEdge = wz - sz;
+    const rowOffset = iz * res;
+
+    for (let ix = 0; ix < res; ix++) {
+      const wx = ((ix + 0.5) / res) * worldW;
+      const sx = Math.max(minX, Math.min(maxX, wx));
+      const dxEdge = wx - sx;
+      const edgeDist = Math.hypot(dxEdge, dzEdge);
+
+      const dSurf = world.sample(sx, ySurf, sz) + edgeDist;
+      const dSub = world.sample(sx, ySub, sz) + edgeDist;
+      const dShore = Math.min(dSurf, dSub);
+
+      // Encode R: -2m (deep solid) -> 0.0, 0m (coastline) -> 2/11 (~0.182), +9m (open sea) -> 1.0
+      rawR[rowOffset + ix] = clamp01((dShore + 2.0) / 11.0);
+      // Encode G: submerged shelf / cove shallows proximity (-2m -> 0.0, +11m -> 1.0)
+      rawG[rowOffset + ix] = clamp01((dSub + 2.0) / 13.0);
+    }
+  }
+
+  // Fast 1-pass separable 3-tap box blur (horizontal then vertical) for smooth coastal foam
+  const tmpR = new Float32Array(texelCount);
+  const tmpG = new Float32Array(texelCount);
+  for (let iz = 0; iz < res; iz++) {
+    const rowOffset = iz * res;
+    for (let ix = 0; ix < res; ix++) {
+      const left = ix > 0 ? ix - 1 : 0;
+      const right = ix + 1 < res ? ix + 1 : res - 1;
+      tmpR[rowOffset + ix] =
+        ((rawR[rowOffset + left] ?? 1) +
+          (rawR[rowOffset + ix] ?? 1) +
+          (rawR[rowOffset + right] ?? 1)) /
+        3;
+      tmpG[rowOffset + ix] =
+        ((rawG[rowOffset + left] ?? 1) +
+          (rawG[rowOffset + ix] ?? 1) +
+          (rawG[rowOffset + right] ?? 1)) /
+        3;
+    }
+  }
+
+  const rgba = new Uint8Array(texelCount * 4);
+  for (let iz = 0; iz < res; iz++) {
+    const up = (iz > 0 ? iz - 1 : 0) * res;
+    const mid = iz * res;
+    const down = (iz + 1 < res ? iz + 1 : res - 1) * res;
+    for (let ix = 0; ix < res; ix++) {
+      const rBlur =
+        ((tmpR[up + ix] ?? 1) + (tmpR[mid + ix] ?? 1) + (tmpR[down + ix] ?? 1)) / 3;
+      const gBlur =
+        ((tmpG[up + ix] ?? 1) + (tmpG[mid + ix] ?? 1) + (tmpG[down + ix] ?? 1)) / 3;
+      const outIdx = (mid + ix) * 4;
+      rgba[outIdx] = Math.round(clamp01(rBlur) * 255);
+      rgba[outIdx + 1] = Math.round(clamp01(gBlur) * 255);
+      rgba[outIdx + 2] = 255;
+      rgba[outIdx + 3] = 255;
+    }
+  }
+
+  return rgba;
 }
 
 interface CloudCluster {
@@ -75,10 +336,12 @@ uniform vec3 uMidSkyColor;
 uniform vec3 uHorizonColor;
 uniform vec3 uOceanBounceColor;
 uniform vec3 uSunDir;
+uniform float uTime;
 varying vec3 vWorldDir;
 
 void main() {
   vec3 dir = normalize(vWorldDir);
+  vec3 sunDir = normalize(uSunDir);
   float h = dir.y;
 
   vec3 col;
@@ -92,13 +355,60 @@ void main() {
     col = mix(uHorizonColor, uOceanBounceColor, belowMix);
   }
 
-  float sunDot = max(dot(dir, normalize(uSunDir)), 0.0);
-  float warmGlow = pow(sunDot, 5.0) * 0.16;
-  float sunHalo = pow(sunDot, 18.0) * 0.36;
-  float sunCore = smoothstep(0.9965, 0.9993, sunDot) * 1.1;
-  col += vec3(1.0, 0.89, 0.68) * warmGlow;
-  col += vec3(1.0, 0.96, 0.84) * (sunHalo + sunCore);
+  // Horizon Mie forward-scattering golden glow + sun corona & crisp disc
+  float sunDot = max(dot(dir, sunDir), 0.0);
+  float horizonBelt = pow(1.0 - clamp(abs(h), 0.0, 1.0), 4.2);
+  float mieScatter = pow(sunDot, 2.6) * horizonBelt * 0.34;
+  float warmGlow = pow(sunDot, 5.0) * 0.18;
+  float sunHalo = pow(sunDot, 18.0) * 0.38;
+  float sunCore = smoothstep(0.9965, 0.9993, sunDot) * 1.15;
+  col += mix(uHorizonColor, vec3(1.0, 0.88, 0.66), 0.55) * (mieScatter + warmGlow);
+  col += vec3(1.0, 0.96, 0.86) * (sunHalo + sunCore);
 
+  // Subtle high-altitude wispy sunlit cirrus streaks drifting across upper sky
+  if (h > 0.06) {
+    vec2 skyUv = dir.xz / (h + 0.24);
+    vec2 driftA = skyUv * vec2(1.45, 3.1) + vec2(uTime * 0.012, -uTime * 0.004);
+    vec2 driftB = skyUv * vec2(2.7, 5.4) + vec2(-uTime * 0.008, uTime * 0.006);
+    float waveA = sin(driftA.x * 2.1 + sin(driftA.y * 1.6)) * cos(driftA.y * 1.35 - driftA.x * 0.5);
+    float waveB = sin(driftB.x * 1.9 - cos(driftB.y * 1.8)) * 0.5 + 0.5;
+    float cirrus = smoothstep(0.32, 0.86, waveA * 0.5 + 0.5) * smoothstep(0.25, 0.9, waveB);
+    float altMask = smoothstep(0.06, 0.24, h) * smoothstep(0.94, 0.42, h);
+    vec3 cirrusCol = mix(vec3(0.95, 0.97, 1.0), vec3(1.0, 0.94, 0.82), pow(sunDot, 2.0));
+    col = mix(col, cirrusCol, cirrus * altMask * 0.24);
+  }
+
+  gl_FragColor = vec4(col, 1.0);
+}
+`;
+
+const IBL_SKY_FRAGMENT_SHADER = `
+uniform vec3 uZenithColor;
+uniform vec3 uMidSkyColor;
+uniform vec3 uHorizonColor;
+uniform vec3 uOceanBounceColor;
+uniform vec3 uGroundBounceColor;
+uniform vec3 uSunDir;
+varying vec3 vWorldDir;
+
+void main() {
+  vec3 dir = normalize(vWorldDir);
+  float h = dir.y;
+
+  vec3 col;
+  if (h >= 0.0) {
+    float lowMix = smoothstep(0.0, 0.28, h);
+    float highMix = smoothstep(0.22, 0.88, h);
+    col = mix(uHorizonColor, uMidSkyColor, lowMix);
+    col = mix(col, uZenithColor, highMix);
+  } else {
+    float belowMix = smoothstep(0.0, -0.45, h);
+    vec3 bounceCol = mix(uOceanBounceColor, uGroundBounceColor, 0.45);
+    col = mix(uHorizonColor * 0.88, bounceCol, belowMix);
+  }
+
+  float sunDot = max(dot(dir, normalize(uSunDir)), 0.0);
+  col += vec3(1.0, 0.93, 0.78) * (pow(sunDot, 8.0) * 0.42 + pow(sunDot, 48.0) * 0.9);
   gl_FragColor = vec4(col, 1.0);
 }
 `;
@@ -139,7 +449,7 @@ void main() {
 }
 `;
 
-/** Custom GLSL fragment shader for turquoise-to-cobalt gradient, sunlit shimmer, and surf foam. */
+/** Custom GLSL fragment shader for SDF-hugging turquoise lagoon shallows, micro-ripple sparkle, and coastal surf foam. */
 export const OCEAN_FRAGMENT_SHADER = `
 uniform float uTime;
 uniform vec3 uSunDir;
@@ -151,66 +461,131 @@ uniform vec3 uDeepColor;
 uniform vec3 uFoamColor;
 uniform vec3 uFogColor;
 uniform float uFogDensity;
+uniform sampler2D uShoreTex;
+uniform vec2 uWorldOrigin;
+uniform vec2 uWorldSpan;
+uniform float uHasShoreTex;
 
 varying vec3 vWorldPos;
 varying vec3 vWaveNormal;
 varying float vWaveCrest;
 
 void main() {
-  vec3 N = normalize(vWaveNormal);
   vec3 V = normalize(cameraPosition - vWorldPos);
   vec3 L = normalize(uSunDir);
+  float camDist = length(cameraPosition - vWorldPos);
 
-  // Radial turquoise lagoon -> rich cerulean -> deep cobalt ocean gradient scaled to arena radius
+  // Dual-octave animated micro-ripple normal perturbation for crisp sparkling sun glints
+  float rippleFade = 1.0 - smoothstep(38.0, 165.0, camDist);
+  float r1x = cos(vWorldPos.x * 1.55 + vWorldPos.z * 0.52 + uTime * 2.25) * 0.048;
+  float r1z = sin(vWorldPos.z * 1.62 - vWorldPos.x * 0.44 - uTime * 1.98) * 0.048;
+  float r2x = cos(vWorldPos.x * 3.15 - vWorldPos.z * 2.15 - uTime * 3.25) * 0.026;
+  float r2z = sin(vWorldPos.z * 2.95 + vWorldPos.x * 2.35 + uTime * 2.95) * 0.026;
+  vec3 N = normalize(vWaveNormal + vec3((r1x + r2x) * rippleFade, 0.0, (r1z + r2z) * rippleFade));
+
+  // Sample SDF shoreline proximity texture (falling back cleanly to radial gradient when unavailable)
   float distFromCenter = length(vWorldPos.xz - uIslandCenter);
   float normDist = distFromCenter / max(0.5, uIslandScale);
-  float shallowToMid = smoothstep(14.0, 42.0, normDist);
+  float radialShallowToMid = smoothstep(14.0, 42.0, normDist);
   float midToDeep = smoothstep(38.0, 115.0, normDist);
+
+  float useSdf = step(0.5, uHasShoreTex);
+  vec2 shoreUv = (vWorldPos.xz - uWorldOrigin) / max(vec2(1.0), uWorldSpan);
+  float uvFade =
+    smoothstep(0.0, 0.035, shoreUv.x) *
+    smoothstep(1.0, 0.965, shoreUv.x) *
+    smoothstep(0.0, 0.035, shoreUv.y) *
+    smoothstep(1.0, 0.965, shoreUv.y);
+  vec4 shoreTexel = texture2D(uShoreTex, clamp(shoreUv, 0.004, 0.996));
+  float shoreProx = mix(1.0, shoreTexel.r, uvFade);
+  float seabedProx = mix(1.0, shoreTexel.g, uvFade);
+
+  float sdfShallowToMid = smoothstep(0.24, 0.88, min(shoreProx, seabedProx));
+  float shallowToMid = mix(
+    radialShallowToMid,
+    clamp(sdfShallowToMid * 0.86 + radialShallowToMid * 0.22, 0.0, 1.0),
+    useSdf
+  );
+
   vec3 waterCol = mix(uShallowColor, uMidColor, shallowToMid);
   waterCol = mix(waterCol, uDeepColor, midToDeep);
 
-  // Stylized animated caustic shimmer in shallow archipelago channels
+  // Stylized animated caustic shimmer strictly restricted to shallow lagoon waters near the island
   float causticA = sin(vWorldPos.x * 0.55 + uTime * 1.6 + sin(vWorldPos.z * 0.42));
   float causticB = cos(vWorldPos.z * 0.52 - uTime * 1.35 + cos(vWorldPos.x * 0.37));
   float caustic = smoothstep(0.45, 0.98, (causticA * causticB) * 0.5 + 0.5);
-  waterCol += vec3(0.16, 0.32, 0.30) * caustic * (1.0 - shallowToMid * 0.72);
+  float foamRipple = (causticA * 0.55 + causticB * 0.45) * 0.028;
+  float shoreDist = shoreProx + foamRipple;
+  float causticShallowMask = mix(
+    1.0 - shallowToMid,
+    1.0 - smoothstep(0.15, 0.55, shoreDist),
+    useSdf
+  );
+  waterCol += vec3(0.16, 0.32, 0.30) * caustic * causticShallowMask;
 
   // Subtle wave-crest turquoise brightening
-  waterCol += vec3(0.05, 0.14, 0.14) * smoothstep(0.55, 1.0, vWaveCrest);
+  waterCol += vec3(0.04, 0.11, 0.12) * smoothstep(0.58, 1.0, vWaveCrest);
 
-  // Sky reflection Fresnel + golden sunlit specular sparkle
-  float fresnel = pow(1.0 - max(dot(N, V), 0.0), 3.4);
-  waterCol = mix(waterCol, vec3(0.68, 0.90, 1.0), fresnel * 0.34);
+  // Sky reflection Fresnel + golden sunlit specular sparkle driven by micro-rippled normal
+  float fresnel = pow(clamp(1.0 - max(dot(N, V), 0.0), 0.0, 1.0), 3.4);
+  waterCol = mix(waterCol, mix(uFogColor, vec3(0.72, 0.92, 1.0), 0.5), fresnel * 0.34);
 
   vec3 H = normalize(L + V);
-  float specBroad = pow(max(dot(N, H), 0.0), 42.0) * 0.45;
-  float specGlint = pow(max(dot(N, H), 0.0), 190.0) * 1.15;
+  float specBroad = pow(max(dot(N, H), 0.0), 52.0) * 0.42;
+  float specGlint = pow(max(dot(N, H), 0.0), 240.0) * 1.45;
   waterCol += vec3(1.0, 0.95, 0.80) * (specBroad + specGlint);
 
-  // Animated coastal surf foam rings & lagoon shoreline froth
-  float shoreWave = sin(distFromCenter * 0.75 - uTime * 2.2 + causticA * 1.4);
-  float innerLagoonFoam = smoothstep(0.74, 0.96, shoreWave) *
+  // Coastal surf foam: exact SDF-hugging multi-wave surf when available, radial fallback otherwise
+  float shoreWaveRadial = sin(distFromCenter * 0.75 - uTime * 2.2 + causticA * 1.4);
+  float radialLagoonFoam = smoothstep(0.74, 0.96, shoreWaveRadial) *
     (1.0 - smoothstep(16.0, 36.0, normDist)) * 0.38;
-  float outerSurfBand = exp(-pow((normDist - 26.5) / 5.5, 2.0)) *
+  float radialSurfDelta = (normDist - 26.5) / 5.5;
+  float radialSurfBand = exp(-(radialSurfDelta * radialSurfDelta)) *
     smoothstep(0.25, 0.9, sin(distFromCenter * 1.1 - uTime * 2.6 + causticB * 1.8) * 0.5 + 0.5);
-  float crestFroth = smoothstep(0.84, 1.0, vWaveCrest) * 0.22;
-  float foamMask = clamp(innerLagoonFoam + outerSurfBand * 0.52 + crestFroth, 0.0, 0.88);
+  float radialFoam = radialLagoonFoam + radialSurfBand * 0.52;
+
+  float contactFoam = (1.0 - smoothstep(0.19, 0.31, shoreDist)) * smoothstep(0.04, 0.16, shoreDist);
+  float surfWave1 = smoothstep(0.56, 0.94, sin(shoreProx * 29.0 + uTime * 2.7 + causticA * 1.35) * 0.5 + 0.5) *
+    smoothstep(0.12, 0.24, shoreProx) * (1.0 - smoothstep(0.32, 0.56, shoreProx));
+  float surfWave2 = smoothstep(0.64, 0.96, sin(shoreProx * 18.0 + uTime * 1.95 - causticB * 1.55) * 0.5 + 0.5) *
+    smoothstep(0.26, 0.40, shoreProx) * (1.0 - smoothstep(0.52, 0.76, shoreProx)) * 0.55;
+  float sdfFoam = contactFoam * 0.85 + surfWave1 * 0.62 + surfWave2 * 0.42;
+
+  float crestFroth = smoothstep(0.86, 1.0, vWaveCrest) * 0.12;
+  float foamMask = clamp(mix(radialFoam, sdfFoam, useSdf) + crestFroth, 0.0, 0.92);
   waterCol = mix(waterCol, uFoamColor, foamMask);
 
-  // Exponential golden-hour distance fog matching scene.fog
-  float camDist = length(cameraPosition - vWorldPos);
-  float fogFactor = 1.0 - exp(-pow(camDist * uFogDensity, 2.0));
+  // Exponential atmospheric distance fog matching scene.fog
+  float fogDist = camDist * uFogDensity;
+  float fogFactor = 1.0 - exp(-(fogDist * fogDist));
   waterCol = mix(waterCol, uFogColor, clamp(fogFactor, 0.0, 1.0));
 
-  float alpha = mix(0.88, 0.98, clamp(shallowToMid + foamMask * 0.4, 0.0, 1.0));
+  // Translucent turquoise shoreline fade letting sunlit sandy coves peek beneath the shallows
+  float shoreAlpha = mix(0.72, 0.97, smoothstep(0.16, 0.55, shoreProx));
+  float radialAlpha = mix(0.88, 0.98, shallowToMid);
+  float baseAlpha = mix(radialAlpha, shoreAlpha, useSdf);
+  float alpha = clamp(mix(baseAlpha, 0.96, foamMask * 0.65), 0.70, 0.98);
   gl_FragColor = vec4(waterCol, alpha);
 }
 `;
+
+function createFallbackShorelineTexture(): THREE.DataTexture {
+  const data = new Uint8Array([255, 255, 255, 255]);
+  const tex = new THREE.DataTexture(data, 1, 1, THREE.RGBAFormat);
+  tex.wrapS = THREE.ClampToEdgeWrapping;
+  tex.wrapT = THREE.ClampToEdgeWrapping;
+  tex.magFilter = THREE.LinearFilter;
+  tex.minFilter = THREE.LinearFilter;
+  tex.generateMipmaps = false;
+  tex.needsUpdate = true;
+  return tex;
+}
 
 /** Construct the custom GLSL stylized ocean ShaderMaterial. */
 export function createOceanShaderMaterial(
   sunDir: THREE.Vector3,
 ): THREE.ShaderMaterial {
+  const fallbackShoreTex = createFallbackShorelineTexture();
   return new THREE.ShaderMaterial({
     vertexShader: OCEAN_VERTEX_SHADER,
     fragmentShader: OCEAN_FRAGMENT_SHADER,
@@ -223,39 +598,82 @@ export function createOceanShaderMaterial(
         value: new THREE.Vector2(DEFAULT_ISLAND_CENTER.x, DEFAULT_ISLAND_CENTER.z),
       },
       uIslandScale: { value: 1.0 },
-      uShallowColor: { value: new THREE.Color(0x1cd6d2) },
+      uShallowColor: { value: new THREE.Color(0x1ed8d4) },
       uMidColor: { value: new THREE.Color(0x0c88ba) },
       uDeepColor: { value: new THREE.Color(0x0a3d80) },
       uFoamColor: { value: new THREE.Color(0xefffff) },
       uFogColor: { value: new THREE.Color(FOG_COLOR_HEX) },
       uFogDensity: { value: DUEL_FOG_DENSITY },
+      uShoreTex: { value: fallbackShoreTex },
+      uWorldOrigin: { value: new THREE.Vector2(0, 0) },
+      uWorldSpan: {
+        value: new THREE.Vector2(DEFAULT_WORLD_SPAN_X, DEFAULT_WORLD_SPAN_Z),
+      },
+      uHasShoreTex: { value: 0.0 },
     },
   });
 }
 
-function disposeMaterial(material: THREE.Material | THREE.Material[]): void {
-  if (Array.isArray(material)) {
-    for (const item of material) {
-      item.dispose();
-    }
-    return;
-  }
-  material.dispose();
-}
-
 function disposeObjectTree(root: THREE.Object3D): void {
+  const geometries = new Set<THREE.BufferGeometry>();
+  const materials = new Set<THREE.Material>();
+
   root.traverse((obj) => {
     if (obj instanceof THREE.Mesh) {
-      obj.geometry.dispose();
-      disposeMaterial(obj.material);
+      geometries.add(obj.geometry);
+      if (Array.isArray(obj.material)) {
+        for (const item of obj.material) {
+          materials.add(item);
+        }
+      } else {
+        materials.add(obj.material);
+      }
     }
   });
+
+  for (const geo of geometries) {
+    geo.dispose();
+  }
+  for (const mat of materials) {
+    mat.dispose();
+  }
+}
+
+function bakeCloudPuffVertexColors(
+  geometry: THREE.SphereGeometry,
+  highlightHex: number,
+  shadowHex: number,
+): void {
+  const posAttr = geometry.getAttribute("position");
+  const count = posAttr.count;
+  const warmCreamLift = new THREE.Color(0xfff5db);
+  const coolIndigoTint = new THREE.Color(0x6180b8);
+  const topColor = new THREE.Color(highlightHex).lerp(warmCreamLift, 0.22);
+  const bottomColor = new THREE.Color(shadowHex).lerp(coolIndigoTint, 0.24);
+  const blended = new THREE.Color();
+
+  let colorAttr = geometry.getAttribute("color");
+  if (!(colorAttr instanceof THREE.BufferAttribute) || colorAttr.count !== count) {
+    colorAttr = new THREE.BufferAttribute(new Float32Array(count * 3), 3);
+    geometry.setAttribute("color", colorAttr);
+  }
+
+  for (let i = 0; i < count; i++) {
+    const ny = posAttr.getY(i);
+    const t = clamp01((ny + 1.0) * 0.5);
+    const smoothT = t * t * (3.0 - 2.0 * t);
+    const stylizedT = Math.pow(Math.max(smoothT, 0.001), 1.18);
+    blended.copy(bottomColor).lerp(topColor, stylizedT);
+    colorAttr.setXYZ(i, blended.r, blended.g, blended.b);
+  }
+  colorAttr.needsUpdate = true;
 }
 
 /**
- * Sunlit floating sky-island Three.js scene, golden-hour lighting rig (2048x2048 shadows),
- * sky-gradient dome with glowing sun orb, distant silhouette floating islets, drifting
- * sculpted cloud clusters, and custom GLSL animated stylized ocean with coastal surf foam.
+ * Sunlit floating sky-island Three.js scene with theme-tailored atmospheres, procedural
+ * PMREM sky-ground IBL, focus-snapped 2048x2048 soft shadows, animated cirrus sky dome,
+ * backlit vertex-colored cloud clusters, multi-tiered distant floating islets, and
+ * SDF-hugging custom GLSL stylized ocean with coastal surf foam.
  */
 export class WorldScene {
   public readonly scene: THREE.Scene;
@@ -265,27 +683,50 @@ export class WorldScene {
   private readonly hemiLight: THREE.HemisphereLight;
   private readonly fillLight: THREE.DirectionalLight;
   private readonly skyDome: THREE.Mesh;
+  private readonly skyMat: THREE.ShaderMaterial;
   private readonly sunOrbGroup: THREE.Group;
+  private readonly sunCoreMat: THREE.MeshBasicMaterial;
+  private readonly sunHaloMat: THREE.MeshBasicMaterial;
   private readonly cloudsRoot: THREE.Group;
   private readonly clouds: CloudCluster[] = [];
+  private readonly cloudPuffGeo: THREE.SphereGeometry;
+  private readonly cloudMat: THREE.MeshStandardMaterial;
   private readonly distantIsletsRoot: THREE.Group;
   private readonly distantIslets: DistantIslet[] = [];
+  private readonly isletRockMat: THREE.MeshStandardMaterial;
+  private readonly isletGrassMat: THREE.MeshStandardMaterial;
+  private readonly isletPineMat: THREE.MeshStandardMaterial;
   private readonly waterGroup: THREE.Group;
   private readonly oceanMesh: THREE.Mesh;
   private readonly oceanMat: THREE.ShaderMaterial;
-  private readonly innerFoamRing: THREE.Mesh;
-  private readonly outerFoamRing: THREE.Mesh;
   private readonly appendedToContainer: boolean;
 
   private readonly islandCenter = DEFAULT_ISLAND_CENTER.clone();
+  private readonly lastShadowFocus = DEFAULT_ISLAND_CENTER.clone();
+  private readonly sunDirScratch = new THREE.Vector3();
+  private readonly sunOffsetScratch = new THREE.Vector3();
+  private readonly lightRightScratch = new THREE.Vector3();
+  private readonly lightUpScratch = new THREE.Vector3();
+  private readonly focusScratch = new THREE.Vector3();
+  private readonly snappedTargetScratch = new THREE.Vector3();
+  private readonly worldUp = new THREE.Vector3(0, 1, 0);
+
+  private activeTheme: ThemeId = "emerald_spire";
+  private envRenderTarget: THREE.WebGLRenderTarget | null = null;
+  private shoreTex: THREE.DataTexture | null = null;
+  private hasShoreTex = false;
   private worldHalf = DEFAULT_WORLD_HALF;
+  private duelShadowHalf = computeWorldSceneMetrics(DEFAULT_WORLD_SPAN_X).shadowHalf;
   private worldScale = 1.0;
+  private skyScale = 1.0;
   private cloudYOffset = 0;
   private waterLevel = DEFAULT_WATER_LEVEL;
 
   public constructor(container: HTMLElement) {
+    const initialAtm = getThemeAtmosphere(this.activeTheme);
     this.scene = new THREE.Scene();
-    this.scene.fog = new THREE.FogExp2(FOG_COLOR_HEX, DUEL_FOG_DENSITY);
+    this.scene.fog = new THREE.FogExp2(initialAtm.fogColor, DUEL_FOG_DENSITY);
+    this.scene.environmentIntensity = 0.34;
 
     const isCanvas =
       typeof HTMLCanvasElement !== "undefined" &&
@@ -298,7 +739,7 @@ export class WorldScene {
     });
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 1.1;
+    this.renderer.toneMappingExposure = 1.02;
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     this.renderer.setPixelRatio(
@@ -319,20 +760,24 @@ export class WorldScene {
       this.appendedToContainer = false;
     }
 
-    // Golden-hour daylight hemisphere + warm sun directional light casting 2048x2048 soft shadows
-    this.hemiLight = new THREE.HemisphereLight(0xa8e6ff, 0x7a7b4c, 0.98);
+    // Theme-tailored hemisphere + warm directional sun (2048x2048 soft shadows) + cool sky fill
+    this.hemiLight = new THREE.HemisphereLight(
+      initialAtm.hemiSkyColor,
+      initialAtm.hemiGroundColor,
+      initialAtm.hemiIntensity,
+    );
     this.scene.add(this.hemiLight);
 
     const initialMetrics = computeWorldSceneMetrics(DEFAULT_WORLD_SPAN_X);
-    this.sunLight = new THREE.DirectionalLight(0xffebd0, 2.2);
-    this.sunLight.position.set(
-      this.islandCenter.x + this.worldHalf * 1.25,
-      Math.max(36, this.worldHalf * 1.65),
-      this.islandCenter.z + this.worldHalf * 0.95,
+    this.sunLight = new THREE.DirectionalLight(
+      initialAtm.sunColor,
+      initialAtm.sunIntensity,
     );
+    const initialSunOffset = this.computeSunOffsetVector(initialAtm);
+    this.sunLight.position.copy(this.islandCenter).add(initialSunOffset);
     this.sunLight.target.position.copy(this.islandCenter);
     this.sunLight.castShadow = true;
-    this.sunLight.shadow.mapSize.set(2048, 2048);
+    this.sunLight.shadow.mapSize.set(SHADOW_MAP_SIZE, SHADOW_MAP_SIZE);
     this.sunLight.shadow.camera.near = 4;
     this.sunLight.shadow.camera.far = Math.max(140, initialMetrics.worldSize * 3.2);
     this.sunLight.shadow.camera.left = -initialMetrics.shadowHalf;
@@ -344,7 +789,10 @@ export class WorldScene {
     this.scene.add(this.sunLight);
     this.scene.add(this.sunLight.target);
 
-    this.fillLight = new THREE.DirectionalLight(0x88d4ff, 0.52);
+    this.fillLight = new THREE.DirectionalLight(
+      initialAtm.fillColor,
+      initialAtm.fillIntensity,
+    );
     this.fillLight.position.set(
       this.islandCenter.x - this.worldHalf * 1.1,
       Math.max(20, this.worldHalf * 0.9),
@@ -352,72 +800,102 @@ export class WorldScene {
     );
     this.scene.add(this.fillLight);
 
-    // Stylized golden-hour sky-gradient dome + glowing sun orb
-    const sunDir = new THREE.Vector3()
-      .subVectors(this.sunLight.position, this.islandCenter)
-      .normalize();
+    // Stylized sunlit sky-gradient dome with wispy cirrus clouds + glowing sun orb
+    const sunDir = initialSunOffset.clone().normalize();
     const skyGeo = new THREE.SphereGeometry(BASE_SKY_RADIUS, 28, 20);
-    const skyMat = new THREE.ShaderMaterial({
+    this.skyMat = new THREE.ShaderMaterial({
       vertexShader: SKY_VERTEX_SHADER,
       fragmentShader: SKY_FRAGMENT_SHADER,
       side: THREE.BackSide,
       depthWrite: false,
       fog: false,
       uniforms: {
-        uZenithColor: { value: new THREE.Color(0x1e76cf) },
-        uMidSkyColor: { value: new THREE.Color(0x74c8f8) },
-        uHorizonColor: { value: new THREE.Color(0xffe8c2) },
-        uOceanBounceColor: { value: new THREE.Color(0x1b92b5) },
-        uSunDir: { value: sunDir },
+        uZenithColor: { value: new THREE.Color(initialAtm.skyZenith) },
+        uMidSkyColor: { value: new THREE.Color(initialAtm.skyMid) },
+        uHorizonColor: { value: new THREE.Color(initialAtm.skyHorizon) },
+        uOceanBounceColor: { value: new THREE.Color(initialAtm.oceanBounce) },
+        uSunDir: { value: sunDir.clone() },
+        uTime: { value: 0 },
       },
     });
-    this.skyDome = new THREE.Mesh(skyGeo, skyMat);
+    this.skyDome = new THREE.Mesh(skyGeo, this.skyMat);
     this.skyDome.name = "sky_gradient_dome";
     this.skyDome.position.copy(this.islandCenter);
     this.scene.add(this.skyDome);
 
     this.sunOrbGroup = new THREE.Group();
     this.sunOrbGroup.name = "sun_orb_group";
-    const sunOrbDist = BASE_SKY_RADIUS * 0.84;
     this.sunOrbGroup.position
       .copy(this.islandCenter)
-      .addScaledVector(sunDir, sunOrbDist);
+      .addScaledVector(sunDir, BASE_SKY_RADIUS * 0.84);
 
+    this.sunCoreMat = new THREE.MeshBasicMaterial({
+      color: initialAtm.sunCoreColor,
+      fog: false,
+    });
+    this.sunHaloMat = new THREE.MeshBasicMaterial({
+      color: initialAtm.sunHaloColor,
+      transparent: true,
+      opacity: 0.28,
+      depthWrite: false,
+      fog: false,
+    });
     const sunCoreMesh = new THREE.Mesh(
       new THREE.SphereGeometry(8.5, 16, 12),
-      new THREE.MeshBasicMaterial({
-        color: 0xfff8de,
-        fog: false,
-      }),
+      this.sunCoreMat,
     );
     const sunHaloMesh = new THREE.Mesh(
       new THREE.SphereGeometry(15.5, 16, 12),
-      new THREE.MeshBasicMaterial({
-        color: 0xffd27a,
-        transparent: true,
-        opacity: 0.26,
-        depthWrite: false,
-        fog: false,
-      }),
+      this.sunHaloMat,
     );
     this.sunOrbGroup.add(sunCoreMesh, sunHaloMesh);
     this.scene.add(this.sunOrbGroup);
 
-    // Distant silhouette floating islets framing the archipelago horizon (local to island center)
+    // Shared materials for richer multi-tiered distant silhouette floating islets
+    this.isletRockMat = new THREE.MeshStandardMaterial({
+      color: initialAtm.isletRockColor,
+      roughness: 0.94,
+      metalness: 0.02,
+      flatShading: true,
+    });
+    this.isletGrassMat = new THREE.MeshStandardMaterial({
+      color: initialAtm.isletGrassColor,
+      roughness: 0.92,
+      metalness: 0.0,
+      flatShading: true,
+    });
+    this.isletPineMat = new THREE.MeshStandardMaterial({
+      color: initialAtm.isletPineColor,
+      roughness: 0.9,
+      metalness: 0.0,
+      flatShading: true,
+    });
     this.distantIsletsRoot = new THREE.Group();
     this.distantIsletsRoot.name = "distant_floating_islets";
     this.distantIsletsRoot.position.set(this.islandCenter.x, 0, this.islandCenter.z);
     this.buildDistantIslets();
     this.scene.add(this.distantIsletsRoot);
 
-    // Drifting puffy sculpted low-poly cloud clusters (local to island center)
+    // Shared backlit vertex-colored cloud geometry & material across all drifting clusters
+    this.cloudPuffGeo = new THREE.SphereGeometry(1.0, 10, 8);
+    bakeCloudPuffVertexColors(
+      this.cloudPuffGeo,
+      initialAtm.cloudHighlight,
+      initialAtm.cloudShadow,
+    );
+    this.cloudMat = new THREE.MeshStandardMaterial({
+      color: 0xffffff,
+      vertexColors: true,
+      roughness: 0.92,
+      metalness: 0.0,
+    });
     this.cloudsRoot = new THREE.Group();
     this.cloudsRoot.name = "cloud_clusters";
     this.cloudsRoot.position.set(this.islandCenter.x, 0, this.islandCenter.z);
     this.buildClouds();
     this.scene.add(this.cloudsRoot);
 
-    // Custom GLSL animated stylized ocean + translucent coastal surf foam rings
+    // Custom GLSL animated stylized ocean with SDF-hugging shoreline surf foam
     this.waterGroup = new THREE.Group();
     this.waterGroup.name = "ocean_group";
     this.waterGroup.position.set(
@@ -428,50 +906,199 @@ export class WorldScene {
 
     const oceanGeo = new THREE.PlaneGeometry(BASE_OCEAN_SPAN, BASE_OCEAN_SPAN, 96, 96);
     this.oceanMat = createOceanShaderMaterial(sunDir);
+    const initialShoreUniform = this.oceanMat.uniforms.uShoreTex;
+    if (
+      initialShoreUniform &&
+      initialShoreUniform.value instanceof THREE.DataTexture
+    ) {
+      this.shoreTex = initialShoreUniform.value;
+    }
+    this.applyOceanPalette(initialAtm, sunDir);
     this.oceanMesh = new THREE.Mesh(oceanGeo, this.oceanMat);
     this.oceanMesh.name = "turquoise_shader_ocean";
     this.oceanMesh.rotation.x = -Math.PI * 0.5;
     this.waterGroup.add(this.oceanMesh);
-
-    const innerFoamGeo = new THREE.RingGeometry(
-      DEFAULT_WORLD_HALF * 0.62,
-      DEFAULT_WORLD_HALF * 0.84,
-      64,
-      2,
-    );
-    const innerFoamMat = new THREE.MeshBasicMaterial({
-      color: 0xeaffff,
-      transparent: true,
-      opacity: 0.26,
-      depthWrite: false,
-      side: THREE.DoubleSide,
-    });
-    this.innerFoamRing = new THREE.Mesh(innerFoamGeo, innerFoamMat);
-    this.innerFoamRing.name = "coastal_foam_inner";
-    this.innerFoamRing.rotation.x = -Math.PI * 0.5;
-    this.innerFoamRing.position.y = 0.08;
-    this.waterGroup.add(this.innerFoamRing);
-
-    const outerFoamGeo = new THREE.RingGeometry(
-      DEFAULT_WORLD_HALF * 0.88,
-      DEFAULT_WORLD_HALF * 1.04,
-      64,
-      1,
-    );
-    const outerFoamMat = new THREE.MeshBasicMaterial({
-      color: 0xd0fbff,
-      transparent: true,
-      opacity: 0.16,
-      depthWrite: false,
-      side: THREE.DoubleSide,
-    });
-    this.outerFoamRing = new THREE.Mesh(outerFoamGeo, outerFoamMat);
-    this.outerFoamRing.name = "coastal_foam_outer";
-    this.outerFoamRing.rotation.x = -Math.PI * 0.5;
-    this.outerFoamRing.position.y = 0.06;
-    this.waterGroup.add(this.outerFoamRing);
-
     this.scene.add(this.waterGroup);
+
+    // Build procedural PMREM sky-ground IBL for realistic sunlit specular/ambient fill
+    this.rebuildEnvironmentMap(initialAtm, sunDir);
+  }
+
+  /** Switch sky, lights, fog, clouds, distant islets, ocean colors, and PMREM IBL to match `theme`. */
+  public setTheme(theme: ThemeId): void {
+    this.activeTheme = theme;
+    const atm = getThemeAtmosphere(theme);
+
+    this.hemiLight.color.setHex(atm.hemiSkyColor);
+    this.hemiLight.groundColor.setHex(atm.hemiGroundColor);
+    this.hemiLight.intensity = atm.hemiIntensity;
+
+    this.sunLight.color.setHex(atm.sunColor);
+    this.sunLight.intensity = atm.sunIntensity;
+
+    this.fillLight.color.setHex(atm.fillColor);
+    this.fillLight.intensity = atm.fillIntensity;
+
+    const sunDir = this.computeSunOffsetVector(atm).clone().normalize();
+
+    const zenithUniform = this.skyMat.uniforms.uZenithColor;
+    if (zenithUniform && zenithUniform.value instanceof THREE.Color) {
+      zenithUniform.value.setHex(atm.skyZenith);
+    }
+    const midSkyUniform = this.skyMat.uniforms.uMidSkyColor;
+    if (midSkyUniform && midSkyUniform.value instanceof THREE.Color) {
+      midSkyUniform.value.setHex(atm.skyMid);
+    }
+    const horizonUniform = this.skyMat.uniforms.uHorizonColor;
+    if (horizonUniform && horizonUniform.value instanceof THREE.Color) {
+      horizonUniform.value.setHex(atm.skyHorizon);
+    }
+    const oceanBounceUniform = this.skyMat.uniforms.uOceanBounceColor;
+    if (oceanBounceUniform && oceanBounceUniform.value instanceof THREE.Color) {
+      oceanBounceUniform.value.setHex(atm.oceanBounce);
+    }
+    const skySunUniform = this.skyMat.uniforms.uSunDir;
+    if (skySunUniform && skySunUniform.value instanceof THREE.Vector3) {
+      skySunUniform.value.copy(sunDir);
+    }
+
+    this.sunOrbGroup.position
+      .copy(this.islandCenter)
+      .addScaledVector(sunDir, BASE_SKY_RADIUS * this.skyScale * 0.84);
+    this.sunCoreMat.color.setHex(atm.sunCoreColor);
+    this.sunHaloMat.color.setHex(atm.sunHaloColor);
+
+    if (this.scene.fog instanceof THREE.FogExp2) {
+      this.scene.fog.color.setHex(atm.fogColor);
+    }
+
+    this.applyOceanPalette(atm, sunDir);
+    bakeCloudPuffVertexColors(
+      this.cloudPuffGeo,
+      atm.cloudHighlight,
+      atm.cloudShadow,
+    );
+
+    this.isletRockMat.color.setHex(atm.isletRockColor);
+    this.isletGrassMat.color.setHex(atm.isletGrassColor);
+    this.isletPineMat.color.setHex(atm.isletPineColor);
+
+    this.setShadowFocus(this.lastShadowFocus);
+    this.rebuildEnvironmentMap(atm, sunDir);
+  }
+
+  /** Recompute and upload the SDF-hugging shoreline lookup texture for the ocean shader. */
+  public updateShorelineFromWorld(world: SdfWorld, waterLevel: number): void {
+    const data = buildShorelineDepthData(world, waterLevel, SHORELINE_TEX_RES);
+    const nextTex = new THREE.DataTexture(
+      data,
+      SHORELINE_TEX_RES,
+      SHORELINE_TEX_RES,
+      THREE.RGBAFormat,
+    );
+    nextTex.wrapS = THREE.ClampToEdgeWrapping;
+    nextTex.wrapT = THREE.ClampToEdgeWrapping;
+    nextTex.magFilter = THREE.LinearFilter;
+    nextTex.minFilter = THREE.LinearFilter;
+    nextTex.generateMipmaps = false;
+    nextTex.needsUpdate = true;
+
+    const prevTex = this.shoreTex;
+    this.shoreTex = nextTex;
+    this.hasShoreTex = true;
+
+    const shoreTexUniform = this.oceanMat.uniforms.uShoreTex;
+    if (shoreTexUniform) {
+      shoreTexUniform.value = nextTex;
+    }
+    const originUniform = this.oceanMat.uniforms.uWorldOrigin;
+    if (originUniform && originUniform.value instanceof THREE.Vector2) {
+      originUniform.value.set(0, 0);
+    }
+    const spanUniform = this.oceanMat.uniforms.uWorldSpan;
+    if (spanUniform && spanUniform.value instanceof THREE.Vector2) {
+      spanUniform.value.set(
+        Math.max(1, world.worldWidth),
+        Math.max(1, world.worldDepth),
+      );
+    }
+    const hasTexUniform = this.oceanMat.uniforms.uHasShoreTex;
+    if (hasTexUniform) {
+      hasTexUniform.value = 1.0;
+    }
+
+    prevTex?.dispose();
+  }
+
+  /**
+   * Focus and texel-snap directional sun shadows around `focus` on 144m Grand worlds
+   * (`shadowHalf = 46m`, zero shadow swimming), while keeping full-island shadow coverage on 60m Duel maps.
+   */
+  public setShadowFocus(focus: Vec3): void {
+    const fx = Number.isFinite(focus.x) ? focus.x : this.islandCenter.x;
+    const fy = Number.isFinite(focus.y) ? focus.y : this.islandCenter.y;
+    const fz = Number.isFinite(focus.z) ? focus.z : this.islandCenter.z;
+    this.lastShadowFocus.set(fx, fy, fz);
+
+    const atm = THEME_ATMOSPHERES[this.activeTheme];
+    const sunOffset = this.computeSunOffsetVector(atm);
+    const sunDist = sunOffset.length();
+    const sunDir = this.sunDirScratch.copy(sunOffset).normalize();
+
+    let shadowHalf: number;
+    if (this.worldHalf > 40) {
+      shadowHalf = GRAND_FOCUS_SHADOW_HALF;
+      const texelSize = (shadowHalf * 2) / SHADOW_MAP_SIZE;
+
+      // Build stable orthonormal light-space basis and snap target to exact shadow texel grid
+      this.lightRightScratch.crossVectors(this.worldUp, sunDir);
+      if (this.lightRightScratch.lengthSq() < 1e-6) {
+        this.lightRightScratch.set(1, 0, 0);
+      } else {
+        this.lightRightScratch.normalize();
+      }
+      this.lightUpScratch.crossVectors(sunDir, this.lightRightScratch).normalize();
+
+      this.focusScratch.set(fx, fy, fz);
+      const rx = this.focusScratch.dot(this.lightRightScratch);
+      const ry = this.focusScratch.dot(this.lightUpScratch);
+      const rz = this.focusScratch.dot(sunDir);
+
+      const snappedRx = Math.round(rx / texelSize) * texelSize;
+      const snappedRy = Math.round(ry / texelSize) * texelSize;
+
+      this.snappedTargetScratch
+        .set(0, 0, 0)
+        .addScaledVector(this.lightRightScratch, snappedRx)
+        .addScaledVector(this.lightUpScratch, snappedRy)
+        .addScaledVector(sunDir, rz);
+
+      this.sunLight.target.position.copy(this.snappedTargetScratch);
+      this.sunLight.position
+        .copy(this.snappedTargetScratch)
+        .addScaledVector(sunDir, sunDist);
+    } else {
+      shadowHalf = this.duelShadowHalf;
+      this.sunLight.target.position.copy(this.islandCenter);
+      this.sunLight.position
+        .copy(this.islandCenter)
+        .addScaledVector(sunDir, sunDist);
+    }
+
+    const cam = this.sunLight.shadow.camera;
+    if (
+      cam.left !== -shadowHalf ||
+      cam.right !== shadowHalf ||
+      cam.top !== shadowHalf ||
+      cam.bottom !== -shadowHalf
+    ) {
+      cam.left = -shadowHalf;
+      cam.right = shadowHalf;
+      cam.top = shadowHalf;
+      cam.bottom = -shadowHalf;
+      cam.updateProjectionMatrix();
+    }
+    this.sunLight.target.updateMatrixWorld();
   }
 
   /**
@@ -498,24 +1125,17 @@ export class WorldScene {
 
     const spanXZ = Math.max(safeW, safeD);
     const metrics = computeWorldSceneMetrics(spanXZ);
+    const atm = getThemeAtmosphere(this.activeTheme);
 
     this.worldHalf = spanXZ * 0.5;
+    this.duelShadowHalf = metrics.shadowHalf;
     this.worldScale = this.worldHalf / DEFAULT_WORLD_HALF;
     this.islandCenter.set(safeW * 0.5, Math.max(8.0, safeH * 0.3), safeD * 0.5);
     this.cloudYOffset = Math.max(0, safeH - DEFAULT_WORLD_SPAN_Y) * 0.85;
 
-    this.sunLight.position.set(
-      this.islandCenter.x + this.worldHalf * 1.25,
-      Math.max(36, this.worldHalf * 1.65),
-      this.islandCenter.z + this.worldHalf * 0.95,
-    );
-    this.sunLight.target.position.copy(this.islandCenter);
-    this.sunLight.shadow.camera.left = -metrics.shadowHalf;
-    this.sunLight.shadow.camera.right = metrics.shadowHalf;
-    this.sunLight.shadow.camera.top = metrics.shadowHalf;
-    this.sunLight.shadow.camera.bottom = -metrics.shadowHalf;
     this.sunLight.shadow.camera.far = Math.max(140, spanXZ * 3.2);
     this.sunLight.shadow.camera.updateProjectionMatrix();
+    this.setShadowFocus(this.islandCenter);
 
     this.fillLight.position.set(
       this.islandCenter.x - this.worldHalf * 1.1,
@@ -523,16 +1143,14 @@ export class WorldScene {
       this.islandCenter.z - this.worldHalf * 1.0,
     );
 
-    const skyScale = Math.max(1.0, (metrics.oceanSpan * 0.68) / BASE_SKY_RADIUS);
-    const sunDir = new THREE.Vector3()
-      .subVectors(this.sunLight.position, this.islandCenter)
-      .normalize();
+    this.skyScale = Math.max(1.0, (metrics.oceanSpan * 0.68) / BASE_SKY_RADIUS);
+    const sunDir = this.computeSunOffsetVector(atm).clone().normalize();
     this.skyDome.position.copy(this.islandCenter);
-    this.skyDome.scale.setScalar(skyScale);
+    this.skyDome.scale.setScalar(this.skyScale);
     this.sunOrbGroup.position
       .copy(this.islandCenter)
-      .addScaledVector(sunDir, BASE_SKY_RADIUS * skyScale * 0.84);
-    this.sunOrbGroup.scale.setScalar(skyScale);
+      .addScaledVector(sunDir, BASE_SKY_RADIUS * this.skyScale * 0.84);
+    this.sunOrbGroup.scale.setScalar(this.skyScale);
 
     // Position distant floating silhouette islets cleanly at worldSize * 1.15 .. 1.6
     this.distantIsletsRoot.position.set(this.islandCenter.x, 0, this.islandCenter.z);
@@ -566,6 +1184,12 @@ export class WorldScene {
     const scaleUniform = this.oceanMat.uniforms.uIslandScale;
     if (scaleUniform) {
       scaleUniform.value = this.worldScale;
+    }
+    if (!this.hasShoreTex) {
+      const spanUniform = this.oceanMat.uniforms.uWorldSpan;
+      if (spanUniform && spanUniform.value instanceof THREE.Vector2) {
+        spanUniform.value.set(safeW, safeD);
+      }
     }
 
     if (this.scene.fog instanceof THREE.FogExp2) {
@@ -602,28 +1226,19 @@ export class WorldScene {
     this.renderer.setSize(safeW, safeH, true);
   }
 
-  /** Animate GLSL ocean waves, coastal surf foam, distant islets, and drifting clouds. */
+  /** Animate GLSL sky cirrus, ocean waves & surf foam, distant islets, and drifting clouds. */
   public update(dtSec: number, elapsedSec: number): void {
     const safeDt = Number.isFinite(dtSec) ? Math.max(0, Math.min(dtSec, 0.1)) : 0;
     const t = Number.isFinite(elapsedSec) ? elapsedSec : 0;
 
-    // Advance GPU ocean wave shader clock
-    const timeUniform = this.oceanMat.uniforms.uTime;
-    if (timeUniform) {
-      timeUniform.value = t;
+    // Advance GPU sky cirrus drift & ocean wave shader clocks
+    const skyTimeUniform = this.skyMat.uniforms.uTime;
+    if (skyTimeUniform) {
+      skyTimeUniform.value = t;
     }
-
-    // Coastal foam ring gentle breathing pulse scaled to current arena radius
-    const innerScale = this.worldScale * (1.0 + Math.sin(t * 1.35) * 0.032);
-    this.innerFoamRing.scale.set(innerScale, innerScale, 1);
-    if (this.innerFoamRing.material instanceof THREE.MeshBasicMaterial) {
-      this.innerFoamRing.material.opacity = 0.22 + Math.sin(t * 1.35) * 0.07;
-    }
-
-    const outerScale = this.worldScale * (1.0 + Math.cos(t * 1.05 + 1.1) * 0.04);
-    this.outerFoamRing.scale.set(outerScale, outerScale, 1);
-    if (this.outerFoamRing.material instanceof THREE.MeshBasicMaterial) {
-      this.outerFoamRing.material.opacity = 0.14 + Math.cos(t * 1.05 + 1.1) * 0.05;
+    const oceanTimeUniform = this.oceanMat.uniforms.uTime;
+    if (oceanTimeUniform) {
+      oceanTimeUniform.value = t;
     }
 
     // Gentle vertical hover on distant silhouette floating islets
@@ -650,10 +1265,16 @@ export class WorldScene {
     this.renderer.render(this.scene, camera);
   }
 
-  /** Dispose all scene geometries, materials, shadow maps, and WebGL context resources. */
+  /** Dispose all scene geometries, materials, textures, PMREM IBL, shadow maps, and WebGL resources. */
   public dispose(): void {
+    if (this.envRenderTarget) {
+      this.scene.environment = null;
+      this.envRenderTarget.dispose();
+      this.envRenderTarget = null;
+    }
+
     this.skyDome.geometry.dispose();
-    disposeMaterial(this.skyDome.material);
+    this.skyMat.dispose();
     this.scene.remove(this.skyDome);
 
     disposeObjectTree(this.sunOrbGroup);
@@ -669,10 +1290,10 @@ export class WorldScene {
 
     this.oceanMesh.geometry.dispose();
     this.oceanMat.dispose();
-    this.innerFoamRing.geometry.dispose();
-    disposeMaterial(this.innerFoamRing.material);
-    this.outerFoamRing.geometry.dispose();
-    disposeMaterial(this.outerFoamRing.material);
+    if (this.shoreTex) {
+      this.shoreTex.dispose();
+      this.shoreTex = null;
+    }
     this.scene.remove(this.waterGroup);
 
     this.sunLight.shadow.map?.dispose();
@@ -686,6 +1307,96 @@ export class WorldScene {
       this.renderer.domElement.parentElement.removeChild(
         this.renderer.domElement,
       );
+    }
+  }
+
+  private computeSunOffsetVector(atm: ThemeAtmosphere): THREE.Vector3 {
+    return this.sunOffsetScratch.set(
+      this.worldHalf * atm.sunOffset.x,
+      Math.max(36, this.worldHalf * atm.sunOffset.y),
+      this.worldHalf * atm.sunOffset.z,
+    );
+  }
+
+  private applyOceanPalette(atm: ThemeAtmosphere, sunDir: THREE.Vector3): void {
+    const sunUniform = this.oceanMat.uniforms.uSunDir;
+    if (sunUniform && sunUniform.value instanceof THREE.Vector3) {
+      sunUniform.value.copy(sunDir);
+    }
+    const shallowUniform = this.oceanMat.uniforms.uShallowColor;
+    if (shallowUniform && shallowUniform.value instanceof THREE.Color) {
+      shallowUniform.value.setHex(atm.oceanShallow);
+    }
+    const midUniform = this.oceanMat.uniforms.uMidColor;
+    if (midUniform && midUniform.value instanceof THREE.Color) {
+      midUniform.value.setHex(atm.oceanMid);
+    }
+    const deepUniform = this.oceanMat.uniforms.uDeepColor;
+    if (deepUniform && deepUniform.value instanceof THREE.Color) {
+      deepUniform.value.setHex(atm.oceanDeep);
+    }
+    const foamUniform = this.oceanMat.uniforms.uFoamColor;
+    if (foamUniform && foamUniform.value instanceof THREE.Color) {
+      foamUniform.value.setHex(atm.oceanFoam);
+    }
+    const fogUniform = this.oceanMat.uniforms.uFogColor;
+    if (fogUniform && fogUniform.value instanceof THREE.Color) {
+      fogUniform.value.setHex(atm.fogColor);
+    }
+  }
+
+  private rebuildEnvironmentMap(
+    atm: ThemeAtmosphere,
+    sunDir: THREE.Vector3,
+  ): void {
+    let pmremGenerator: THREE.PMREMGenerator | null = null;
+    let envGeo: THREE.SphereGeometry | null = null;
+    let envMat: THREE.ShaderMaterial | null = null;
+    let sunDiscGeo: THREE.SphereGeometry | null = null;
+    let sunDiscMat: THREE.MeshBasicMaterial | null = null;
+
+    try {
+      pmremGenerator = new THREE.PMREMGenerator(this.renderer);
+      const envScene = new THREE.Scene();
+
+      envGeo = new THREE.SphereGeometry(20, 24, 16);
+      envMat = new THREE.ShaderMaterial({
+        vertexShader: SKY_VERTEX_SHADER,
+        fragmentShader: IBL_SKY_FRAGMENT_SHADER,
+        side: THREE.BackSide,
+        depthWrite: false,
+        uniforms: {
+          uZenithColor: { value: new THREE.Color(atm.skyZenith) },
+          uMidSkyColor: { value: new THREE.Color(atm.skyMid) },
+          uHorizonColor: { value: new THREE.Color(atm.skyHorizon) },
+          uOceanBounceColor: { value: new THREE.Color(atm.oceanBounce) },
+          uGroundBounceColor: { value: new THREE.Color(atm.hemiGroundColor) },
+          uSunDir: { value: sunDir.clone().normalize() },
+        },
+      });
+      envScene.add(new THREE.Mesh(envGeo, envMat));
+
+      sunDiscGeo = new THREE.SphereGeometry(2.1, 12, 10);
+      sunDiscMat = new THREE.MeshBasicMaterial({
+        color: new THREE.Color(atm.sunCoreColor).multiplyScalar(2.2),
+      });
+      const sunDisc = new THREE.Mesh(sunDiscGeo, sunDiscMat);
+      sunDisc.position.copy(sunDir).normalize().multiplyScalar(16);
+      envScene.add(sunDisc);
+
+      const nextTarget = pmremGenerator.fromScene(envScene, 0.04);
+      const prevTarget = this.envRenderTarget;
+      this.envRenderTarget = nextTarget;
+      this.scene.environment = nextTarget.texture;
+      prevTarget?.dispose();
+    } catch {
+      // Gracefully degrade when WebGL context is unavailable or headless
+    } finally {
+      envGeo?.dispose();
+      envMat?.dispose();
+      sunDiscGeo?.dispose();
+      sunDiscMat?.dispose();
+      pmremGenerator?.dispose();
     }
   }
 
@@ -707,55 +1418,73 @@ export class WorldScene {
       { angle: 5.75, distT: 0.78, y: 16, scale: 1.55, phase: 1.1 },
     ];
 
+    // Share base sculpted geometries across all distant islets (3 shared materials total)
+    const mainRockGeo = new THREE.ConeGeometry(5.6, 11.2, 8);
+    const sideCragGeo = new THREE.ConeGeometry(3.2, 7.6, 7);
+    const keelSpireGeo = new THREE.ConeGeometry(2.1, 5.6, 6);
+    const crownGeo = new THREE.IcosahedronGeometry(5.8, 1);
+    const knollGeo = new THREE.IcosahedronGeometry(3.1, 1);
+    const pineLowerGeo = new THREE.ConeGeometry(1.55, 3.2, 7);
+    const pineUpperGeo = new THREE.ConeGeometry(1.05, 2.5, 7);
+
     for (const sp of specs) {
       const group = new THREE.Group();
-      const rockMat = new THREE.MeshStandardMaterial({
-        color: 0x8b7e78,
-        roughness: 0.94,
-        metalness: 0.02,
-        flatShading: true,
-      });
-      const grassMat = new THREE.MeshStandardMaterial({
-        color: 0x5c9c64,
-        roughness: 0.92,
-        metalness: 0.0,
-        flatShading: true,
-      });
 
-      // Tapered floating rock underside (inverted cone) + rounded meadow crown
-      const underRock = new THREE.Mesh(
-        new THREE.ConeGeometry(5.6, 11.0, 8),
-        rockMat,
-      );
+      // Multi-tiered sculpted floating rock underside + side crag + keel tip
+      const underRock = new THREE.Mesh(mainRockGeo, this.isletRockMat);
       underRock.rotation.x = Math.PI;
-      underRock.position.y = -4.8;
+      underRock.position.y = -4.9;
 
-      const crown = new THREE.Mesh(
-        new THREE.IcosahedronGeometry(5.8, 1),
-        grassMat,
-      );
-      crown.scale.set(1.05, 0.36, 1.0);
-      crown.position.y = 0.7;
+      const sideCrag = new THREE.Mesh(sideCragGeo, this.isletRockMat);
+      sideCrag.rotation.set(Math.PI - 0.14, sp.phase, 0.18);
+      sideCrag.position.set(-2.5, -2.9, 1.3);
 
-      const spireTree = new THREE.Mesh(
-        new THREE.ConeGeometry(1.4, 3.8, 6),
-        new THREE.MeshStandardMaterial({
-          color: 0x3b7652,
-          roughness: 0.9,
-          flatShading: true,
-        }),
-      );
-      spireTree.position.set(1.2, 3.4, -0.6);
+      const keelSpire = new THREE.Mesh(keelSpireGeo, this.isletRockMat);
+      keelSpire.rotation.x = Math.PI;
+      keelSpire.position.set(1.1, -9.2, -0.8);
+
+      // Layered sculpted meadow crown + elevated grassy knoll
+      const crown = new THREE.Mesh(crownGeo, this.isletGrassMat);
+      crown.scale.set(1.08, 0.36, 1.0);
+      crown.position.y = 0.75;
+
+      const knoll = new THREE.Mesh(knollGeo, this.isletGrassMat);
+      knoll.scale.set(1.05, 0.45, 0.95);
+      knoll.position.set(-1.3, 1.85, 0.8);
+
+      // Twin stylized tiered alpine/island pines
+      const pineTallBase = new THREE.Mesh(pineLowerGeo, this.isletPineMat);
+      pineTallBase.position.set(1.35, 3.35, -0.55);
+      const pineTallTop = new THREE.Mesh(pineUpperGeo, this.isletPineMat);
+      pineTallTop.position.set(1.35, 5.15, -0.55);
+
+      const pineShortBase = new THREE.Mesh(pineLowerGeo, this.isletPineMat);
+      pineShortBase.scale.setScalar(0.76);
+      pineShortBase.position.set(-1.75, 3.35, 0.95);
+      const pineShortTop = new THREE.Mesh(pineUpperGeo, this.isletPineMat);
+      pineShortTop.scale.setScalar(0.74);
+      pineShortTop.position.set(-1.75, 4.7, 0.95);
 
       const dist =
         initialMetrics.isletMinDist +
         sp.distT * (initialMetrics.isletMaxDist - initialMetrics.isletMinDist);
-      group.add(underRock, crown, spireTree);
+      group.add(
+        underRock,
+        sideCrag,
+        keelSpire,
+        crown,
+        knoll,
+        pineTallBase,
+        pineTallTop,
+        pineShortBase,
+        pineShortTop,
+      );
       group.position.set(
         Math.cos(sp.angle) * dist,
         sp.y,
         Math.sin(sp.angle) * dist,
       );
+      group.rotation.y = sp.phase * 0.7;
       group.scale.setScalar(sp.scale);
       this.distantIsletsRoot.add(group);
       this.distantIslets.push({
@@ -799,19 +1528,11 @@ export class WorldScene {
 
     for (const spec of cloudSpecs) {
       const cluster = new THREE.Group();
-      const cloudMat = new THREE.MeshStandardMaterial({
-        color: 0xfffdf8,
-        roughness: 0.94,
-        metalness: 0.0,
-      });
 
       for (const puff of puffOffsets) {
-        const mesh = new THREE.Mesh(
-          new THREE.SphereGeometry(puff[3], 10, 8),
-          cloudMat,
-        );
+        const mesh = new THREE.Mesh(this.cloudPuffGeo, this.cloudMat);
         mesh.position.set(puff[0], puff[1], puff[2]);
-        mesh.scale.set(1.15, 0.72, 1.0);
+        mesh.scale.set(puff[3] * 1.15, puff[3] * 0.72, puff[3]);
         cluster.add(mesh);
       }
 

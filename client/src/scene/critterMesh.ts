@@ -63,7 +63,6 @@ function disposeObjectTree(root: THREE.Object3D): void {
       obj.geometry.dispose();
       disposeMaterial(obj.material);
     } else if (obj instanceof THREE.Sprite) {
-      obj.geometry.dispose();
       disposeMaterial(obj.material);
     }
   });
@@ -91,6 +90,20 @@ function createMesh(
   return mesh;
 }
 
+function applyCritterRimShader(mat: THREE.MeshStandardMaterial): void {
+  mat.envMapIntensity = 1.0;
+  mat.customProgramCacheKey = (): string => "critter_proc_rim_v1";
+  mat.onBeforeCompile = (shader): void => {
+    shader.fragmentShader = shader.fragmentShader.replace(
+      "#include <opaque_fragment>",
+      `float rimDot = clamp( 1.0 - max( dot( normalize( normal ), normalize( vViewPosition ) ), 0.0 ), 0.0, 1.0 );
+float rim = pow( rimDot, 3.1 ) * 0.24;
+outgoingLight += vec3( 1.0, 0.95, 0.84 ) * rim;
+#include <opaque_fragment>`,
+    );
+  };
+}
+
 function makeStandard(
   color: THREE.ColorRepresentation,
   roughness = 0.68,
@@ -104,7 +117,7 @@ function makeStandard(
     side?: THREE.Side;
   },
 ): THREE.MeshStandardMaterial {
-  return new THREE.MeshStandardMaterial({
+  const mat = new THREE.MeshStandardMaterial({
     color,
     roughness,
     metalness,
@@ -121,6 +134,12 @@ function makeStandard(
       : {}),
     ...(extra?.side !== undefined ? { side: extra.side } : {}),
   });
+  if (extra?.transparent !== true) {
+    applyCritterRimShader(mat);
+  } else {
+    mat.envMapIntensity = 1.0;
+  }
+  return mat;
 }
 
 function addEyes(
@@ -1305,19 +1324,52 @@ function createDropShadowTexture(): THREE.CanvasTexture | null {
   if (typeof document === "undefined") {
     return null;
   }
+  const size = 128;
+  const half = size * 0.5;
   const canvas = document.createElement("canvas");
-  canvas.width = 64;
-  canvas.height = 64;
+  canvas.width = size;
+  canvas.height = size;
   const ctx = canvas.getContext("2d");
   if (!ctx) {
     return null;
   }
-  const grad = ctx.createRadialGradient(32, 32, 4, 32, 32, 30);
-  grad.addColorStop(0.0, "rgba(4, 10, 20, 0.88)");
-  grad.addColorStop(0.55, "rgba(4, 10, 20, 0.52)");
+  // Multi-stop Gaussian-like radial falloff for grounded paw contact + soft penumbra
+  const grad = ctx.createRadialGradient(half, half, 2, half, half, half - 4);
+  grad.addColorStop(0.0, "rgba(4, 10, 20, 0.92)");
+  grad.addColorStop(0.24, "rgba(4, 10, 20, 0.80)");
+  grad.addColorStop(0.48, "rgba(4, 10, 20, 0.50)");
+  grad.addColorStop(0.72, "rgba(4, 10, 20, 0.20)");
+  grad.addColorStop(0.88, "rgba(4, 10, 20, 0.05)");
   grad.addColorStop(1.0, "rgba(4, 10, 20, 0.0)");
   ctx.fillStyle = grad;
-  ctx.fillRect(0, 0, 64, 64);
+  ctx.fillRect(0, 0, size, size);
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  return texture;
+}
+
+function createSelectionHaloTexture(): THREE.CanvasTexture | null {
+  if (typeof document === "undefined") {
+    return null;
+  }
+  const size = 128;
+  const half = size * 0.5;
+  const canvas = document.createElement("canvas");
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) {
+    return null;
+  }
+  const grad = ctx.createRadialGradient(half, half, 12, half, half, half - 2);
+  grad.addColorStop(0.0, "rgba(255, 255, 255, 0.08)");
+  grad.addColorStop(0.55, "rgba(255, 255, 255, 0.36)");
+  grad.addColorStop(0.76, "rgba(255, 255, 255, 0.55)");
+  grad.addColorStop(0.9, "rgba(255, 255, 255, 0.16)");
+  grad.addColorStop(1.0, "rgba(255, 255, 255, 0.0)");
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, size, size);
 
   const texture = new THREE.CanvasTexture(canvas);
   texture.colorSpace = THREE.SRGBColorSpace;
@@ -1341,6 +1393,8 @@ export class CritterRig {
   private readonly apexGroup: THREE.Group;
   private readonly aimIndicator: THREE.Group;
   private readonly selectionRing: THREE.Mesh;
+  private readonly selectionHalo: THREE.Mesh;
+  private readonly selectionHaloTexture: THREE.CanvasTexture | null;
   private readonly dropShadow: THREE.Mesh;
   private readonly dropShadowTexture: THREE.CanvasTexture | null;
   private readonly teamColor: string;
@@ -1401,16 +1455,34 @@ export class CritterRig {
     const ringGeo = new THREE.TorusGeometry(0.56, 0.036, 10, 28);
     const ringMat = makeStandard(teamColor, 0.25, 0.2, {
       emissive: teamColor,
-      emissiveIntensity: 0.85,
+      emissiveIntensity: 0.9,
       transparent: true,
-      opacity: 0.85,
+      opacity: 0.88,
     });
     this.selectionRing = new THREE.Mesh(ringGeo, ringMat);
     this.selectionRing.name = "selection_ring";
     this.selectionRing.rotation.x = Math.PI * 0.5;
-    this.selectionRing.position.y = 0.04;
+    this.selectionRing.position.y = 0.045;
     this.selectionRing.visible = false;
     this.root.add(this.selectionRing);
+
+    this.selectionHaloTexture = createSelectionHaloTexture();
+    const haloGeo = new THREE.CircleGeometry(0.76, 28);
+    const haloMat = new THREE.MeshBasicMaterial({
+      color: teamColor,
+      ...(this.selectionHaloTexture ? { map: this.selectionHaloTexture } : {}),
+      transparent: true,
+      opacity: this.selectionHaloTexture ? 0.65 : 0.26,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    });
+    this.selectionHalo = new THREE.Mesh(haloGeo, haloMat);
+    this.selectionHalo.name = "selection_halo";
+    this.selectionHalo.rotation.x = -Math.PI * 0.5;
+    this.selectionHalo.position.y = 0.035;
+    this.selectionHalo.renderOrder = 2;
+    this.selectionHalo.visible = false;
+    this.root.add(this.selectionHalo);
 
     this.dropShadowTexture = createDropShadowTexture();
     const shadowGeo = new THREE.CircleGeometry(0.56, 24);
@@ -1636,9 +1708,17 @@ export class CritterRig {
     }
 
     this.selectionRing.visible = isActive;
+    this.selectionHalo.visible = isActive;
     if (isActive) {
-      const pulse = this.baseRingScale * (1.0 + Math.sin(this.animTime * 5.0) * 0.09);
+      const wave = Math.sin(this.animTime * 5.0);
+      const pulse = this.baseRingScale * (1.0 + wave * 0.09);
       this.selectionRing.scale.set(pulse, pulse, 1);
+      const haloPulse = this.baseRingScale * (1.06 + wave * 0.12);
+      this.selectionHalo.scale.set(haloPulse, haloPulse, 1);
+      if (this.selectionHalo.material instanceof THREE.MeshBasicMaterial) {
+        const baseOp = this.selectionHaloTexture ? 0.56 : 0.22;
+        this.selectionHalo.material.opacity = baseOp + wave * 0.14;
+      }
     }
   }
 
@@ -1674,6 +1754,13 @@ export class CritterRig {
     this.selectionRing.geometry.dispose();
     disposeMaterial(this.selectionRing.material);
 
+    this.root.remove(this.selectionHalo);
+    this.selectionHalo.geometry.dispose();
+    disposeMaterial(this.selectionHalo.material);
+    if (this.selectionHaloTexture) {
+      this.selectionHaloTexture.dispose();
+    }
+
     this.root.remove(this.dropShadow);
     this.dropShadow.geometry.dispose();
     disposeMaterial(this.dropShadow.material);
@@ -1683,7 +1770,6 @@ export class CritterRig {
 
     if (this.hpSprite) {
       this.root.remove(this.hpSprite);
-      this.hpSprite.geometry.dispose();
       disposeMaterial(this.hpSprite.material);
       this.hpSprite = null;
     }

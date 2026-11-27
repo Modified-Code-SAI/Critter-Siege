@@ -1,4 +1,5 @@
 import type { SdfWorld } from "./sdf.js";
+import type { CarveOp } from "./types.js";
 
 /** Indexed smooth triangle mesh buffers produced for a single terrain chunk. */
 export interface ChunkMeshData {
@@ -41,6 +42,200 @@ function clamp01(v: number): number {
   return v < 0 ? 0 : v > 1 ? 1 : v;
 }
 
+function smoothstep(edge0: number, edge1: number, x: number): number {
+  const denom = edge1 - edge0;
+  if (Math.abs(denom) < 1e-8) {
+    return x < edge0 ? 0 : 1;
+  }
+  const t = clamp01((x - edge0) / denom);
+  return t * t * (3 - 2 * t);
+}
+
+function sampleCreviceOcclusionTap(
+  world: SdfWorld,
+  x: number,
+  y: number,
+  z: number,
+  expectedDist: number,
+  minIx: number,
+  maxIx: number,
+  minIy: number,
+  maxIy: number,
+  minIz: number,
+  maxIz: number,
+): number {
+  // Taps outside the interior voxel bounds enter the forced air border -> zero occlusion
+  if (
+    x <= minIx ||
+    x >= maxIx ||
+    y <= minIy ||
+    y >= maxIy ||
+    z <= minIz ||
+    z >= maxIz
+  ) {
+    return 0;
+  }
+  const sampled = world.sample(x, y, z);
+  if (!Number.isFinite(sampled) || sampled >= expectedDist) {
+    return 0;
+  }
+  return clamp01((expectedDist - sampled) / expectedDist);
+}
+
+/**
+ * 4-tap baked SDF hemisphere & sky-openness occlusion factor in [0.56, 1.0]
+ * so arches, overhangs, caves, canyons, and blast craters receive grounded cavity shading.
+ */
+function computeSdfCreviceAo(
+  world: SdfWorld,
+  wx: number,
+  wy: number,
+  wz: number,
+  nx: number,
+  ny: number,
+  nz: number,
+  vs: number,
+  minIx: number,
+  maxIx: number,
+  minIy: number,
+  maxIy: number,
+  minIz: number,
+  maxIz: number,
+): number {
+  const d1 = 0.95 * vs;
+  const d2 = 2.2 * vs;
+  const d3 = 3.8 * vs;
+  const d4 = 2.5 * vs;
+
+  const occ1 = sampleCreviceOcclusionTap(
+    world,
+    wx + nx * d1,
+    wy + ny * d1,
+    wz + nz * d1,
+    d1,
+    minIx,
+    maxIx,
+    minIy,
+    maxIy,
+    minIz,
+    maxIz,
+  );
+  const occ2 = sampleCreviceOcclusionTap(
+    world,
+    wx + nx * d2,
+    wy + ny * d2,
+    wz + nz * d2,
+    d2,
+    minIx,
+    maxIx,
+    minIy,
+    maxIy,
+    minIz,
+    maxIz,
+  );
+  const occ3 = sampleCreviceOcclusionTap(
+    world,
+    wx + nx * d3,
+    wy + ny * d3,
+    wz + nz * d3,
+    d3,
+    minIx,
+    maxIx,
+    minIy,
+    maxIy,
+    minIz,
+    maxIz,
+  );
+  const occ4 = sampleCreviceOcclusionTap(
+    world,
+    wx,
+    wy + d4,
+    wz,
+    d4,
+    minIx,
+    maxIx,
+    minIy,
+    maxIy,
+    minIz,
+    maxIz,
+  );
+
+  const totalOcc = occ1 * 0.32 + occ2 * 0.26 + occ3 * 0.2 + occ4 * 0.22;
+  return Math.max(0.56, Math.min(1.0, 1.0 - totalOcc * 0.52));
+}
+
+function signedDistanceToCarveSurface(
+  px: number,
+  py: number,
+  pz: number,
+  op: CarveOp,
+): number {
+  if (op.shape === "capsule" && op.end) {
+    const ax = op.center.x;
+    const ay = op.center.y;
+    const az = op.center.z;
+    const abx = op.end.x - ax;
+    const aby = op.end.y - ay;
+    const abz = op.end.z - az;
+    const abLenSq = abx * abx + aby * aby + abz * abz;
+    if (abLenSq > 1e-8) {
+      const t = clamp01(
+        ((px - ax) * abx + (py - ay) * aby + (pz - az) * abz) / abLenSq,
+      );
+      const cx = ax + abx * t;
+      const cy = ay + aby * t;
+      const cz = az + abz * t;
+      return Math.hypot(px - cx, py - cy, pz - cz) - op.radius;
+    }
+  }
+  return (
+    Math.hypot(px - op.center.x, py - op.center.y, pz - op.center.z) - op.radius
+  );
+}
+
+function filterChunkCarves(
+  allCarves: readonly CarveOp[],
+  chunkMinX: number,
+  chunkMaxX: number,
+  chunkMinY: number,
+  chunkMaxY: number,
+  chunkMinZ: number,
+  chunkMaxZ: number,
+): CarveOp[] {
+  const result: CarveOp[] = [];
+  for (const op of allCarves) {
+    const pad = Math.max(0.1, op.radius) + 2.2;
+    let opMinX = op.center.x;
+    let opMaxX = op.center.x;
+    let opMinY = op.center.y;
+    let opMaxY = op.center.y;
+    let opMinZ = op.center.z;
+    let opMaxZ = op.center.z;
+
+    if (op.shape === "capsule" && op.end) {
+      opMinX = Math.min(opMinX, op.end.x);
+      opMaxX = Math.max(opMaxX, op.end.x);
+      opMinY = Math.min(opMinY, op.end.y);
+      opMaxY = Math.max(opMaxY, op.end.y);
+      opMinZ = Math.min(opMinZ, op.end.z);
+      opMaxZ = Math.max(opMaxZ, op.end.z);
+    }
+
+    if (
+      opMaxX + pad < chunkMinX ||
+      opMinX - pad > chunkMaxX ||
+      opMaxY + pad < chunkMinY ||
+      opMinY - pad > chunkMaxY ||
+      opMaxZ + pad < chunkMinZ ||
+      opMinZ - pad > chunkMaxZ
+    ) {
+      continue;
+    }
+    result.push(op);
+  }
+  return result;
+}
+
 function pickTerrainColor(
   worldX: number,
   worldY: number,
@@ -55,8 +250,8 @@ function pickTerrainColor(
     Math.cos(worldZ * 0.19 - worldX * 0.07);
   const micro = Math.sin(worldX * 0.43 - worldZ * 0.39 + worldY * 0.31);
 
-  // Deep cool slate rock on arch undersides and cave roofs
-  if (normalY < 0.18) {
+  // Deep cool slate rock strictly on true overhangs, arch undersides, and cave roofs
+  if (normalY < -0.10) {
     const shade = patch * 0.035 + micro * 0.02;
     return [
       clamp01(0.35 + shade),
@@ -253,6 +448,28 @@ export function meshChunkSurfaceNets(
   const indices: number[] = [];
 
   const corners = new Float64Array(8);
+  const minIx = vs * 2.0;
+  const maxIx = (nx - 3.0) * vs;
+  const minIy = vs * 2.0;
+  const maxIy = (ny - 3.0) * vs;
+  const minIz = vs * 2.0;
+  const maxIz = (nz - 3.0) * vs;
+
+  // Pre-filter carve ops against this chunk's padded world AABB (zero work on uncarved chunks)
+  const allCarves = world.getCarveLog();
+  const nearbyCarves =
+    allCarves.length > 0
+      ? filterChunkCarves(
+          allCarves,
+          startX * vs,
+          (maxCellX + 1) * vs,
+          startY * vs,
+          (maxCellY + 1) * vs,
+          startZ * vs,
+          (maxCellZ + 1) * vs,
+        )
+      : [];
+  const hasNearbyCarves = nearbyCarves.length > 0;
 
   // Pass 1: Place one smooth dual vertex inside every sign-changing cell
   for (let lz = 0; lz < sizeZ; lz++) {
@@ -332,11 +549,66 @@ export function meshChunkSurfaceNets(
           world.theme,
           world.worldHeight,
         );
+        let r = rgb[0];
+        let g = rgb[1];
+        let b = rgb[2];
+
+        // Scorch freshly carved artillery craters (charred wall + warm toasted-ash outer rim)
+        if (hasNearbyCarves) {
+          let bestAbsDist = Number.POSITIVE_INFINITY;
+          let bestSignedDist = Number.POSITIVE_INFINITY;
+          for (const op of nearbyCarves) {
+            const d = signedDistanceToCarveSurface(wx, wy, wz, op);
+            const ad = Math.abs(d);
+            if (ad < bestAbsDist) {
+              bestAbsDist = ad;
+              bestSignedDist = d;
+            }
+          }
+
+          if (bestAbsDist < 1.15) {
+            const charWeight = (1.0 - smoothstep(0.32, 1.15, bestAbsDist)) * 0.86;
+            r += (0.19 - r) * charWeight;
+            g += (0.17 - g) * charWeight;
+            b += (0.16 - b) * charWeight;
+          }
+          if (bestSignedDist > 0.85 && bestSignedDist < 1.95) {
+            const rimWeight =
+              smoothstep(0.85, 1.18, bestSignedDist) *
+              (1.0 - smoothstep(1.38, 1.95, bestSignedDist)) *
+              0.46;
+            r += (0.42 - r) * rimWeight;
+            g += (0.34 - g) * rimWeight;
+            b += (0.27 - b) * rimWeight;
+          }
+        }
+
+        // Apply 4-tap baked SDF crevice & sky-openness AO with slightly cool atmospheric shadow tint
+        const ao = computeSdfCreviceAo(
+          world,
+          wx,
+          wy,
+          wz,
+          normal.x,
+          normal.y,
+          normal.z,
+          vs,
+          minIx,
+          maxIx,
+          minIy,
+          maxIy,
+          minIz,
+          maxIz,
+        );
+        const shadowAmt = 1.0 - ao;
+        r = clamp01(r * ao * (1.0 - shadowAmt * 0.1));
+        g = clamp01(g * ao * (1.0 - shadowAmt * 0.03));
+        b = clamp01(b * Math.min(1.0, ao * (1.0 + shadowAmt * 0.14)));
 
         const vertIdx = positions.length / 3;
         positions.push(wx, wy, wz);
         normals.push(normal.x, normal.y, normal.z);
-        colors.push(rgb[0], rgb[1], rgb[2]);
+        colors.push(r, g, b);
 
         cellToVert[lx + rowOffset] = vertIdx;
       }
