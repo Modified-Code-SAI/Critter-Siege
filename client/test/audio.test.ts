@@ -821,4 +821,99 @@ describe("MusicEngine & SynthAudio atmospheric adaptive soundtrack and SFX", () 
     expect(sharedLimiter?.disconnect).toHaveBeenCalled();
     expect(vi.getTimerCount()).toBe(0);
   });
+
+  it("synthesizes countdown ticks, retreat beeps, grapple latch, drill grind tick, and pneumatic quake_club cleanly in headless Node and mocked AudioContext", () => {
+    // 1. Headless Node safety (no global AudioContext)
+    const headless = new SynthAudio();
+    expect(() => {
+      headless.playTurnTick(false);
+      headless.playTurnTick(true);
+      headless.playRetreatBeep(false);
+      headless.playRetreatBeep(true);
+      headless.playGrappleLatch();
+      headless.playDrillGrindTick();
+      headless.playLaunch("quake_club");
+      headless.dispose();
+      headless.playTurnTick(true);
+      headless.playRetreatBeep(true);
+      headless.playGrappleLatch();
+      headless.playDrillGrindTick();
+      headless.playLaunch("quake_club");
+    }).not.toThrow();
+
+    // 2. Mocked AudioContext verification
+    vi.useFakeTimers();
+    const harness = createMockAudioContext({ minimal: false });
+    stubGlobalAudioContext(harness.ctx);
+    const audio = new SynthAudio();
+    audio.unlockAndStartMusic();
+
+    // playTurnTick(false) vs playTurnTick(true)
+    const osc0 = harness.oscillators.length;
+    const buf0 = harness.bufferSources.length;
+    audio.playTurnTick(false);
+    const tickCalmOsc = harness.oscillators.length - osc0;
+    const tickCalmBuf = harness.bufferSources.length - buf0;
+    expect(tickCalmOsc).toBe(1);
+    expect(tickCalmBuf).toBe(1);
+
+    const osc1 = harness.oscillators.length;
+    const buf1 = harness.bufferSources.length;
+    audio.playTurnTick(true);
+    const tickUrgentOsc = harness.oscillators.length - osc1;
+    const tickUrgentBuf = harness.bufferSources.length - buf1;
+    expect(tickUrgentOsc).toBeGreaterThan(tickCalmOsc);
+    expect(tickUrgentBuf).toBeGreaterThan(tickCalmBuf);
+
+    // playRetreatBeep(false) vs playRetreatBeep(true)
+    const osc2 = harness.oscillators.length;
+    audio.playRetreatBeep(false);
+    const retreatCalmOsc = harness.oscillators.length - osc2;
+    expect(retreatCalmOsc).toBeGreaterThanOrEqual(2);
+
+    const osc3 = harness.oscillators.length;
+    audio.playRetreatBeep(true);
+    const retreatUrgentOsc = harness.oscillators.length - osc3;
+    expect(retreatUrgentOsc).toBeGreaterThan(retreatCalmOsc);
+
+    // playGrappleLatch()
+    const osc4 = harness.oscillators.length;
+    const buf4 = harness.bufferSources.length;
+    audio.playGrappleLatch();
+    expect(harness.oscillators.length - osc4).toBeGreaterThanOrEqual(1);
+    expect(harness.bufferSources.length - buf4).toBeGreaterThanOrEqual(1);
+
+    // playDrillGrindTick()
+    const osc5 = harness.oscillators.length;
+    const buf5 = harness.bufferSources.length;
+    audio.playDrillGrindTick();
+    expect(harness.oscillators.length - osc5).toBeGreaterThanOrEqual(1);
+    expect(harness.bufferSources.length - buf5).toBeGreaterThanOrEqual(1);
+
+    // playLaunch("quake_club") pneumatic wind-shotgun (sub-thump + air-gust burst)
+    const osc6 = harness.oscillators.length;
+    const buf6 = harness.bufferSources.length;
+    audio.playLaunch("quake_club");
+    expect(harness.oscillators.length - osc6).toBeGreaterThanOrEqual(1);
+    expect(harness.bufferSources.length - buf6).toBeGreaterThanOrEqual(1);
+
+    // Muted suppresses all SFX synthesis
+    audio.setMuted(true);
+    const oscMuted = harness.oscillators.length;
+    const bufMuted = harness.bufferSources.length;
+    audio.playTurnTick(true);
+    audio.playRetreatBeep(true);
+    audio.playGrappleLatch();
+    audio.playDrillGrindTick();
+    audio.playLaunch("quake_club");
+    expect(harness.oscillators.length).toBe(oscMuted);
+    expect(harness.bufferSources.length).toBe(bufMuted);
+
+    for (const num of harness.recordedParamNumbers) {
+      expect(Number.isFinite(num)).toBe(true);
+    }
+
+    audio.dispose();
+    expect(vi.getTimerCount()).toBe(0);
+  });
 });

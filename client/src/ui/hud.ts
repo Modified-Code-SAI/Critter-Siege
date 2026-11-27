@@ -1154,10 +1154,14 @@ export class HudController {
     const secs = Math.max(0, Math.ceil(matchState.phaseTimeRemainingSec));
     this.topTimerEl.textContent = isFinalFlood ? "🌊" : `${secs}s`;
     this.topTimerEl.classList.toggle(
+      "cs-timer-warn",
+      !isFinalFlood && matchState.phase === "ACTIVE" && secs >= 4 && secs <= 10,
+    );
+    this.topTimerEl.classList.toggle(
       "cs-timer-urgent",
       !isFinalFlood &&
-        secs <= 4 &&
-        (matchState.phase === "ACTIVE" || matchState.phase === "RETREAT"),
+        ((matchState.phase === "ACTIVE" && secs >= 1 && secs <= 3) ||
+          (matchState.phase === "RETREAT" && secs >= 1 && secs <= 5)),
     );
 
     this.topActiveEl.textContent = activeCritter ? activeCritter.name : "—";

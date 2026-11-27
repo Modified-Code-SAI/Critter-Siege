@@ -182,9 +182,11 @@ export class SynthAudio {
     }
 
     if (gadgetId === "quake_club") {
-      // Heavy melee club crack & thud
-      this.playTone(ctx, master, "triangle", 130, 44, 0.18, 0.38, now);
-      this.playFilteredNoise(ctx, master, "bandpass", 1100, 380, 0.1, 0.26, 1.4, now);
+      // Gale Scatter: punchy pneumatic wind-shotgun boom + wide pressurized air-gust burst
+      this.playTone(ctx, master, "sine", 145, 38, 0.22, 0.42, now);
+      this.playTone(ctx, master, "triangle", 260, 72, 0.11, 0.22, now);
+      this.playFilteredNoise(ctx, master, "bandpass", 1900, 420, 0.28, 0.38, 0.75, now);
+      this.playFilteredNoise(ctx, master, "highpass", 2400, 950, 0.22, 0.2, 0.8, now + 0.015);
       return;
     }
 
@@ -351,7 +353,7 @@ export class SynthAudio {
     this.playFilteredNoise(ctx, master, "bandpass", 1350, 520, 0.72, 0.18, 1.0, now + 0.12);
   }
 
-  /** Countdown turn timer tick (soft normally, sharper double-tone when urgent). */
+  /** Crisp mechanical clock tick for 10s..4s ACTIVE and sharper double-tick for 3s..1s. */
   public playTurnTick(urgent: boolean): void {
     const ready = this.ensureReady();
     if (!ready) return;
@@ -359,12 +361,58 @@ export class SynthAudio {
     const now = ctx.currentTime;
 
     if (urgent) {
-      this.playTone(ctx, master, "square", 880, 820, 0.055, 0.14, now);
-      this.playTone(ctx, master, "square", 1046, 980, 0.055, 0.12, now + 0.075);
+      this.playFilteredNoise(ctx, master, "bandpass", 3100, 1800, 0.025, 0.17, 3.4, now);
+      this.playTone(ctx, master, "triangle", 1180, 860, 0.035, 0.12, now);
+      this.playFilteredNoise(ctx, master, "bandpass", 3500, 2100, 0.025, 0.16, 3.4, now + 0.08);
+      this.playTone(ctx, master, "triangle", 1420, 1040, 0.038, 0.12, now + 0.08);
       return;
     }
 
-    this.playTone(ctx, master, "sine", 540, 480, 0.045, 0.09, now);
+    this.playFilteredNoise(ctx, master, "bandpass", 2400, 1450, 0.024, 0.13, 3.2, now);
+    this.playTone(ctx, master, "triangle", 920, 680, 0.032, 0.085, now);
+  }
+
+  /** Clear pitched tactical countdown beep for 5s..3s RETREAT and rising double-chirp for 2s..1s. */
+  public playRetreatBeep(urgent: boolean): void {
+    const ready = this.ensureReady();
+    if (!ready) return;
+    const { ctx, master } = ready;
+    const now = ctx.currentTime;
+
+    if (urgent) {
+      this.playTone(ctx, master, "sine", 980, 995, 0.065, 0.17, now);
+      this.playTone(ctx, master, "triangle", 1960, 1990, 0.055, 0.06, now);
+      this.playTone(ctx, master, "sine", 1160, 1185, 0.075, 0.18, now + 0.085);
+      this.playTone(ctx, master, "triangle", 2320, 2370, 0.06, 0.065, now + 0.085);
+      return;
+    }
+
+    this.playTone(ctx, master, "sine", 760, 755, 0.095, 0.16, now);
+    this.playTone(ctx, master, "triangle", 1520, 1510, 0.075, 0.055, now);
+  }
+
+  /** Crisp metallic claw-anchor clink when Vine Grapple latches onto rock or an Evo Pod. */
+  public playGrappleLatch(): void {
+    const ready = this.ensureReady();
+    if (!ready) return;
+    const { ctx, master } = ready;
+    const now = ctx.currentTime;
+
+    this.playFilteredNoise(ctx, master, "bandpass", 3800, 1900, 0.04, 0.2, 2.4, now);
+    this.playTone(ctx, master, "triangle", 1480, 1320, 0.13, 0.16, now);
+    this.playTone(ctx, master, "sine", 2420, 2240, 0.16, 0.11, now + 0.006);
+  }
+
+  /** Short gritty rock-boring mechanical grind pulse while Burrow Bore tunnels through terrain. */
+  public playDrillGrindTick(): void {
+    const ready = this.ensureReady();
+    if (!ready) return;
+    const { ctx, master } = ready;
+    const now = ctx.currentTime;
+
+    this.playTone(ctx, master, "sawtooth", 115, 88, 0.065, 0.13, now);
+    this.playTone(ctx, master, "triangle", 172, 130, 0.06, 0.09, now);
+    this.playFilteredNoise(ctx, master, "bandpass", 1350, 720, 0.06, 0.17, 1.8, now);
   }
 
   /** Tactile soft UI button click. */

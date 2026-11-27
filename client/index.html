@@ -763,8 +763,27 @@
         text-align: center;
       }
 
+      .cs-timer-warn {
+        color: var(--amber);
+        text-shadow: 0 0 10px rgba(251, 191, 36, 0.55);
+        animation: csTimerWarnPulse 1s ease-in-out infinite;
+      }
+
       .cs-timer-urgent {
         color: var(--coral);
+        text-shadow: 0 0 12px rgba(251, 113, 133, 0.72);
+        animation: csPulseUrgent 0.65s ease-in-out infinite;
+      }
+
+      @keyframes csTimerWarnPulse {
+        0%, 100% {
+          transform: scale(1);
+          opacity: 0.92;
+        }
+        50% {
+          transform: scale(1.05);
+          opacity: 1;
+        }
       }
 
       .cs-divider {
