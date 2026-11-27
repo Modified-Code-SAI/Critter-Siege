@@ -1,4 +1,11 @@
 import type { GadgetId } from "@critter/shared";
+import {
+  MusicEngine,
+  type MusicMood,
+  type MusicStingerKind,
+} from "./musicEngine.js";
+
+export type { MusicMood, MusicStingerKind };
 
 interface WebkitAudioGlobal {
   AudioContext?: typeof AudioContext;
@@ -15,7 +22,7 @@ function getAudioContextCtor(): (typeof AudioContext) | null {
 }
 
 /**
- * Zero-asset procedural WebAudio synthesizer for Critter Siege sound effects.
+ * Zero-asset procedural WebAudio synthesizer for Critter Siege sound effects and adaptive music.
  * Lazily initializes AudioContext on first playback and safely no-ops when
  * muted, disposed, or running headless without WebAudio support.
  */
@@ -25,10 +32,17 @@ export class SynthAudio {
   private noiseBuffer: AudioBuffer | null = null;
   private muted = false;
   private disposed = false;
+  private musicAutoStarted = false;
+  private readonly music: MusicEngine;
 
-  /** Enable or disable audio output cleanly. */
+  public constructor() {
+    this.music = new MusicEngine(() => this.ctx);
+  }
+
+  /** Enable or disable master audio output (both SFX and music) cleanly. */
   public setMuted(muted: boolean): void {
     this.muted = muted;
+    this.music.setMasterMuted(muted);
     if (this.masterGain && this.ctx) {
       this.masterGain.gain.setTargetAtTime(
         muted ? 0 : 0.45,
@@ -38,15 +52,72 @@ export class SynthAudio {
     }
   }
 
-  /** Return whether audio output is currently muted. */
+  /** Return whether master audio output is currently muted. */
   public isMuted(): boolean {
     return this.muted;
   }
 
-  /** Toggle mute state and return the new muted value. */
+  /** Toggle master mute state and return the new muted value. */
   public toggleMute(): boolean {
     this.setMuted(!this.muted);
     return this.muted;
+  }
+
+  /** Lazily unlock the shared AudioContext and start the adaptive music engine. */
+  public unlockAndStartMusic(): void {
+    if (this.disposed) {
+      return;
+    }
+    this.ensureContext();
+    this.musicAutoStarted = true;
+    if (!this.music.isMusicMuted()) {
+      this.music.start();
+    }
+  }
+
+  /** Switch adaptive background music mood. */
+  public setMusicMood(mood: MusicMood): void {
+    this.music.setMood(mood);
+  }
+
+  /** Return current adaptive background music mood. */
+  public getMusicMood(): MusicMood {
+    return this.music.getMood();
+  }
+
+  /** Mute or unmute background music independently of SFX mute. */
+  public setMusicMuted(muted: boolean): void {
+    this.music.setMusicMuted(muted);
+    if (!muted && !this.disposed && (this.ctx !== null || this.musicAutoStarted)) {
+      this.ensureContext();
+      this.music.start();
+    }
+  }
+
+  /** Return whether background music is muted. */
+  public isMusicMuted(): boolean {
+    return this.music.isMusicMuted();
+  }
+
+  /** Toggle background music mute independently of SFX mute and return the new state. */
+  public toggleMusicMute(): boolean {
+    const nextMuted = !this.music.isMusicMuted();
+    this.setMusicMuted(nextMuted);
+    return nextMuted;
+  }
+
+  /** Briefly duck background music volume so impacts punch cleanly through the mix. */
+  public duckMusic(depth?: number, durationSec?: number): void {
+    this.music.duck(depth, durationSec);
+  }
+
+  /** Play a short procedural musical stinger for major match events. */
+  public playStinger(kind: MusicStingerKind): void {
+    if (this.disposed || this.muted) {
+      return;
+    }
+    this.ensureContext();
+    this.music.playStinger(kind);
   }
 
   /** Rising charge whine tick while holding shot power. */
@@ -124,6 +195,11 @@ export class SynthAudio {
       return;
     }
 
+    if (gadgetId === "mend_brew") {
+      this.playHealChime();
+      return;
+    }
+
     // Bonus gadgets: gravity_mine, prism_wall, shock_magnet
     this.playTone(ctx, master, "sine", 420, 740, 0.18, 0.2, now);
     this.playTone(ctx, master, "triangle", 210, 380, 0.2, 0.14, now + 0.04);
@@ -135,6 +211,8 @@ export class SynthAudio {
     if (!ready) return;
     const { ctx, master } = ready;
     const now = ctx.currentTime;
+
+    this.duckMusic(0.35, 0.55);
 
     const r = clamp(Number.isFinite(radius) ? radius : 2.0, 0.8, 5.0);
     const scale = clamp(r / 2.4, 0.55, 1.4);
@@ -186,6 +264,76 @@ export class SynthAudio {
     }
   }
 
+  /** Crisp ascending dual-bell chime when Siege Coins are awarded. */
+  public playCoinEarned(): void {
+    const ready = this.ensureReady();
+    if (!ready) return;
+    const { ctx, master } = ready;
+    const now = ctx.currentTime;
+
+    this.playTone(ctx, master, "sine", 1174.66, 1182, 0.13, 0.16, now);
+    this.playTone(ctx, master, "triangle", 2349.32, 2360, 0.09, 0.06, now);
+    this.playTone(ctx, master, "sine", 1567.98, 1580, 0.22, 0.18, now + 0.075);
+    this.playTone(ctx, master, "triangle", 3135.96, 3150, 0.14, 0.07, now + 0.075);
+  }
+
+  /** Satisfying mechanical latch click + bright D-major harmonic triad on Armory purchase. */
+  public playShopBuy(): void {
+    const ready = this.ensureReady();
+    if (!ready) return;
+    const { ctx, master } = ready;
+    const now = ctx.currentTime;
+
+    // Mechanical latch click
+    this.playFilteredNoise(ctx, master, "bandpass", 2400, 1200, 0.04, 0.14, 2.0, now);
+    this.playTone(ctx, master, "triangle", 310, 460, 0.045, 0.14, now);
+
+    // Bright D-major harmonic triad (D5, F#5, A5)
+    const triad = [587.33, 739.99, 880.0];
+    for (let i = 0; i < triad.length; i++) {
+      const freq = triad[i];
+      if (freq === undefined) continue;
+      const start = now + 0.045 + i * 0.045;
+      this.playTone(ctx, master, "triangle", freq, freq * 1.004, 0.24, 0.15, start);
+      this.playTone(ctx, master, "sine", freq * 2, freq * 2.004, 0.16, 0.05, start);
+    }
+  }
+
+  /** Warm sparkling rising herbal chord for Mend Brew heal activation. */
+  public playHealChime(): void {
+    const ready = this.ensureReady();
+    if (!ready) return;
+    const { ctx, master } = ready;
+    const now = ctx.currentTime;
+
+    const notes = [440.0, 554.37, 659.25, 880.0, 1108.73];
+    for (let i = 0; i < notes.length; i++) {
+      const freq = notes[i];
+      if (freq === undefined) continue;
+      const start = now + i * 0.055;
+      this.playTone(ctx, master, "sine", freq, freq * 1.01, 0.28, 0.14, start);
+      this.playTone(ctx, master, "triangle", freq * 1.5, freq * 1.51, 0.16, 0.045, start + 0.015);
+    }
+  }
+
+  /** Deep surging ocean swell + low sub-bass rumble + foamy wash for Round 5 Final Deluge. */
+  public playFloodRumble(): void {
+    const ready = this.ensureReady();
+    if (!ready) return;
+    const { ctx, master } = ready;
+    const now = ctx.currentTime;
+
+    this.duckMusic(0.3, 0.75);
+
+    // Low sub-bass surge
+    this.playTone(ctx, master, "sine", 72, 38, 0.85, 0.34, now);
+    this.playTone(ctx, master, "triangle", 118, 56, 0.65, 0.16, now + 0.06);
+    // Deep turbulent ocean swell
+    this.playFilteredNoise(ctx, master, "lowpass", 420, 140, 0.9, 0.28, 0.8, now);
+    // Foamy surface wash crest
+    this.playFilteredNoise(ctx, master, "bandpass", 1350, 520, 0.72, 0.18, 1.0, now + 0.12);
+  }
+
   /** Countdown turn timer tick (soft normally, sharper double-tone when urgent). */
   public playTurnTick(urgent: boolean): void {
     const ready = this.ensureReady();
@@ -212,12 +360,14 @@ export class SynthAudio {
     this.playTone(ctx, master, "sine", 660, 880, 0.045, 0.11, now);
   }
 
-  /** Release WebAudio resources and silence all future calls. */
+  /** Release WebAudio resources (including MusicEngine) and silence all future calls. */
   public dispose(): void {
     if (this.disposed) {
       return;
     }
     this.disposed = true;
+    this.music.dispose();
+
     const ctx = this.ctx;
     this.ctx = null;
     this.masterGain = null;
@@ -232,8 +382,8 @@ export class SynthAudio {
     }
   }
 
-  private ensureReady(): { ctx: AudioContext; master: GainNode } | null {
-    if (this.disposed || this.muted) {
+  private ensureContext(): AudioContext | null {
+    if (this.disposed) {
       return null;
     }
     if (!this.ctx) {
@@ -244,17 +394,13 @@ export class SynthAudio {
       try {
         const ctx = new Ctor();
         const master = ctx.createGain();
-        master.gain.value = 0.45;
+        master.gain.value = this.muted ? 0 : 0.45;
         master.connect(ctx.destination);
         this.ctx = ctx;
         this.masterGain = master;
       } catch {
         return null;
       }
-    }
-
-    if (!this.ctx || !this.masterGain) {
-      return null;
     }
 
     if (this.ctx.state === "suspended" && typeof this.ctx.resume === "function") {
@@ -265,7 +411,26 @@ export class SynthAudio {
       }
     }
 
-    return { ctx: this.ctx, master: this.masterGain };
+    return this.ctx;
+  }
+
+  private ensureReady(): { ctx: AudioContext; master: GainNode } | null {
+    if (this.disposed || this.muted) {
+      return null;
+    }
+    const ctx = this.ensureContext();
+    if (!ctx || !this.masterGain) {
+      return null;
+    }
+
+    if (!this.musicAutoStarted) {
+      this.musicAutoStarted = true;
+      if (!this.music.isMusicMuted()) {
+        this.music.start();
+      }
+    }
+
+    return { ctx, master: this.masterGain };
   }
 
   private getNoiseBuffer(ctx: AudioContext): AudioBuffer | null {

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  COSMETIC_ACCENT_CATALOG,
   PROFILE_STORAGE_KEY,
   ProgressionStore,
   calculateEssenceReward,
@@ -155,5 +156,57 @@ describe("Siege Essence progression", () => {
       "glider_squirrel",
     ]);
     expect(profile.unlockedBonusGadgets).toEqual([]);
+    expect(profile.unlockedCosmetics).toEqual([]);
+  });
+
+  it("unlocks cosmetic accents with Siege Essence, auto-equips color, rejects duplicate/unaffordable buys, and persists across reloads", () => {
+    expect(COSMETIC_ACCENT_CATALOG.length).toBe(4);
+    const storage = createMemoryStorage();
+    const storeA = new ProgressionStore(storage);
+
+    // Unaffordable cosmetic purchase rejected cleanly
+    const tooPoor = storeA.purchaseCosmetic("neon_cyan");
+    expect(tooPoor.ok).toBe(false);
+    expect(tooPoor.reason).toBeTruthy();
+    expect(tooPoor.profile.essence).toBe(0);
+    expect(tooPoor.profile.unlockedCosmetics).toEqual([]);
+
+    // Award 75 Essence (20 finish + 15*1 KO + 10*1 pod + 30 win)
+    storeA.awardMatchEssence({
+      finished: true,
+      kos: 1,
+      evoPodsCollected: 1,
+      won: true,
+    });
+    expect(storeA.getProfile().essence).toBe(75);
+
+    // Unlock Glacier Glow (neon_cyan, 40 Essence) -> auto-equips #22d3ee
+    const buyCyan = storeA.purchaseCosmetic("neon_cyan");
+    expect(buyCyan.ok).toBe(true);
+    expect(buyCyan.profile.essence).toBe(35);
+    expect(buyCyan.profile.unlockedCosmetics).toContain("neon_cyan");
+    expect(buyCyan.profile.selectedColor).toBe("#22d3ee");
+
+    // Duplicate purchase rejected without deducting Essence
+    const dupCyan = storeA.purchaseCosmetic("neon_cyan");
+    expect(dupCyan.ok).toBe(false);
+    expect(dupCyan.profile.essence).toBe(35);
+
+    // Unaffordable higher-tier cosmetic (solar_gold = 60 Essence) rejected
+    const tooPoorGold = storeA.purchaseCosmetic("solar_gold");
+    expect(tooPoorGold.ok).toBe(false);
+    expect(tooPoorGold.profile.essence).toBe(35);
+    expect(tooPoorGold.profile.unlockedCosmetics).not.toContain("solar_gold");
+
+    // Unknown cosmetic ID rejected
+    const unknown = storeA.purchaseCosmetic("nonexistent_glow");
+    expect(unknown.ok).toBe(false);
+
+    // Reload into a brand-new ProgressionStore reading the same storage
+    const storeB = new ProgressionStore(storage);
+    const reloaded = storeB.getProfile();
+    expect(reloaded.essence).toBe(35);
+    expect(reloaded.unlockedCosmetics).toEqual(["neon_cyan"]);
+    expect(reloaded.selectedColor).toBe("#22d3ee");
   });
 });

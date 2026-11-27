@@ -1,5 +1,10 @@
 import * as THREE from "three";
-import { SDF_DIMS, type EvoPodState, type Vec3 } from "@critter/shared";
+import {
+  SDF_DIMS,
+  type EvoPodState,
+  type PrismWallState,
+  type Vec3,
+} from "@critter/shared";
 
 const WORLD_SPAN_X = SDF_DIMS.nx * SDF_DIMS.voxelSize;
 const WORLD_SPAN_Y = SDF_DIMS.ny * SDF_DIMS.voxelSize;
@@ -10,6 +15,7 @@ const WIND_RIBBON_COUNT = 22;
 interface DynamicParticle {
   mesh: THREE.Mesh;
   material: THREE.Material;
+  sharedMaterial?: boolean;
   velocity: THREE.Vector3;
   spin: THREE.Vector3;
   gravity: number;
@@ -20,6 +26,12 @@ interface DynamicParticle {
   baseScaleVec: THREE.Vector3;
   baseOpacity: number;
   kind: "shard" | "smoke" | "shockwave" | "flash" | "droplet" | "spark" | "beam";
+}
+
+interface PrismWallVisual {
+  group: THREE.Group;
+  mat: THREE.MeshStandardMaterial;
+  rimMat: THREE.MeshBasicMaterial;
 }
 
 interface EvoPodVisual {
@@ -102,6 +114,7 @@ export class VfxSystem {
 
   private readonly particleGroup: THREE.Group;
   private readonly evoPodGroup: THREE.Group;
+  private readonly prismWallGroup: THREE.Group;
   private readonly windGroup: THREE.Group;
   private readonly pollenPoints: THREE.Points;
   private readonly pollenPhases: Float32Array;
@@ -120,8 +133,13 @@ export class VfxSystem {
     grappleBeam: THREE.CylinderGeometry;
   };
 
+  private readonly shardPaletteMaterials: THREE.MeshStandardMaterial[];
+  private readonly prismShardMaterial: THREE.MeshStandardMaterial;
+  private readonly tempVec = new THREE.Vector3();
+
   private readonly particles: DynamicParticle[] = [];
   private readonly evoPods: Map<string, EvoPodVisual> = new Map();
+  private readonly prismWallVisuals = new Map<string, PrismWallVisual>();
   private readonly windRibbons: WindRibbon[] = [];
 
   private readonly projectileGroup: THREE.Group;
@@ -150,6 +168,10 @@ export class VfxSystem {
     this.evoPodGroup.name = "vfx_evo_pods";
     this.group.add(this.evoPodGroup);
 
+    this.prismWallGroup = new THREE.Group();
+    this.prismWallGroup.name = "vfx_prism_walls";
+    this.group.add(this.prismWallGroup);
+
     this.windGroup = new THREE.Group();
     this.windGroup.name = "vfx_wind_ribbons";
     this.group.add(this.windGroup);
@@ -168,6 +190,26 @@ export class VfxSystem {
       ribbon: ribbonGeo,
       grappleBeam: new THREE.CylinderGeometry(0.06, 0.06, 1.0, 8, 1, false),
     };
+
+    this.shardPaletteMaterials = ROCK_SHARD_PALETTE.map(
+      (color) =>
+        new THREE.MeshStandardMaterial({
+          color,
+          roughness: 0.85,
+          metalness: 0.05,
+          flatShading: true,
+        }),
+    );
+    this.prismShardMaterial = new THREE.MeshStandardMaterial({
+      color: 0x67e8f9,
+      emissive: 0x22d3ee,
+      emissiveIntensity: 0.85,
+      roughness: 0.18,
+      metalness: 0.12,
+      flatShading: true,
+      transparent: true,
+      opacity: 0.85,
+    });
 
     // Build translucent sunlit wind-stream ribbons spanning the 60m archipelago sky
     for (let i = 0; i < WIND_RIBBON_COUNT; i++) {
@@ -412,16 +454,12 @@ export class VfxSystem {
       const shardGeo = useTetra
         ? this.sharedGeos.shardTetra
         : this.sharedGeos.shardDodeca;
-      const paletteColor =
-        ROCK_SHARD_PALETTE[i % ROCK_SHARD_PALETTE.length] ?? 0xb96c43;
-      const shardMat = new THREE.MeshStandardMaterial({
-        color: paletteColor,
-        roughness: 0.85,
-        metalness: 0.05,
-        flatShading: true,
-        transparent: true,
-        opacity: 1.0,
-      });
+      const shardMat =
+        this.shardPaletteMaterials[i % this.shardPaletteMaterials.length] ??
+        this.shardPaletteMaterials[0];
+      if (!shardMat) {
+        continue;
+      }
       const shardMesh = new THREE.Mesh(shardGeo, shardMat);
       shardMesh.castShadow = true;
 
@@ -451,6 +489,7 @@ export class VfxSystem {
       this.particles.push({
         mesh: shardMesh,
         material: shardMat,
+        sharedMaterial: true,
         velocity: new THREE.Vector3(
           Math.cos(theta) * Math.cos(elev) * speed * (isPull ? -0.4 : 1),
           Math.sin(elev) * speed + 2.4,
@@ -465,7 +504,7 @@ export class VfxSystem {
         age: 0,
         maxAge: 0.85 + this.nextRand() * 0.5,
         startScale: 1.0,
-        endScale: 0.15,
+        endScale: 0.72,
         baseScaleVec,
         baseOpacity: 1.0,
         kind: "shard",
@@ -960,6 +999,141 @@ export class VfxSystem {
     }
   }
 
+  /**
+   * Synchronize glowing 3D crystal Prism Wall barriers (beveled extruded crystal slab +
+   * glowing cyan rim frame, NEVER BoxGeometry) and cleanly dispose expired/shattered walls.
+   */
+  public syncPrismWalls(
+    walls: readonly PrismWallState[],
+    elapsedSec: number,
+  ): void {
+    const activeIds = new Set<string>();
+    const t = Number.isFinite(elapsedSec) ? elapsedSec : 0;
+
+    for (const wall of walls) {
+      if (!wall.active || wall.turnsLeft <= 0) {
+        continue;
+      }
+      activeIds.add(wall.id);
+
+      let visual = this.prismWallVisuals.get(wall.id);
+      if (
+        !visual ||
+        visual.group.userData.wallWidth !== wall.width ||
+        visual.group.userData.wallHeight !== wall.height
+      ) {
+        if (visual) {
+          this.prismWallGroup.remove(visual.group);
+          disposeObjectTree(visual.group);
+        }
+        visual = this.createPrismWallVisual(wall);
+        this.prismWallVisuals.set(wall.id, visual);
+        this.prismWallGroup.add(visual.group);
+      }
+
+      visual.group.position.set(
+        wall.position.x,
+        wall.position.y + wall.height * 0.5,
+        wall.position.z,
+      );
+      visual.group.rotation.y = Math.atan2(wall.normal.x, wall.normal.z);
+
+      const shimmer = Math.sin(t * 4.2 + wall.position.x * 0.3);
+      visual.mat.emissiveIntensity = 0.7 + shimmer * 0.22;
+      visual.rimMat.opacity = 0.78 + shimmer * 0.16;
+    }
+
+    for (const [id, visual] of this.prismWallVisuals.entries()) {
+      if (!activeIds.has(id)) {
+        this.prismWallGroup.remove(visual.group);
+        disposeObjectTree(visual.group);
+        this.prismWallVisuals.delete(id);
+      }
+    }
+  }
+
+  /** Burst 16 shimmering cyan crystal shards and an expanding cyan shockwave ring when a Prism Wall shatters. */
+  public spawnPrismShatter(position: Vec3): void {
+    // Expanding cyan shockwave ring
+    const ringMat = new THREE.MeshBasicMaterial({
+      color: 0x67e8f9,
+      transparent: true,
+      opacity: 0.94,
+      depthWrite: false,
+    });
+    const ringMesh = new THREE.Mesh(this.sharedGeos.shockRing, ringMat);
+    ringMesh.position.set(position.x, position.y + 0.4, position.z);
+    ringMesh.rotation.x = Math.PI * 0.5;
+    this.particleGroup.add(ringMesh);
+    this.particles.push({
+      mesh: ringMesh,
+      material: ringMat,
+      velocity: new THREE.Vector3(0, 0.25, 0),
+      spin: new THREE.Vector3(0, 0, 0),
+      gravity: 0,
+      age: 0,
+      maxAge: 0.52,
+      startScale: 0.45,
+      endScale: 3.4,
+      baseScaleVec: new THREE.Vector3(1, 1, 1),
+      baseOpacity: 0.94,
+      kind: "shockwave",
+    });
+
+    // 16 shimmering cyan tetrahedral crystal shards reusing shared prismShardMaterial
+    for (let i = 0; i < 16; i++) {
+      const shardMesh = new THREE.Mesh(
+        this.sharedGeos.shardTetra,
+        this.prismShardMaterial,
+      );
+      const theta = (i / 16) * Math.PI * 2 + this.nextRand() * 0.35;
+      const elev = 0.15 + this.nextRand() * 0.95;
+      const speed = 3.8 + this.nextRand() * 4.8;
+
+      shardMesh.position.set(
+        position.x + Math.cos(theta) * 0.45,
+        position.y + 0.5 + this.nextRand() * 1.1,
+        position.z + Math.sin(theta) * 0.45,
+      );
+      shardMesh.rotation.set(
+        this.nextRand() * Math.PI,
+        this.nextRand() * Math.PI,
+        this.nextRand() * Math.PI,
+      );
+
+      const baseScaleVec = new THREE.Vector3(
+        0.55 + this.nextRand() * 0.85,
+        0.85 + this.nextRand() * 0.95,
+        0.45 + this.nextRand() * 0.7,
+      );
+
+      this.particleGroup.add(shardMesh);
+      this.particles.push({
+        mesh: shardMesh,
+        material: this.prismShardMaterial,
+        sharedMaterial: true,
+        velocity: new THREE.Vector3(
+          Math.cos(theta) * Math.cos(elev) * speed,
+          Math.sin(elev) * speed + 2.2,
+          Math.sin(theta) * Math.cos(elev) * speed,
+        ),
+        spin: new THREE.Vector3(
+          (this.nextRand() - 0.5) * 16,
+          (this.nextRand() - 0.5) * 16,
+          (this.nextRand() - 0.5) * 16,
+        ),
+        gravity: 16.0,
+        age: 0,
+        maxAge: 0.78 + this.nextRand() * 0.42,
+        startScale: 1.1,
+        endScale: 0.75,
+        baseScaleVec,
+        baseOpacity: 0.85,
+        kind: "shard",
+      });
+    }
+  }
+
   /** Resize atmospheric wind-ribbon and sunlit pollen bounds for Duel (60m) vs Grand (144m) worlds. */
   public setWorldBounds(
     worldWidth: number,
@@ -1004,8 +1178,8 @@ export class VfxSystem {
     const hasWind = Number.isFinite(speed) && speed > 0.08;
 
     const dir = hasWind
-      ? new THREE.Vector3(wind.x / speed, wind.y / speed, wind.z / speed)
-      : new THREE.Vector3(1, 0, 0);
+      ? this.tempVec.set(wind.x / speed, wind.y / speed, wind.z / speed)
+      : this.tempVec.set(1, 0, 0);
     const quat = new THREE.Quaternion().setFromUnitVectors(FORWARD_Z, dir);
     const driftSpeed = hasWind ? Math.max(2.0, speed * 1.45) : 0.45;
     const targetOpacity = hasWind ? Math.min(0.46, 0.13 + speed * 0.045) : 0.06;
@@ -1099,8 +1273,7 @@ export class VfxSystem {
       }
       p.age += safeDt;
       if (p.age >= p.maxAge) {
-        this.particleGroup.remove(p.mesh);
-        p.material.dispose();
+        this.disposeParticle(p);
         this.particles.splice(i, 1);
         continue;
       }
@@ -1112,7 +1285,11 @@ export class VfxSystem {
       p.mesh.rotation.y += p.spin.y * safeDt;
       p.mesh.rotation.z += p.spin.z * safeDt;
 
-      const s = p.startScale + (p.endScale - p.startScale) * frac;
+      let s = p.startScale + (p.endScale - p.startScale) * frac;
+      if (p.sharedMaterial && p.kind === "shard" && frac > 0.75) {
+        const tailFrac = (frac - 0.75) / 0.25;
+        s = s * (1 - tailFrac) + 0.05 * tailFrac;
+      }
       if (p.kind === "beam") {
         p.mesh.scale.set(
           p.baseScaleVec.x * s,
@@ -1128,8 +1305,9 @@ export class VfxSystem {
       }
 
       if (
-        p.material instanceof THREE.MeshBasicMaterial ||
-        p.material instanceof THREE.MeshStandardMaterial
+        !p.sharedMaterial &&
+        (p.material instanceof THREE.MeshBasicMaterial ||
+          p.material instanceof THREE.MeshStandardMaterial)
       ) {
         const fade = p.kind === "shard" ? Math.min(1, (1 - frac) * 2.2) : 1 - frac;
         p.material.opacity = Math.max(0, p.baseOpacity * fade);
@@ -1148,11 +1326,10 @@ export class VfxSystem {
     }
   }
 
-  /** Dispose all active particles, pollen motes, Evo Pods, wind ribbons, markers, and shared geometries. */
+  /** Dispose all active particles, pollen motes, Evo Pods, Prism Walls, wind ribbons, markers, shared materials, and shared geometries. */
   public dispose(): void {
     for (const p of this.particles) {
-      this.particleGroup.remove(p.mesh);
-      p.material.dispose();
+      this.disposeParticle(p);
     }
     this.particles.length = 0;
 
@@ -1174,6 +1351,13 @@ export class VfxSystem {
     }
     this.evoPods.clear();
 
+    for (const visual of this.prismWallVisuals.values()) {
+      this.prismWallGroup.remove(visual.group);
+      disposeObjectTree(visual.group);
+    }
+    this.prismWallVisuals.clear();
+    this.group.remove(this.prismWallGroup);
+
     for (const ribbon of this.windRibbons) {
       this.windGroup.remove(ribbon.mesh);
       ribbon.material.dispose();
@@ -1187,6 +1371,11 @@ export class VfxSystem {
     disposeObjectTree(this.projectileGroup);
     disposeObjectTree(this.dronePingGroup);
 
+    for (const mat of this.shardPaletteMaterials) {
+      mat.dispose();
+    }
+    this.prismShardMaterial.dispose();
+
     this.sharedGeos.shardDodeca.dispose();
     this.sharedGeos.shardTetra.dispose();
     this.sharedGeos.smoke.dispose();
@@ -1196,6 +1385,110 @@ export class VfxSystem {
     this.sharedGeos.spark.dispose();
     this.sharedGeos.ribbon.dispose();
     this.sharedGeos.grappleBeam.dispose();
+  }
+
+  private disposeParticle(p: DynamicParticle): void {
+    this.particleGroup.remove(p.mesh);
+    if (!p.sharedMaterial) {
+      p.material.dispose();
+    }
+  }
+
+  private createPrismWallVisual(wall: PrismWallState): PrismWallVisual {
+    const group = new THREE.Group();
+    group.name = `prism_wall_${wall.id}`;
+    group.userData.wallWidth = wall.width;
+    group.userData.wallHeight = wall.height;
+
+    const hw = Math.max(0.6, wall.width * 0.5);
+    const hh = Math.max(0.6, wall.height * 0.5);
+    const bevel = 0.05;
+    const sx = Math.max(0.25, hw - bevel);
+    const sy = Math.max(0.25, hh - bevel);
+    const ch = Math.min(sx * 0.28, sy * 0.24, 0.36);
+
+    const shape = new THREE.Shape();
+    shape.moveTo(-sx + ch, -sy);
+    shape.lineTo(sx - ch, -sy);
+    shape.lineTo(sx, -sy + ch);
+    shape.lineTo(sx, sy - ch);
+    shape.lineTo(sx - ch, sy);
+    shape.lineTo(-sx + ch, sy);
+    shape.lineTo(-sx, sy - ch);
+    shape.lineTo(-sx, -sy + ch);
+    shape.closePath();
+
+    const slabGeo = new THREE.ExtrudeGeometry(shape, {
+      depth: 0.14,
+      bevelEnabled: true,
+      bevelThickness: bevel,
+      bevelSize: bevel,
+      bevelSegments: 2,
+    });
+    slabGeo.translate(0, 0, -0.07);
+
+    const mat = new THREE.MeshStandardMaterial({
+      color: 0x67e8f9,
+      emissive: 0x06b6d4,
+      emissiveIntensity: 0.72,
+      roughness: 0.16,
+      metalness: 0.22,
+      transparent: true,
+      opacity: 0.62,
+      side: THREE.DoubleSide,
+      depthWrite: false,
+    });
+    const slabMesh = new THREE.Mesh(slabGeo, mat);
+    slabMesh.name = "prism_wall_slab";
+    group.add(slabMesh);
+
+    const rimMat = new THREE.MeshBasicMaterial({
+      color: 0xa5f3fc,
+      transparent: true,
+      opacity: 0.88,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    });
+
+    const rimCurve = new THREE.CatmullRomCurve3(
+      [
+        new THREE.Vector3(-hw + ch, -hh, 0),
+        new THREE.Vector3(hw - ch, -hh, 0),
+        new THREE.Vector3(hw, -hh + ch, 0),
+        new THREE.Vector3(hw, hh - ch, 0),
+        new THREE.Vector3(hw - ch, hh, 0),
+        new THREE.Vector3(-hw + ch, hh, 0),
+        new THREE.Vector3(-hw, hh - ch, 0),
+        new THREE.Vector3(-hw, -hh + ch, 0),
+      ],
+      true,
+      "catmullrom",
+      0.08,
+    );
+    const rimMesh = new THREE.Mesh(
+      new THREE.TubeGeometry(rimCurve, 32, 0.045, 6, true),
+      rimMat,
+    );
+    rimMesh.name = "prism_wall_rim";
+    group.add(rimMesh);
+
+    const innerHexRing = new THREE.Mesh(
+      new THREE.TorusGeometry(Math.min(hw, hh) * 0.54, 0.024, 6, 6),
+      rimMat,
+    );
+    innerHexRing.name = "prism_wall_emblem";
+    group.add(innerHexRing);
+
+    for (const side of [-1, 1] as const) {
+      const pillar = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.085, 0.125, wall.height * 0.94, 6),
+        mat,
+      );
+      pillar.position.set(side * (hw - 0.08), 0, 0);
+      group.add(pillar);
+    }
+
+    return { group, mat, rimMat };
   }
 
   private spawnProjectileSpark(position: Vec3, color: number): void {

@@ -50,23 +50,56 @@ function disposeMaterial(material: THREE.Material | THREE.Material[]): void {
   material.dispose();
 }
 
-/** Recursively dispose all geometries and materials inside an Object3D subtree. */
+/** Recursively dispose all unique geometries and materials inside an Object3D subtree once. */
 function disposeObjectTree(root: THREE.Object3D): void {
+  const geometries = new Set<THREE.BufferGeometry>();
+  const materials = new Set<THREE.Material>();
+  const collectMaterial = (
+    material: THREE.Material | THREE.Material[],
+  ): void => {
+    if (Array.isArray(material)) {
+      for (const item of material) {
+        materials.add(item);
+      }
+      return;
+    }
+    materials.add(material);
+  };
+
   root.traverse((obj) => {
-    if (obj instanceof THREE.Mesh) {
-      obj.geometry.dispose();
-      disposeMaterial(obj.material);
-    } else if (obj instanceof THREE.Line) {
-      obj.geometry.dispose();
-      disposeMaterial(obj.material);
-    } else if (obj instanceof THREE.Points) {
-      obj.geometry.dispose();
-      disposeMaterial(obj.material);
-    } else if (obj instanceof THREE.Sprite) {
-      obj.geometry.dispose();
-      disposeMaterial(obj.material);
+    if (
+      obj instanceof THREE.Mesh ||
+      obj instanceof THREE.Line ||
+      obj instanceof THREE.Points ||
+      obj instanceof THREE.Sprite
+    ) {
+      geometries.add(obj.geometry);
+      collectMaterial(obj.material);
     }
   });
+
+  for (const geometry of geometries) {
+    geometry.dispose();
+  }
+  for (const material of materials) {
+    material.dispose();
+  }
+}
+
+let activeMaterialCache: Map<string, THREE.MeshStandardMaterial> | null = null;
+
+function withMaterialCache<T>(fn: () => T): T {
+  const created = activeMaterialCache === null;
+  if (created) {
+    activeMaterialCache = new Map<string, THREE.MeshStandardMaterial>();
+  }
+  try {
+    return fn();
+  } finally {
+    if (created) {
+      activeMaterialCache = null;
+    }
+  }
 }
 
 function createMesh(
@@ -103,7 +136,47 @@ function makeStandard(
     depthWrite?: boolean;
     side?: THREE.Side;
   },
+  cache?: Map<string, THREE.MeshStandardMaterial>,
 ): THREE.MeshStandardMaterial {
+  const targetCache = cache ?? activeMaterialCache;
+  if (targetCache) {
+    const colorKey =
+      typeof color === "number" || typeof color === "string"
+        ? String(color)
+        : color.getHexString();
+    const emKey =
+      extra?.emissive === undefined
+        ? ""
+        : typeof extra.emissive === "number" ||
+            typeof extra.emissive === "string"
+          ? String(extra.emissive)
+          : extra.emissive.getHexString();
+    const key = `${colorKey}|${roughness}|${metalness}|${emKey}|${extra?.emissiveIntensity ?? ""}|${extra?.transparent ? 1 : 0}|${extra?.opacity ?? 1}|${extra?.depthWrite === false ? 0 : 1}|${extra?.side ?? 0}`;
+    const existing = targetCache.get(key);
+    if (existing) {
+      return existing;
+    }
+    const mat = new THREE.MeshStandardMaterial({
+      color,
+      roughness,
+      metalness,
+      ...(extra?.emissive !== undefined ? { emissive: extra.emissive } : {}),
+      ...(extra?.emissiveIntensity !== undefined
+        ? { emissiveIntensity: extra.emissiveIntensity }
+        : {}),
+      ...(extra?.transparent !== undefined
+        ? { transparent: extra.transparent }
+        : {}),
+      ...(extra?.opacity !== undefined ? { opacity: extra.opacity } : {}),
+      ...(extra?.depthWrite !== undefined
+        ? { depthWrite: extra.depthWrite }
+        : {}),
+      ...(extra?.side !== undefined ? { side: extra.side } : {}),
+    });
+    targetCache.set(key, mat);
+    return mat;
+  }
+
   return new THREE.MeshStandardMaterial({
     color,
     roughness,
@@ -130,23 +203,29 @@ function addEyes(
   zPos: number,
   radius = 0.048,
 ): void {
-  for (const side of [-1, 1] as const) {
-    const eye = createMesh(
-      new THREE.SphereGeometry(radius, 12, 10),
-      makeStandard(0x161820, 0.15, 0.1),
-      [side * xOffset, yPos, zPos],
-    );
-    const glint = createMesh(
-      new THREE.SphereGeometry(radius * 0.34, 8, 8),
-      makeStandard(0xffffff, 0.1, 0.0, {
-        emissive: 0xffffff,
-        emissiveIntensity: 0.4,
-      }),
-      [side * (xOffset - radius * 0.25), yPos + radius * 0.32, zPos + radius * 0.8],
-    );
-    glint.castShadow = false;
-    parent.add(eye, glint);
-  }
+  withMaterialCache(() => {
+    for (const side of [-1, 1] as const) {
+      const eye = createMesh(
+        new THREE.SphereGeometry(radius, 12, 10),
+        makeStandard(0x161820, 0.15, 0.1),
+        [side * xOffset, yPos, zPos],
+      );
+      const glint = createMesh(
+        new THREE.SphereGeometry(radius * 0.34, 8, 8),
+        makeStandard(0xffffff, 0.1, 0.0, {
+          emissive: 0xffffff,
+          emissiveIntensity: 0.4,
+        }),
+        [
+          side * (xOffset - radius * 0.25),
+          yPos + radius * 0.32,
+          zPos + radius * 0.8,
+        ],
+      );
+      glint.castShadow = false;
+      parent.add(eye, glint);
+    }
+  });
 }
 
 function buildTeamCollar(
@@ -1380,7 +1459,9 @@ export class CritterRig {
     this.bodyGroup.name = "body_group";
     this.root.add(this.bodyGroup);
 
-    this.proceduralBody = buildSpeciesGeometry(species, teamColor);
+    this.proceduralBody = withMaterialCache(() =>
+      buildSpeciesGeometry(species, teamColor),
+    );
     this.bodyGroup.add(this.proceduralBody);
 
     this.anchors = {
@@ -1394,7 +1475,7 @@ export class CritterRig {
     this.apexGroup.name = "apex_aura";
     this.bodyGroup.add(this.apexGroup);
 
-    this.aimIndicator = buildAimIndicator(teamColor);
+    this.aimIndicator = withMaterialCache(() => buildAimIndicator(teamColor));
     this.aimIndicator.position.set(0, 0.54, 0.24);
     this.bodyGroup.add(this.aimIndicator);
 
@@ -1525,7 +1606,9 @@ export class CritterRig {
       this.clearGroupChildren(anchor);
 
       if (nextMutation !== undefined) {
-        const attachment = buildMutationMesh(nextMutation);
+        const attachment = withMaterialCache(() =>
+          buildMutationMesh(nextMutation),
+        );
         anchor.add(attachment);
         this.currentEquipped.set(slot, nextMutation);
       } else {
@@ -1536,7 +1619,7 @@ export class CritterRig {
     if (apex !== this.currentApex) {
       this.clearGroupChildren(this.apexGroup);
       if (apex !== null) {
-        this.apexGroup.add(buildApexVisual(apex));
+        this.apexGroup.add(withMaterialCache(() => buildApexVisual(apex)));
       }
       this.currentApex = apex;
     }

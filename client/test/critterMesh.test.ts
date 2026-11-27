@@ -467,4 +467,103 @@ describe("CritterRig & TerrainRenderer", () => {
 
     vfx.dispose();
   });
+
+  it("syncs non-box 3D Prism Walls, bursts crystal shatter shards reusing shared materials, and reuses CritterRig materials cleanly", () => {
+    // 1. Verify CritterRig material reuse & single-disposal
+    const rig = new CritterRig("hedgehog", "#22d3ee", "QuillHero", false);
+    const bodyObj = rig.root.getObjectByName("species_hedgehog");
+    expect(bodyObj).toBeDefined();
+    const bodyMeshes = bodyObj ? collectMeshes(bodyObj) : [];
+    const uniqueMats = new Set<THREE.Material>();
+    for (const m of bodyMeshes) {
+      if (!Array.isArray(m.material)) {
+        uniqueMats.add(m.material);
+      }
+    }
+    expect(bodyMeshes.length).toBeGreaterThan(25);
+    expect(uniqueMats.size).toBeLessThan(bodyMeshes.length);
+
+    const matSpies = Array.from(uniqueMats).map((mat) =>
+      vi.spyOn(mat, "dispose"),
+    );
+    rig.dispose();
+    for (const spy of matSpies) {
+      expect(spy).toHaveBeenCalledTimes(1);
+    }
+
+    // 2. Verify VfxSystem Prism Wall rendering, shatter burst, and shared material safety
+    const vfx = new VfxSystem();
+    vfx.syncPrismWalls(
+      [
+        {
+          id: "wall-1",
+          ownerId: "p1",
+          position: { x: 14, y: 9, z: 18 },
+          normal: { x: 1, y: 0, z: 0 },
+          width: 3.6,
+          height: 2.8,
+          turnsLeft: 4,
+          active: true,
+        },
+      ],
+      0.5,
+    );
+
+    const wallGroup = vfx.group.getObjectByName("vfx_prism_walls");
+    expect(wallGroup?.children.length).toBe(1);
+    const wallObj = wallGroup?.getObjectByName("prism_wall_wall-1");
+    expect(wallObj).toBeDefined();
+    expect(wallObj?.position.y).toBeCloseTo(9 + 1.4, 2);
+    expect(wallObj?.rotation.y).toBeCloseTo(Math.PI * 0.5, 2);
+
+    const wallMeshes = wallObj ? collectMeshes(wallObj) : [];
+    expect(wallMeshes.length).toBeGreaterThan(0);
+    for (const m of wallMeshes) {
+      expect(m.geometry.type).not.toBe("BoxGeometry");
+    }
+
+    // Shatter burst spawns 16 crystal shards + shockwave sharing prismShardMaterial
+    vfx.spawnPrismShatter({ x: 14, y: 9, z: 18 });
+    vfx.spawnExplosion({ x: 20, y: 10, z: 20 }, 2.0, false);
+
+    const particleGroup = vfx.group.getObjectByName("vfx_particles");
+    const shardMeshes = particleGroup
+      ? collectMeshes(particleGroup).filter(
+          (m) =>
+            m.geometry.type === "TetrahedronGeometry" ||
+            m.geometry.type === "DodecahedronGeometry",
+        )
+      : [];
+    expect(shardMeshes.length).toBeGreaterThanOrEqual(30);
+    const sharedShardMats = new Set<THREE.Material>();
+    for (const sm of shardMeshes) {
+      if (!Array.isArray(sm.material)) {
+        sharedShardMats.add(sm.material);
+      }
+    }
+    // 5 rock palette materials + 1 prism shard material = <= 6 shared instances total
+    expect(sharedShardMats.size).toBeLessThanOrEqual(6);
+
+    const sharedMatSpies = Array.from(sharedShardMats).map((mat) =>
+      vi.spyOn(mat, "dispose"),
+    );
+
+    // Expire all particles -> shared shard materials must NOT be disposed prematurely!
+    for (let step = 0; step < 40; step++) {
+      vfx.update(0.05, step * 0.05);
+    }
+    expect(particleGroup?.children.length).toBe(0);
+    for (const spy of sharedMatSpies) {
+      expect(spy).not.toHaveBeenCalled();
+    }
+
+    // Remove expired wall and dispose VfxSystem -> shared materials disposed cleanly once
+    vfx.syncPrismWalls([], 1.5);
+    expect(wallGroup?.children.length).toBe(0);
+
+    vfx.dispose();
+    for (const spy of sharedMatSpies) {
+      expect(spy).toHaveBeenCalledTimes(1);
+    }
+  });
 });

@@ -1,7 +1,10 @@
 import {
   MatchEngine,
   MUTATION_CATALOG,
+  PLAYER_COLOR_PALETTE,
   SDF_DIMS,
+  chooseBotShopPurchase,
+  chooseBotStartingLoadout,
   planBotTurn,
   type ClientMessage,
   type EngineEvent,
@@ -43,6 +46,7 @@ export interface LobbyViewState {
     connected: boolean;
   }>;
   bonusGadget: GadgetId | null;
+  startingLoadout?: GadgetId[];
   connected: boolean;
   error: string | null;
 }
@@ -65,6 +69,7 @@ export interface SandboxConfig {
   mapScale?: MapScaleChoice;
   botCount: number;
   bonusGadget: GadgetId | null;
+  startingLoadout?: GadgetId[];
 }
 
 /** Lobby configuration update sent by a room host or participant. */
@@ -76,6 +81,7 @@ export interface LobbyConfigUpdate {
   species?: SpeciesId;
   team?: 0 | 1 | TeamId;
   bonusGadget?: GadgetId | null;
+  startingLoadout?: GadgetId[];
 }
 
 interface StoredReconnectSession {
@@ -83,15 +89,6 @@ interface StoredReconnectSession {
   playerId: string;
   reconnectToken: string;
 }
-
-const SEAT_COLORS: readonly string[] = [
-  "#f97316",
-  "#38bdf8",
-  "#22c55e",
-  "#f43f5e",
-  "#a855f7",
-  "#14b8a6",
-];
 
 const BOT_POOL: ReadonlyArray<{ species: SpeciesId; name: string }> = [
   { species: "mole", name: "Digby (Bot)" },
@@ -202,11 +199,14 @@ function mapLobbyToView(
       name: p.name,
       species: p.species,
       team: p.team === "B" ? 1 : 0,
-      color: SEAT_COLORS[idx % SEAT_COLORS.length] ?? "#f97316",
+      color: PLAYER_COLOR_PALETTE[idx % PLAYER_COLOR_PALETTE.length] ?? "#f97316",
       isBot: p.isBot,
       connected: p.connected,
     })),
     bonusGadget: localPlayer?.bonusGadget ?? null,
+    ...(localPlayer?.startingLoadout !== undefined
+      ? { startingLoadout: [...localPlayer.startingLoadout] }
+      : {}),
     connected,
     error,
   };
@@ -293,6 +293,9 @@ export class GameClient {
         isBot: false,
         color: config.color || "#f97316",
         bonusGadget: config.bonusGadget,
+        ...(config.startingLoadout !== undefined
+          ? { startingLoadout: [...config.startingLoadout] }
+          : {}),
       },
     ];
 
@@ -302,8 +305,12 @@ export class GameClient {
         name: `Bot ${i + 1}`,
       };
       const seatColor =
-        SEAT_COLORS.find((c) => c.toLowerCase() !== config.color.toLowerCase() && !players.some((p) => p.color === c)) ??
-        SEAT_COLORS[(i + 1) % SEAT_COLORS.length] ??
+        PLAYER_COLOR_PALETTE.find(
+          (c) =>
+            c.toLowerCase() !== config.color.toLowerCase() &&
+            !players.some((p) => p.color === c),
+        ) ??
+        PLAYER_COLOR_PALETTE[(i + 1) % PLAYER_COLOR_PALETTE.length] ??
         "#38bdf8";
 
       const team: TeamId | null =
@@ -317,6 +324,7 @@ export class GameClient {
         isBot: true,
         color: seatColor,
         bonusGadget: null,
+        startingLoadout: chooseBotStartingLoadout(candidate.species),
       });
     }
 
@@ -344,11 +352,17 @@ export class GameClient {
         name: p.name,
         species: p.species,
         team: p.team === "B" ? 1 : 0,
-        color: p.color ?? SEAT_COLORS[idx % SEAT_COLORS.length] ?? "#f97316",
+        color:
+          p.color ??
+          PLAYER_COLOR_PALETTE[idx % PLAYER_COLOR_PALETTE.length] ??
+          "#f97316",
         isBot: Boolean(p.isBot),
         connected: true,
       })),
       bonusGadget: config.bonusGadget,
+      ...(config.startingLoadout !== undefined
+        ? { startingLoadout: [...config.startingLoadout] }
+        : {}),
       connected: true,
       error: null,
     };
@@ -376,6 +390,7 @@ export class GameClient {
       mapScale?: MapScaleChoice;
       botCount?: number;
       bonusGadget?: GadgetId | null;
+      startingLoadout?: GadgetId[];
     },
   ): void {
     const safeName = playerName.trim().slice(0, 20) || "Critter";
@@ -392,6 +407,9 @@ export class GameClient {
       ...(options?.bonusGadget !== undefined
         ? { bonusGadget: options.bonusGadget }
         : {}),
+      ...(options?.startingLoadout !== undefined
+        ? { startingLoadout: [...options.startingLoadout] }
+        : {}),
     };
     this.openOnlineSocket(wsUrl, createMsg);
   }
@@ -403,6 +421,7 @@ export class GameClient {
     playerName: string,
     species: SpeciesId,
     bonusGadget?: GadgetId | null,
+    startingLoadout?: GadgetId[],
   ): void {
     const cleanedCode = roomCode.trim().toUpperCase();
     if (!/^[A-Z]{4}$/.test(cleanedCode)) {
@@ -416,6 +435,9 @@ export class GameClient {
       playerName: safeName,
       species,
       ...(bonusGadget !== undefined ? { bonusGadget } : {}),
+      ...(startingLoadout !== undefined
+        ? { startingLoadout: [...startingLoadout] }
+        : {}),
     };
     this.openOnlineSocket(wsUrl, joinMsg);
   }
@@ -438,7 +460,7 @@ export class GameClient {
     return true;
   }
 
-  /** Update lobby settings (theme, mode, mapScale, bot count, species, team, bonus gadget). */
+  /** Update lobby settings (theme, mode, mapScale, bot count, species, team, bonus gadget, starting loadout). */
   public sendLobbyConfig(config: LobbyConfigUpdate): void {
     if (this.mode !== "online") {
       return;
@@ -462,6 +484,9 @@ export class GameClient {
       ...(team !== undefined ? { team } : {}),
       ...(config.bonusGadget !== undefined
         ? { bonusGadget: config.bonusGadget }
+        : {}),
+      ...(config.startingLoadout !== undefined
+        ? { startingLoadout: [...config.startingLoadout] }
         : {}),
     };
     this.sendWsMessage(msg);
@@ -495,14 +520,24 @@ export class GameClient {
           ? { x: velocity.x, y: velocity.y, z: velocity.z }
           : { x: 0, y: 0, z: 0 },
         yaw,
+        pitch,
       });
     }
   }
 
-  /** Trigger a non-turn-ending utility gadget (Vine Grapple or Prism Wall). */
-  public sendUtility(gadgetId: GadgetId, dir: Vec3, target?: Vec3): void {
+  /** Trigger a non-turn-ending utility gadget (Vine Grapple, Prism Wall, Mend Brew, or Sky Bomber air-drop). */
+  public sendUtility(
+    gadgetId: GadgetId | "sky_bomber_drop",
+    dir: Vec3,
+    target?: Vec3,
+  ): void {
     if (this.mode === "sandbox" && this.sandboxEngine && this.playerId) {
-      if (gadgetId !== "vine_grapple" && gadgetId !== "prism_wall") {
+      if (
+        gadgetId !== "vine_grapple" &&
+        gadgetId !== "prism_wall" &&
+        gadgetId !== "mend_brew" &&
+        gadgetId !== "sky_bomber_drop"
+      ) {
         return;
       }
       const events = this.sandboxEngine.applyUtility(this.playerId, {
@@ -521,6 +556,26 @@ export class GameClient {
         origin,
         direction: { x: dir.x, y: dir.y, z: dir.z },
         ...(target ? { target: { x: target.x, y: target.y, z: target.z } } : {}),
+      });
+    }
+  }
+
+  /** Purchase, refill, or trade-in swap an ability in the Anytime Armory using Siege Coins. */
+  public sendBuyAbility(gadgetId: GadgetId, replaceGadgetId?: GadgetId): void {
+    if (this.mode === "sandbox" && this.sandboxEngine && this.playerId) {
+      const events = this.sandboxEngine.applyBuyAbility(
+        this.playerId,
+        gadgetId,
+        replaceGadgetId,
+      );
+      this.publishSandboxResult(events, true);
+      return;
+    }
+    if (this.mode === "online") {
+      this.sendWsMessage({
+        type: "BUY_ABILITY",
+        gadgetId,
+        ...(replaceGadgetId !== undefined ? { replaceGadgetId } : {}),
       });
     }
   }
@@ -826,7 +881,7 @@ export class GameClient {
     }
     const snap = this.sandboxEngine.getSnapshot();
 
-    if (snap.phase === "MATCH_OVER") {
+    if (snap.phase === "FINAL_FLOOD" || snap.phase === "MATCH_OVER") {
       this.clearSandboxBotTimers();
       return;
     }
@@ -917,6 +972,15 @@ export class GameClient {
     );
     this.publishSandboxResult(moveEvents, true);
 
+    if (plan.preUtilities && plan.preUtilities.length > 0) {
+      for (const util of plan.preUtilities) {
+        const utilEvents = this.sandboxEngine.applyUtility(botId, util);
+        if (utilEvents.length > 0) {
+          this.publishSandboxResult(utilEvents, true);
+        }
+      }
+    }
+
     this.sandboxBotFireTimer = setTimeout(() => {
       this.sandboxBotFireTimer = null;
       if (!this.sandboxEngine || this.sandboxBotTurnKey !== expectedKey) {
@@ -996,6 +1060,32 @@ export class GameClient {
       return;
     }
 
+    const collectedEvents: EngineEvent[] = [];
+
+    // Spend accumulated Siege Coins in the Armory between rounds (up to 2 purchases)
+    if (snap.phase === "ROUND_DRAFT") {
+      for (let i = 0; i < 2; i++) {
+        const freshSnap = this.sandboxEngine.getSnapshot();
+        const freshBot = freshSnap.critters.find((c) => c.id === botId);
+        if (!freshBot) {
+          break;
+        }
+        const purchase = chooseBotShopPurchase(freshBot);
+        if (!purchase) {
+          break;
+        }
+        const buyEvents = this.sandboxEngine.applyBuyAbility(
+          botId,
+          purchase.gadgetId,
+          purchase.replaceGadgetId,
+        );
+        if (buyEvents.length === 0) {
+          break;
+        }
+        collectedEvents.push(...buyEvents);
+      }
+    }
+
     // Prefer a mutation filling an empty hardpoint slot first
     let chosen: MutationId | undefined = draft.options.find((opt) => {
       const def = MUTATION_CATALOG[opt];
@@ -1005,11 +1095,14 @@ export class GameClient {
       chosen = draft.options[0];
     }
     if (!chosen) {
+      if (collectedEvents.length > 0) {
+        this.publishSandboxResult(collectedEvents, true);
+      }
       return;
     }
 
-    const events = this.sandboxEngine.applyMutationPick(botId, chosen);
-    this.publishSandboxResult(events, true);
+    const pickEvents = this.sandboxEngine.applyMutationPick(botId, chosen);
+    this.publishSandboxResult([...collectedEvents, ...pickEvents], true);
   }
 
   private clearSandboxTurnTimers(): void {

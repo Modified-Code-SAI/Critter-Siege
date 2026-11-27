@@ -1,14 +1,20 @@
 import { describe, expect, it } from "vitest";
 import {
   APEX_CATALOG,
+  DEFAULT_MAX_ROUNDS,
+  DEFAULT_ROUND_DURATION_SEC,
+  DEFAULT_STARTING_COINS,
   GADGET_CATALOG,
   GAME_TITLE,
+  MAX_LOADOUT_SLOTS,
   MUTATION_CATALOG,
   SPECIES_CATALOG,
   computeApexSynergy,
   computeCritterStats,
   createDefaultGadgetCharges,
+  createRoundLoadoutCharges,
   parseClientMessage,
+  validateAndBuildStartingLoadout,
   type HardpointSlot,
   type MutationId,
 } from "@critter/shared";
@@ -241,21 +247,30 @@ describe("Critter Siege catalogs & stats", () => {
     expect(withBonus.prism_wall).toBe(0);
   });
 
-  it("defines all 6 standard gadgets and 3 bonus lobby gadgets with exact flags", () => {
-    expect(Object.keys(GADGET_CATALOG)).toHaveLength(9);
+  it("defines all 10 Siege Coin abilities (7 standard including mend_brew + 3 bonus) with exact shop/refill flags", () => {
+    expect(DEFAULT_MAX_ROUNDS).toBe(5);
+    expect(DEFAULT_ROUND_DURATION_SEC).toBe(300);
+    expect(DEFAULT_STARTING_COINS).toBe(100);
+    expect(MAX_LOADOUT_SLOTS).toBe(6);
+
+    expect(Object.keys(GADGET_CATALOG)).toHaveLength(10);
 
     const standard = Object.values(GADGET_CATALOG).filter(
       (g) => !g.bonusLobbyOnly,
     );
     const bonus = Object.values(GADGET_CATALOG).filter((g) => g.bonusLobbyOnly);
 
-    expect(standard).toHaveLength(6);
+    expect(standard).toHaveLength(7);
     expect(bonus).toHaveLength(3);
 
     expect(GADGET_CATALOG.gale_mortar).toMatchObject({
       id: "gale_mortar",
       name: "Gale Mortar",
       chargesPerRound: null,
+      startingCharges: null,
+      shopCost: 0,
+      refillCost: 0,
+      freeStarter: true,
       turnEnding: true,
       windAffected: true,
       baseDamage: 34,
@@ -266,6 +281,9 @@ describe("Critter Siege catalogs & stats", () => {
 
     expect(GADGET_CATALOG.quake_club).toMatchObject({
       chargesPerRound: null,
+      startingCharges: null,
+      shopCost: 25,
+      refillCost: 0,
       turnEnding: true,
       windAffected: false,
       baseDamage: 24,
@@ -275,6 +293,9 @@ describe("Critter Siege catalogs & stats", () => {
 
     expect(GADGET_CATALOG.vine_grapple).toMatchObject({
       chargesPerRound: 6,
+      startingCharges: 6,
+      shopCost: 30,
+      refillCost: 15,
       turnEnding: false,
       windAffected: false,
       baseDamage: 0,
@@ -284,6 +305,9 @@ describe("Critter Siege catalogs & stats", () => {
 
     expect(GADGET_CATALOG.spore_burst).toMatchObject({
       chargesPerRound: 2,
+      startingCharges: 2,
+      shopCost: 50,
+      refillCost: 30,
       turnEnding: true,
       windAffected: true,
       baseDamage: 16,
@@ -294,6 +318,9 @@ describe("Critter Siege catalogs & stats", () => {
 
     expect(GADGET_CATALOG.burrow_bore).toMatchObject({
       chargesPerRound: 2,
+      startingCharges: 2,
+      shopCost: 55,
+      refillCost: 30,
       turnEnding: true,
       windAffected: false,
       baseDamage: 36,
@@ -304,6 +331,9 @@ describe("Critter Siege catalogs & stats", () => {
 
     expect(GADGET_CATALOG.seeker_firefly).toMatchObject({
       chargesPerRound: 1,
+      startingCharges: 1,
+      shopCost: 70,
+      refillCost: 40,
       turnEnding: true,
       windAffected: false,
       baseDamage: 30,
@@ -316,6 +346,9 @@ describe("Critter Siege catalogs & stats", () => {
       bonusLobbyOnly: true,
       unlockCost: 90,
       chargesPerRound: 0,
+      startingCharges: 2,
+      shopCost: 55,
+      refillCost: 30,
       turnEnding: true,
       baseDamage: 18,
       carveRadius: 2.2,
@@ -326,6 +359,9 @@ describe("Critter Siege catalogs & stats", () => {
       bonusLobbyOnly: true,
       unlockCost: 90,
       chargesPerRound: 0,
+      startingCharges: 2,
+      shopCost: 35,
+      refillCost: 20,
       turnEnding: false,
       baseDamage: 0,
       carveRadius: 0,
@@ -336,11 +372,83 @@ describe("Critter Siege catalogs & stats", () => {
       bonusLobbyOnly: true,
       unlockCost: 110,
       chargesPerRound: 0,
+      startingCharges: 2,
+      shopCost: 60,
+      refillCost: 35,
       turnEnding: true,
       baseDamage: 22,
       carveRadius: 1.8,
       knockback: 14,
     });
+
+    expect(GADGET_CATALOG.mend_brew).toMatchObject({
+      id: "mend_brew",
+      name: "Mend Brew",
+      bonusLobbyOnly: false,
+      unlockCost: 0,
+      chargesPerRound: 2,
+      startingCharges: 2,
+      shopCost: 40,
+      refillCost: 25,
+      healAmount: 45,
+      turnEnding: false,
+      windAffected: false,
+      baseDamage: 0,
+      carveRadius: 0,
+      knockback: 0,
+    });
+  });
+
+  it("validates starting loadouts within 100 Siege Coin budget and builds per-round charges", () => {
+    const defaultKit = validateAndBuildStartingLoadout(undefined);
+    expect(defaultKit.loadout).toEqual([
+      "gale_mortar",
+      "quake_club",
+      "vine_grapple",
+    ]);
+    expect(defaultKit.remainingCoins).toBe(45);
+    expect(defaultKit.gadgetCharges.gale_mortar).toBeNull();
+    expect(defaultKit.gadgetCharges.quake_club).toBeNull();
+    expect(defaultKit.gadgetCharges.vine_grapple).toBe(6);
+    expect(defaultKit.gadgetCharges.mend_brew).toBe(0);
+
+    // Custom loadout: keeps free gale_mortar in slot 1, deduplicates, enforces 100-coin cap
+    const customKit = validateAndBuildStartingLoadout([
+      "quake_club", // 25 -> 75 left
+      "quake_club", // duplicate ignored
+      "vine_grapple", // 30 -> 45 left
+      "mend_brew", // 40 -> 5 left
+      "seeker_firefly", // 70 > 5 -> skipped
+    ]);
+    expect(customKit.loadout).toEqual([
+      "gale_mortar",
+      "quake_club",
+      "vine_grapple",
+      "mend_brew",
+    ]);
+    expect(customKit.remainingCoins).toBe(5);
+    expect(customKit.gadgetCharges).toEqual(
+      createRoundLoadoutCharges(customKit.loadout),
+    );
+    expect(customKit.gadgetCharges.mend_brew).toBe(2);
+    expect(customKit.gadgetCharges.seeker_firefly).toBe(0);
+
+    // Enforces MAX_LOADOUT_SLOTS (6) even with large coin budget
+    const cappedKit = validateAndBuildStartingLoadout(
+      [
+        "quake_club",
+        "vine_grapple",
+        "mend_brew",
+        "prism_wall",
+        "spore_burst",
+        "burrow_bore",
+        "seeker_firefly",
+      ],
+      1000,
+    );
+    expect(cappedKit.loadout).toHaveLength(6);
+    expect(cappedKit.loadout[0]).toBe("gale_mortar");
+    expect(cappedKit.loadout).not.toContain("burrow_bore");
   });
 });
 
@@ -524,6 +632,68 @@ describe("WebSocket client message parser", () => {
       type: "DRONE_NUDGE",
       windDelta: { x: 1.5, y: 0, z: -0.5 },
     });
+
+    expect(
+      parseClientMessage({
+        type: "BUY_ABILITY",
+        gadgetId: "mend_brew",
+      }),
+    ).toEqual({
+      type: "BUY_ABILITY",
+      gadgetId: "mend_brew",
+    });
+
+    expect(
+      parseClientMessage({
+        type: "BUY_ABILITY",
+        gadgetId: "seeker_firefly",
+        replaceGadgetId: "spore_burst",
+      }),
+    ).toEqual({
+      type: "BUY_ABILITY",
+      gadgetId: "seeker_firefly",
+      replaceGadgetId: "spore_burst",
+    });
+
+    expect(
+      parseClientMessage({
+        type: "CREATE_ROOM",
+        playerName: "Armorer",
+        species: "mole",
+        startingLoadout: ["gale_mortar", "mend_brew", "vine_grapple"],
+      }),
+    ).toEqual({
+      type: "CREATE_ROOM",
+      playerName: "Armorer",
+      species: "mole",
+      startingLoadout: ["gale_mortar", "mend_brew", "vine_grapple"],
+    });
+
+    expect(
+      parseClientMessage({
+        type: "JOIN_ROOM",
+        roomCode: "qwer",
+        playerName: "Medic",
+        species: "badger",
+        startingLoadout: ["gale_mortar", "mend_brew"],
+      }),
+    ).toEqual({
+      type: "JOIN_ROOM",
+      roomCode: "QWER",
+      playerName: "Medic",
+      species: "badger",
+      startingLoadout: ["gale_mortar", "mend_brew"],
+    });
+
+    expect(
+      parseClientMessage({
+        type: "LOBBY_CONFIG",
+        startingLoadout: ["gale_mortar", "quake_club", "mend_brew"],
+      }),
+    ).toEqual({
+      type: "LOBBY_CONFIG",
+      startingLoadout: ["gale_mortar", "quake_club", "mend_brew"],
+    });
   });
 
   it("rejects malformed or invalid inputs cleanly without throwing", () => {
@@ -546,10 +716,40 @@ describe("WebSocket client message parser", () => {
         botCount: 9,
       },
       {
+        type: "CREATE_ROOM",
+        playerName: "Scout",
+        species: "mole",
+        startingLoadout: [
+          "gale_mortar",
+          "quake_club",
+          "vine_grapple",
+          "spore_burst",
+          "burrow_bore",
+          "seeker_firefly",
+          "mend_brew",
+        ],
+      },
+      {
         type: "JOIN_ROOM",
         roomCode: "12",
         playerName: "Scout",
         species: "mole",
+      },
+      {
+        type: "JOIN_ROOM",
+        roomCode: "ABCD",
+        playerName: "Scout",
+        species: "mole",
+        startingLoadout: ["not_a_gadget"],
+      },
+      {
+        type: "BUY_ABILITY",
+        gadgetId: "plasma_cannon",
+      },
+      {
+        type: "BUY_ABILITY",
+        gadgetId: "mend_brew",
+        replaceGadgetId: "invalid_slot",
       },
       {
         type: "FIRE_ACTION",

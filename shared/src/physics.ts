@@ -10,12 +10,18 @@ import type {
   ImpactEvent,
   MapScale,
   MutationId,
+  PrismWallState,
   ShotSimulationResult,
   SpeciesId,
   Vec3,
 } from "./types.js";
 
-export type { CritterHitResult, ImpactEvent, ShotSimulationResult };
+export type {
+  CritterHitResult,
+  ImpactEvent,
+  PrismWallState,
+  ShotSimulationResult,
+};
 
 /** World gravitational acceleration in m/s^2. */
 export const GRAVITY = 18.0;
@@ -285,6 +291,72 @@ function steerSeekerFirefly(
   }
 }
 
+interface PrismWallHit {
+  wall: PrismWallState;
+  hitPos: Vec3;
+}
+
+function findPrismWallCollision(
+  prismWalls: readonly PrismWallState[] | undefined,
+  prevPos: Vec3,
+  pos: Vec3,
+  shooterId?: string,
+): PrismWallHit | null {
+  if (!prismWalls || prismWalls.length === 0) {
+    return null;
+  }
+  const SLAB_HALF = 0.45;
+  let bestHit: PrismWallHit | null = null;
+  let bestT = Infinity;
+
+  for (const wall of prismWalls) {
+    if (!wall.active) continue;
+    if (shooterId !== undefined && wall.ownerId === shooterId) {
+      continue;
+    }
+
+    const nLen = Math.hypot(wall.normal.x, wall.normal.z);
+    const nx = nLen > 1e-6 ? wall.normal.x / nLen : 0;
+    const nz = nLen > 1e-6 ? wall.normal.z / nLen : 1;
+
+    const d0 =
+      (prevPos.x - wall.position.x) * nx + (prevPos.z - wall.position.z) * nz;
+    const d1 =
+      (pos.x - wall.position.x) * nx + (pos.z - wall.position.z) * nz;
+
+    const touchesSlab =
+      (d0 >= -SLAB_HALF && d1 <= SLAB_HALF) ||
+      (d0 <= SLAB_HALF && d1 >= -SLAB_HALF);
+    if (!touchesSlab) {
+      continue;
+    }
+
+    const denom = d1 - d0;
+    const rawT = Math.abs(denom) > 1e-6 ? -d0 / denom : 1;
+    const t = Math.max(0, Math.min(1, rawT));
+
+    const hx = prevPos.x + (pos.x - prevPos.x) * t;
+    const hy = prevPos.y + (pos.y - prevPos.y) * t;
+    const hz = prevPos.z + (pos.z - prevPos.z) * t;
+
+    if (hy < wall.position.y - 0.25 || hy > wall.position.y + wall.height + 0.25) {
+      continue;
+    }
+
+    const relX = hx - wall.position.x;
+    const relZ = hz - wall.position.z;
+    const tangentDist = Math.abs(relX * -nz + relZ * nx);
+    if (tangentDist <= wall.width * 0.5 + 0.2 && t < bestT) {
+      bestT = t;
+      bestHit = {
+        wall,
+        hitPos: { x: hx, y: hy, z: hz },
+      };
+    }
+  }
+  return bestHit;
+}
+
 /**
  * Sample deterministic flight arc points for live 3D trajectory preview.
  * Returns up to 20 points normally, or 36 points when Optic Visor (`extended`) is equipped.
@@ -297,6 +369,8 @@ export function sampleAimArc(
   >,
   wind: Vec3,
   extended: boolean,
+  prismWalls?: readonly PrismWallState[],
+  shooterId?: string,
 ): Vec3[] {
   if (!isFiniteVec3(params.origin)) {
     return [{ x: 0, y: 0, z: 0 }];
@@ -339,6 +413,7 @@ export function sampleAimArc(
       : null;
 
   for (let step = 1; step < maxPoints; step++) {
+    const prevPos: Vec3 = { ...pos };
     if (params.gadgetId === "seeker_firefly" && seekerTarget) {
       steerSeekerFirefly(world, pos, vel, dir, seekerTarget, speed, dt);
     } else {
@@ -354,9 +429,19 @@ export function sampleAimArc(
     pos.x += vel.x * dt;
     pos.y += vel.y * dt;
     pos.z += vel.z * dt;
+
+    const wallHit = findPrismWallCollision(prismWalls, prevPos, pos, shooterId);
+    if (wallHit !== null) {
+      points.push({ ...wallHit.hitPos });
+      break;
+    }
+
     points.push({ ...pos });
 
-    if (world.isSolid(pos.x, pos.y, pos.z) || isOutOfBounds(world, pos)) {
+    if (
+      world.isSolid(pos.x, pos.y, pos.z) ||
+      isOutOfBounds(world, pos)
+    ) {
       break;
     }
     if (
@@ -476,6 +561,7 @@ export function simulateShot(
   params: ShotParams,
   wind: Vec3,
   waterLevel: number,
+  prismWalls?: readonly PrismWallState[],
 ): ShotSimulationResult {
   if (!isFiniteVec3(params.origin)) {
     return { path: [], durationSec: 0, impacts: [], carveOps: [], hits: [] };
@@ -666,6 +752,7 @@ export function simulateShot(
 
   for (let t = SIM_DT; t <= maxFlightSec; t += SIM_DT) {
     durationSec = Number(t.toFixed(4));
+    const prevPos: Vec3 = { ...pos };
 
     if (params.gadgetId === "seeker_firefly" && seekerTarget) {
       steerSeekerFirefly(world, pos, vel, normDir, seekerTarget, speed, SIM_DT);
@@ -682,6 +769,34 @@ export function simulateShot(
     pos.x += vel.x * SIM_DT;
     pos.y += vel.y * SIM_DT;
     pos.z += vel.z * SIM_DT;
+
+    const hitPrismWall = findPrismWallCollision(
+      prismWalls,
+      prevPos,
+      pos,
+      params.shooterId,
+    );
+    if (hitPrismWall !== null) {
+      const impactPoint: Vec3 = { ...hitPrismWall.hitPos };
+      path.push(impactPoint);
+      return {
+        path,
+        durationSec,
+        impacts: [
+          {
+            time: durationSec,
+            position: impactPoint,
+            carveOp: null,
+            damageRadius: 0,
+            baseDamage: 0,
+            knockback: 0,
+          },
+        ],
+        carveOps: [],
+        hits: [],
+        shatteredPrismWallIds: [hitPrismWall.wall.id],
+      };
+    }
 
     if (Math.round(t / SIM_DT) % 2 === 0) {
       path.push({ ...pos });

@@ -18,6 +18,79 @@ const BASE_OCEAN_SPAN = 420;
 const BASE_CLOUD_RADIUS = DEFAULT_WORLD_SPAN_X * 1.12;
 const BASE_SKY_RADIUS = Math.max(260, DEFAULT_WORLD_HALF * 9.5);
 
+function clamp(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, value));
+}
+
+interface AtmosphereKeyframe {
+  readonly zenith: THREE.Color;
+  readonly midSky: THREE.Color;
+  readonly horizon: THREE.Color;
+  readonly oceanBounce: THREE.Color;
+  readonly sunColor: THREE.Color;
+  readonly sunIntensity: number;
+  readonly hemiSky: THREE.Color;
+  readonly hemiGround: THREE.Color;
+  readonly hemiIntensity: number;
+  readonly fillColor: THREE.Color;
+  readonly fillIntensity: number;
+  readonly fogColor: THREE.Color;
+}
+
+const ATMOSPHERE_MORNING: AtmosphereKeyframe = {
+  zenith: new THREE.Color(0x1e76cf),
+  midSky: new THREE.Color(0x74c8f8),
+  horizon: new THREE.Color(0xffe8c2),
+  oceanBounce: new THREE.Color(0x1b92b5),
+  sunColor: new THREE.Color(0xffebd0),
+  sunIntensity: 2.2,
+  hemiSky: new THREE.Color(0xa8e6ff),
+  hemiGround: new THREE.Color(0x7a7b4c),
+  hemiIntensity: 0.98,
+  fillColor: new THREE.Color(0x88d4ff),
+  fillIntensity: 0.52,
+  fogColor: new THREE.Color(FOG_COLOR_HEX),
+};
+
+const ATMOSPHERE_AFTERNOON: AtmosphereKeyframe = {
+  zenith: new THREE.Color(0x2254a4),
+  midSky: new THREE.Color(0x8ea7db),
+  horizon: new THREE.Color(0xffc17a),
+  oceanBounce: new THREE.Color(0x1c6f94),
+  sunColor: new THREE.Color(0xffd296),
+  sunIntensity: 2.35,
+  hemiSky: new THREE.Color(0xffd9b0),
+  hemiGround: new THREE.Color(0x76643f),
+  hemiIntensity: 0.92,
+  fillColor: new THREE.Color(0x9bb8e8),
+  fillIntensity: 0.48,
+  fogColor: new THREE.Color(0xf4d8ba),
+};
+
+const ATMOSPHERE_SUNSET_STORM: AtmosphereKeyframe = {
+  zenith: new THREE.Color(0x192356),
+  midSky: new THREE.Color(0x6b467a),
+  horizon: new THREE.Color(0xff7a4d),
+  oceanBounce: new THREE.Color(0x173e62),
+  sunColor: new THREE.Color(0xff9a62),
+  sunIntensity: 2.5,
+  hemiSky: new THREE.Color(0xd48e98),
+  hemiGround: new THREE.Color(0x554238),
+  hemiIntensity: 0.86,
+  fillColor: new THREE.Color(0x6c88c4),
+  fillIntensity: 0.44,
+  fogColor: new THREE.Color(0xc89382),
+};
+
+const OCEAN_SHALLOW_BASE = new THREE.Color(0x1cd6d2);
+const OCEAN_MID_BASE = new THREE.Color(0x0c88ba);
+const OCEAN_DEEP_BASE = new THREE.Color(0x0a3d80);
+
+const OCEAN_SHALLOW_STORM = new THREE.Color(0x138896);
+const OCEAN_MID_STORM = new THREE.Color(0x0a4f78);
+const OCEAN_DEEP_STORM = new THREE.Color(0x071e46);
+const STORM_FOG_TINT = new THREE.Color(0x4a5b74);
+
 /** Dynamically scaled visual parameters computed for a 60m Duel or 144m Grand world. */
 export interface WorldSceneMetrics {
   worldSize: number;
@@ -27,6 +100,100 @@ export interface WorldSceneMetrics {
   cloudRadius: number;
   isletMinDist: number;
   isletMaxDist: number;
+}
+
+/** Computed round-progression sky/lighting palette and churning flood wave parameters. */
+export interface AtmosphereState {
+  roundProgress: number;
+  floodIntensity: number;
+  waveAmp: number;
+  waveSpeed: number;
+  zenithColor: THREE.Color;
+  midSkyColor: THREE.Color;
+  horizonColor: THREE.Color;
+  oceanBounceColor: THREE.Color;
+  sunColor: THREE.Color;
+  sunIntensity: number;
+  hemiSkyColor: THREE.Color;
+  hemiGroundColor: THREE.Color;
+  hemiIntensity: number;
+  fillColor: THREE.Color;
+  fillIntensity: number;
+  fogColor: THREE.Color;
+  shallowOceanColor: THREE.Color;
+  midOceanColor: THREE.Color;
+  deepOceanColor: THREE.Color;
+}
+
+/** Compute progressive Round 1-5 atmosphere colors and flood wave intensity deterministically. */
+export function computeAtmosphereState(
+  round: number,
+  maxRounds: number,
+  floodIntensity = 0,
+): AtmosphereState {
+  const safeMax = Number.isFinite(maxRounds) ? Math.max(1, Math.floor(maxRounds)) : 5;
+  const safeRound = Number.isFinite(round) ? clamp(Math.floor(round), 1, safeMax) : 1;
+  const roundProgress = safeMax <= 1 ? 0 : (safeRound - 1) / (safeMax - 1);
+  const flood = clamp(Number.isFinite(floodIntensity) ? floodIntensity : 0, 0, 1);
+
+  const from = roundProgress <= 0.5 ? ATMOSPHERE_MORNING : ATMOSPHERE_AFTERNOON;
+  const to = roundProgress <= 0.5 ? ATMOSPHERE_AFTERNOON : ATMOSPHERE_SUNSET_STORM;
+  const localT =
+    roundProgress <= 0.5 ? roundProgress * 2 : (roundProgress - 0.5) * 2;
+
+  const zenithColor = from.zenith.clone().lerp(to.zenith, localT);
+  const midSkyColor = from.midSky.clone().lerp(to.midSky, localT);
+  const horizonColor = from.horizon.clone().lerp(to.horizon, localT);
+  const oceanBounceColor = from.oceanBounce.clone().lerp(to.oceanBounce, localT);
+  const sunColor = from.sunColor.clone().lerp(to.sunColor, localT);
+  const sunIntensity =
+    from.sunIntensity + (to.sunIntensity - from.sunIntensity) * localT;
+  const hemiSkyColor = from.hemiSky.clone().lerp(to.hemiSky, localT);
+  const hemiGroundColor = from.hemiGround.clone().lerp(to.hemiGround, localT);
+  const hemiIntensity =
+    from.hemiIntensity + (to.hemiIntensity - from.hemiIntensity) * localT;
+  const fillColor = from.fillColor.clone().lerp(to.fillColor, localT);
+  const fillIntensity =
+    from.fillIntensity + (to.fillIntensity - from.fillIntensity) * localT;
+  const fogColor = from.fogColor
+    .clone()
+    .lerp(to.fogColor, localT)
+    .lerp(STORM_FOG_TINT, flood * 0.58);
+
+  if (flood > 0) {
+    zenithColor.lerp(STORM_FOG_TINT, flood * 0.25);
+    midSkyColor.lerp(STORM_FOG_TINT, flood * 0.35);
+    oceanBounceColor.lerp(OCEAN_DEEP_STORM, flood * 0.45);
+  }
+
+  const shallowOceanColor = OCEAN_SHALLOW_BASE.clone().lerp(
+    OCEAN_SHALLOW_STORM,
+    flood,
+  );
+  const midOceanColor = OCEAN_MID_BASE.clone().lerp(OCEAN_MID_STORM, flood);
+  const deepOceanColor = OCEAN_DEEP_BASE.clone().lerp(OCEAN_DEEP_STORM, flood);
+
+  return {
+    roundProgress,
+    floodIntensity: flood,
+    waveAmp: 1.0 + flood * 2.2,
+    waveSpeed: 1.0 + flood * 1.1,
+    zenithColor,
+    midSkyColor,
+    horizonColor,
+    oceanBounceColor,
+    sunColor,
+    sunIntensity,
+    hemiSkyColor,
+    hemiGroundColor,
+    hemiIntensity,
+    fillColor,
+    fillIntensity,
+    fogColor,
+    shallowOceanColor,
+    midOceanColor,
+    deepOceanColor,
+  };
 }
 
 /** Compute ocean, sun-shadow, fog, cloud, and distant-islet metrics for any world width. */
@@ -106,6 +273,8 @@ void main() {
 /** Custom GLSL vertex shader for Critter Siege's animated stylized ocean waves. */
 export const OCEAN_VERTEX_SHADER = `
 uniform float uTime;
+uniform float uWaveAmp;
+uniform float uWaveSpeed;
 varying vec3 vWorldPos;
 varying vec3 vWaveNormal;
 varying float vWaveCrest;
@@ -114,26 +283,29 @@ void main() {
   vec4 worldPos = modelMatrix * vec4(position, 1.0);
   float wx = worldPos.x;
   float wz = worldPos.z;
+  float t = uTime * uWaveSpeed;
 
-  float w1 = sin(wx * 0.18 + uTime * 1.45) * 0.13;
-  float w2 = cos(wz * 0.15 - uTime * 1.18) * 0.11;
-  float w3 = sin((wx * 0.12 + wz * 0.11) + uTime * 0.92) * 0.08;
-  float w4 = cos((wx * 0.27 - wz * 0.23) - uTime * 1.85) * 0.04;
+  float w1 = sin(wx * 0.18 + t * 1.45) * 0.13 * uWaveAmp;
+  float w2 = cos(wz * 0.15 - t * 1.18) * 0.11 * uWaveAmp;
+  float w3 = sin((wx * 0.12 + wz * 0.11) + t * 0.92) * 0.08 * uWaveAmp;
+  float w4 = cos((wx * 0.27 - wz * 0.23) - t * 1.85) * 0.04 * uWaveAmp;
   float disp = w1 + w2 + w3 + w4;
   worldPos.y += disp;
 
-  float dHx =
-    cos(wx * 0.18 + uTime * 1.45) * 0.13 * 0.18 +
-    cos((wx * 0.12 + wz * 0.11) + uTime * 0.92) * 0.08 * 0.12 -
-    sin((wx * 0.27 - wz * 0.23) - uTime * 1.85) * 0.04 * 0.27;
-  float dHz =
-    -sin(wz * 0.15 - uTime * 1.18) * 0.11 * 0.15 +
-    cos((wx * 0.12 + wz * 0.11) + uTime * 0.92) * 0.08 * 0.11 +
-    sin((wx * 0.27 - wz * 0.23) - uTime * 1.85) * 0.04 * 0.23;
+  float dHx = (
+    cos(wx * 0.18 + t * 1.45) * 0.13 * 0.18 +
+    cos((wx * 0.12 + wz * 0.11) + t * 0.92) * 0.08 * 0.12 -
+    sin((wx * 0.27 - wz * 0.23) - t * 1.85) * 0.04 * 0.27
+  ) * uWaveAmp;
+  float dHz = (
+    -sin(wz * 0.15 - t * 1.18) * 0.11 * 0.15 +
+    cos((wx * 0.12 + wz * 0.11) + t * 0.92) * 0.08 * 0.11 +
+    sin((wx * 0.27 - wz * 0.23) - t * 1.85) * 0.04 * 0.23
+  ) * uWaveAmp;
 
   vWaveNormal = normalize(vec3(-dHx * 2.2, 1.0, -dHz * 2.2));
   vWorldPos = worldPos.xyz;
-  vWaveCrest = clamp(disp * 2.2 + 0.5, 0.0, 1.0);
+  vWaveCrest = clamp(disp * 2.2 + 0.5 + max(0.0, uWaveAmp - 1.0) * 0.14, 0.0, 1.0);
 
   gl_Position = projectionMatrix * viewMatrix * worldPos;
 }
@@ -218,6 +390,8 @@ export function createOceanShaderMaterial(
     depthWrite: true,
     uniforms: {
       uTime: { value: 0 },
+      uWaveAmp: { value: 1.0 },
+      uWaveSpeed: { value: 1.0 },
       uSunDir: { value: sunDir.clone().normalize() },
       uIslandCenter: {
         value: new THREE.Vector2(DEFAULT_ISLAND_CENTER.x, DEFAULT_ISLAND_CENTER.z),
@@ -254,8 +428,8 @@ function disposeObjectTree(root: THREE.Object3D): void {
 
 /**
  * Sunlit floating sky-island Three.js scene, golden-hour lighting rig (2048x2048 shadows),
- * sky-gradient dome with glowing sun orb, distant silhouette floating islets, drifting
- * sculpted cloud clusters, and custom GLSL animated stylized ocean with coastal surf foam.
+ * progressive Round 1-5 sky-gradient dome with glowing sun orb, distant silhouette floating islets,
+ * drifting sculpted cloud clusters, and custom GLSL animated stylized ocean with churning flood waves.
  */
 export class WorldScene {
   public readonly scene: THREE.Scene;
@@ -265,6 +439,7 @@ export class WorldScene {
   private readonly hemiLight: THREE.HemisphereLight;
   private readonly fillLight: THREE.DirectionalLight;
   private readonly skyDome: THREE.Mesh;
+  private readonly skyMat: THREE.ShaderMaterial;
   private readonly sunOrbGroup: THREE.Group;
   private readonly cloudsRoot: THREE.Group;
   private readonly clouds: CloudCluster[] = [];
@@ -282,6 +457,10 @@ export class WorldScene {
   private worldScale = 1.0;
   private cloudYOffset = 0;
   private waterLevel = DEFAULT_WATER_LEVEL;
+  private targetWaterLevel = DEFAULT_WATER_LEVEL;
+  private currentRound = 1;
+  private currentMaxRounds = 5;
+  private floodIntensity = 0;
 
   public constructor(container: HTMLElement) {
     this.scene = new THREE.Scene();
@@ -357,7 +536,7 @@ export class WorldScene {
       .subVectors(this.sunLight.position, this.islandCenter)
       .normalize();
     const skyGeo = new THREE.SphereGeometry(BASE_SKY_RADIUS, 28, 20);
-    const skyMat = new THREE.ShaderMaterial({
+    this.skyMat = new THREE.ShaderMaterial({
       vertexShader: SKY_VERTEX_SHADER,
       fragmentShader: SKY_FRAGMENT_SHADER,
       side: THREE.BackSide,
@@ -371,7 +550,7 @@ export class WorldScene {
         uSunDir: { value: sunDir },
       },
     });
-    this.skyDome = new THREE.Mesh(skyGeo, skyMat);
+    this.skyDome = new THREE.Mesh(skyGeo, this.skyMat);
     this.skyDome.name = "sky_gradient_dome";
     this.skyDome.position.copy(this.islandCenter);
     this.scene.add(this.skyDome);
@@ -586,13 +765,36 @@ export class WorldScene {
     this.configureForWorldSize(worldWidth, worldHeight, worldDepth);
   }
 
-  /** Set the vertical ocean height (for sudden-death rising tide). */
-  public setWaterLevel(y: number): void {
+  /** Set vertical ocean height (snaps immediately by default; smooth 60 FPS rise when immediate is false). */
+  public setWaterLevel(y: number, immediate = true): void {
     if (!Number.isFinite(y)) {
       return;
     }
-    this.waterLevel = y;
-    this.waterGroup.position.y = y;
+    this.targetWaterLevel = y;
+    if (immediate || y < this.waterLevel - 1.5) {
+      this.waterLevel = y;
+      this.waterGroup.position.y = y;
+    }
+  }
+
+  /** Set smooth 60 FPS target water elevation for rising warning tide and Round 5 Final Deluge. */
+  public setWaterTargetLevel(y: number): void {
+    this.setWaterLevel(y, false);
+  }
+
+  /** Shift daylight lighting and sky-dome palette smoothly across Rounds 1-5 (morning -> afternoon -> stormy sunset). */
+  public setRoundAtmosphere(round: number, maxRounds: number): void {
+    this.currentRound = Number.isFinite(round) ? Math.max(1, Math.floor(round)) : 1;
+    this.currentMaxRounds = Number.isFinite(maxRounds)
+      ? Math.max(1, Math.floor(maxRounds))
+      : 5;
+    this.applyAtmosphere();
+  }
+
+  /** Scale churning ocean wave amplitude/speed and storm ocean/fog tint cleanly across 0..1 flood intensity. */
+  public setFloodIntensity(intensity: number): void {
+    this.floodIntensity = clamp(Number.isFinite(intensity) ? intensity : 0, 0, 1);
+    this.applyAtmosphere();
   }
 
   /** Resize renderer viewport cleanly. */
@@ -602,10 +804,17 @@ export class WorldScene {
     this.renderer.setSize(safeW, safeH, true);
   }
 
-  /** Animate GLSL ocean waves, coastal surf foam, distant islets, and drifting clouds. */
+  /** Animate GLSL ocean waves, smooth rising water level, coastal surf foam, distant islets, and drifting clouds. */
   public update(dtSec: number, elapsedSec: number): void {
     const safeDt = Number.isFinite(dtSec) ? Math.max(0, Math.min(dtSec, 0.1)) : 0;
     const t = Number.isFinite(elapsedSec) ? elapsedSec : 0;
+
+    // Smoothly interpolate vertical water elevation toward targetWaterLevel at 60 FPS
+    if (Math.abs(this.targetWaterLevel - this.waterLevel) > 1e-4) {
+      const alpha = safeDt > 0 ? 1 - Math.exp(-7 * safeDt) : 1;
+      this.waterLevel += (this.targetWaterLevel - this.waterLevel) * alpha;
+      this.waterGroup.position.y = this.waterLevel;
+    }
 
     // Advance GPU ocean wave shader clock
     const timeUniform = this.oceanMat.uniforms.uTime;
@@ -613,17 +822,28 @@ export class WorldScene {
       timeUniform.value = t;
     }
 
-    // Coastal foam ring gentle breathing pulse scaled to current arena radius
-    const innerScale = this.worldScale * (1.0 + Math.sin(t * 1.35) * 0.032);
+    // Coastal foam ring gentle breathing pulse scaled to current arena radius + storm surge
+    const surgeSpeed = 1 + this.floodIntensity * 0.9;
+    const foamBoost = this.floodIntensity * 0.18;
+    const innerScale = this.worldScale * (1.0 + Math.sin(t * 1.35 * surgeSpeed) * 0.032);
     this.innerFoamRing.scale.set(innerScale, innerScale, 1);
     if (this.innerFoamRing.material instanceof THREE.MeshBasicMaterial) {
-      this.innerFoamRing.material.opacity = 0.22 + Math.sin(t * 1.35) * 0.07;
+      this.innerFoamRing.material.opacity = clamp(
+        0.22 + foamBoost + Math.sin(t * 1.35 * surgeSpeed) * 0.07,
+        0.05,
+        0.65,
+      );
     }
 
-    const outerScale = this.worldScale * (1.0 + Math.cos(t * 1.05 + 1.1) * 0.04);
+    const outerScale =
+      this.worldScale * (1.0 + Math.cos(t * 1.05 * surgeSpeed + 1.1) * 0.04);
     this.outerFoamRing.scale.set(outerScale, outerScale, 1);
     if (this.outerFoamRing.material instanceof THREE.MeshBasicMaterial) {
-      this.outerFoamRing.material.opacity = 0.14 + Math.cos(t * 1.05 + 1.1) * 0.05;
+      this.outerFoamRing.material.opacity = clamp(
+        0.14 + foamBoost * 0.8 + Math.cos(t * 1.05 * surgeSpeed + 1.1) * 0.05,
+        0.05,
+        0.55,
+      );
     }
 
     // Gentle vertical hover on distant silhouette floating islets
@@ -653,7 +873,7 @@ export class WorldScene {
   /** Dispose all scene geometries, materials, shadow maps, and WebGL context resources. */
   public dispose(): void {
     this.skyDome.geometry.dispose();
-    disposeMaterial(this.skyDome.material);
+    this.skyMat.dispose();
     this.scene.remove(this.skyDome);
 
     disposeObjectTree(this.sunOrbGroup);
@@ -686,6 +906,68 @@ export class WorldScene {
       this.renderer.domElement.parentElement.removeChild(
         this.renderer.domElement,
       );
+    }
+  }
+
+  private applyAtmosphere(): void {
+    const state = computeAtmosphereState(
+      this.currentRound,
+      this.currentMaxRounds,
+      this.floodIntensity,
+    );
+
+    const zenithUniform = this.skyMat.uniforms.uZenithColor;
+    if (zenithUniform && zenithUniform.value instanceof THREE.Color) {
+      zenithUniform.value.copy(state.zenithColor);
+    }
+    const midSkyUniform = this.skyMat.uniforms.uMidSkyColor;
+    if (midSkyUniform && midSkyUniform.value instanceof THREE.Color) {
+      midSkyUniform.value.copy(state.midSkyColor);
+    }
+    const horizonUniform = this.skyMat.uniforms.uHorizonColor;
+    if (horizonUniform && horizonUniform.value instanceof THREE.Color) {
+      horizonUniform.value.copy(state.horizonColor);
+    }
+    const oceanBounceUniform = this.skyMat.uniforms.uOceanBounceColor;
+    if (oceanBounceUniform && oceanBounceUniform.value instanceof THREE.Color) {
+      oceanBounceUniform.value.copy(state.oceanBounceColor);
+    }
+
+    this.sunLight.color.copy(state.sunColor);
+    this.sunLight.intensity = state.sunIntensity;
+    this.hemiLight.color.copy(state.hemiSkyColor);
+    this.hemiLight.groundColor.copy(state.hemiGroundColor);
+    this.hemiLight.intensity = state.hemiIntensity;
+    this.fillLight.color.copy(state.fillColor);
+    this.fillLight.intensity = state.fillIntensity;
+
+    if (this.scene.fog instanceof THREE.FogExp2) {
+      this.scene.fog.color.copy(state.fogColor);
+    }
+
+    const waveAmpUniform = this.oceanMat.uniforms.uWaveAmp;
+    if (waveAmpUniform) {
+      waveAmpUniform.value = state.waveAmp;
+    }
+    const waveSpeedUniform = this.oceanMat.uniforms.uWaveSpeed;
+    if (waveSpeedUniform) {
+      waveSpeedUniform.value = state.waveSpeed;
+    }
+    const shallowUniform = this.oceanMat.uniforms.uShallowColor;
+    if (shallowUniform && shallowUniform.value instanceof THREE.Color) {
+      shallowUniform.value.copy(state.shallowOceanColor);
+    }
+    const midUniform = this.oceanMat.uniforms.uMidColor;
+    if (midUniform && midUniform.value instanceof THREE.Color) {
+      midUniform.value.copy(state.midOceanColor);
+    }
+    const deepUniform = this.oceanMat.uniforms.uDeepColor;
+    if (deepUniform && deepUniform.value instanceof THREE.Color) {
+      deepUniform.value.copy(state.deepOceanColor);
+    }
+    const oceanFogUniform = this.oceanMat.uniforms.uFogColor;
+    if (oceanFogUniform && oceanFogUniform.value instanceof THREE.Color) {
+      oceanFogUniform.value.copy(state.fogColor);
     }
   }
 

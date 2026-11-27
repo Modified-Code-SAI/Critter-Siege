@@ -1,12 +1,23 @@
 import {
+  DEFAULT_FLOOD_DURATION_SEC,
+  DEFAULT_MAX_ROUNDS,
+  DEFAULT_ROUND_DURATION_SEC,
+  DEFAULT_STARTING_COINS,
   GADGET_CATALOG,
   HARDPOINT_SLOTS,
+  MAX_LOADOUT_SLOTS,
   MUTATION_CATALOG,
   MUTATION_IDS,
+  PLAYER_COLOR_PALETTE,
+  ROUND5_WARNING_TIDE_RISE,
+  ROUND5_WARNING_WINDOW_SEC,
   SPECIES_CATALOG,
   computeApexSynergy,
   computeCritterStats,
-  createDefaultGadgetCharges,
+  computeMaxMoveDistance as computeSharedMaxMoveDistance,
+  computeRetreatMoveDistance as computeSharedRetreatMoveDistance,
+  createRoundLoadoutCharges,
+  validateAndBuildStartingLoadout,
 } from "./catalog.js";
 import * as Hazards from "./hazards.js";
 import {
@@ -31,16 +42,18 @@ import type {
   MapScale,
   MapScaleChoice,
   MatchConfig,
+  MatchEndReason,
   MatchPlayerSeed,
   MatchState,
   MutationId,
   PendingDraftState,
+  PrismWallState,
   TeamId,
   TurnPhase,
   Vec3,
 } from "./types.js";
 
-export type { EngineEvent, MatchConfig, MatchPlayerSeed };
+export type { EngineEvent, MatchConfig, MatchPlayerSeed, PrismWallState };
 
 const DUEL_TURN_DURATION_SEC = 28.0;
 const GRAND_TURN_DURATION_SEC = 35.0;
@@ -50,21 +63,22 @@ const INITIAL_WATER_LEVEL = 1.5;
 const MAX_WIND_SPEED = 6.0;
 const MAX_ACTIVE_PODS = 4;
 
+const COINS_ENEMY_KO = 40;
+const COINS_POD_COLLECTED = 25;
+const COINS_BARREL_CHAIN_HIT = 15;
+const COINS_ROUND_STIPEND = 35;
+const COINS_TRAILING_BONUS = 15;
+const COINS_UNLIMITED_POD_FALLBACK = 15;
+
 const STANDARD_LIMITED_GADGETS: readonly GadgetId[] = [
   "vine_grapple",
   "spore_burst",
   "burrow_bore",
   "seeker_firefly",
+  "mend_brew",
 ];
 
-const DEFAULT_COLORS = [
-  "#e67e22",
-  "#3498db",
-  "#2ecc71",
-  "#e74c3c",
-  "#9b59b6",
-  "#1abc9c",
-];
+const DEFAULT_COLORS = PLAYER_COLOR_PALETTE;
 
 /** Resolve a lobby map-scale selection (`'auto' | 'duel' | 'grand'`) using total critter count. */
 export function resolveMapScale(
@@ -121,6 +135,7 @@ function cloneCritter(c: CritterState): CritterState {
     position: { ...c.position },
     velocity: { ...c.velocity },
     equipped: { ...c.equipped },
+    loadout: [...c.loadout],
     gadgetCharges: { ...c.gadgetCharges },
   };
 }
@@ -140,11 +155,19 @@ function cloneDraft(d: PendingDraftState): PendingDraftState {
   };
 }
 
+function clonePrismWall(w: PrismWallState): PrismWallState {
+  return {
+    ...w,
+    position: { ...w.position },
+    normal: { ...w.normal },
+  };
+}
+
 /**
  * Authoritative deterministic PvP match state machine for Critter Siege.
- * Drives FFA and 2v2 turns, dynamic 60m Duel vs 144m Grand SDF maps, terrain carving,
- * Spark Mines & interactive hazards, fall damage, Evo Pod deferred drafting,
- * rising water sudden death, and multi-round Apex evolution.
+ * Drives 5-round persistent-island FFA and 2v2 matches, Siege Coins & Anytime Armory,
+ * dynamic 60m Duel vs 144m Grand SDF maps, terrain carving, Spark Mines & interactive hazards,
+ * fall damage, Evo Pod deferred drafting, Round 5 Two-Stage Ocean Deluge, and Apex evolution.
  */
 export class MatchEngine {
   private readonly config: MatchConfig;
@@ -152,19 +175,25 @@ export class MatchEngine {
   private readonly matchId: string;
   private readonly mapScale: MapScale;
   private readonly maxRounds: number;
+  private readonly roundDurationSec: number;
+  private readonly startingCoins: number;
+  private readonly floodDurationSec: number;
   private readonly turnDurationSec: number;
   private readonly retreatDurationSec: number;
   private readonly unlockedBonusGadgets: GadgetId[];
-  private readonly playerBonusMap: Map<string, GadgetId | null>;
   private readonly rng: () => number;
 
-  private _world: SdfWorld;
+  private readonly _world: SdfWorld;
   private round = 1;
   private turnNumber = 1;
   private phase: TurnPhase = "ACTIVE";
   private activePlayerId: string | null = null;
   private phaseTimeRemainingSec: number;
+  private roundTimeRemainingSec: number;
   private waterLevel = INITIAL_WATER_LEVEL;
+  private floodStartWaterLevel = INITIAL_WATER_LEVEL;
+  private floodTargetWaterLevel: number | null = null;
+  private matchEndReason: MatchEndReason | null = null;
   private wind: Vec3 = { x: 0, y: 0, z: 0 };
   private critters: CritterState[] = [];
   private evoPods: EvoPodState[] = [];
@@ -177,17 +206,33 @@ export class MatchEngine {
   private winnerTeam: TeamId | null = null;
   private roundWinners: Array<string | TeamId | null> = [];
   private podCounter = 0;
+  private prismWallCounter = 0;
   private ffaCursor = 0;
   private lastTeamTurn: TeamId | null = null;
   private teamCursor: Record<TeamId, number> = { A: 0, B: 0 };
-  private prismWalls: Array<{ ownerId: string; position: Vec3; turnsLeft: number }> = [];
+  private prismWalls: PrismWallState[] = [];
 
   public constructor(config: MatchConfig) {
     this.config = config;
     this.roomCode = config.roomCode ?? config.matchId ?? "LOCAL";
     this.matchId = config.matchId ?? `match-${this.roomCode}-${config.seed}`;
     this.mapScale = resolveMapScale(config.mapScale, config.players.length);
-    this.maxRounds = Math.max(1, config.maxRounds ?? config.roundCount ?? 3);
+    this.maxRounds = Math.max(
+      1,
+      config.maxRounds ?? config.roundCount ?? DEFAULT_MAX_ROUNDS,
+    );
+    this.roundDurationSec = Math.max(
+      5,
+      config.roundDurationSec ?? DEFAULT_ROUND_DURATION_SEC,
+    );
+    this.startingCoins = Math.max(
+      0,
+      Math.floor(config.startingCoins ?? DEFAULT_STARTING_COINS),
+    );
+    this.floodDurationSec = Math.max(
+      0.5,
+      config.floodDurationSec ?? DEFAULT_FLOOD_DURATION_SEC,
+    );
     const defaultTurnSec =
       this.mapScale === "grand"
         ? GRAND_TURN_DURATION_SEC
@@ -197,32 +242,27 @@ export class MatchEngine {
     this.retreatDurationSec =
       (config.retreatDurationMs ?? DEFAULT_RETREAT_DURATION_SEC * 1000) / 1000;
     this.phaseTimeRemainingSec = this.turnDurationSec;
+    this.roundTimeRemainingSec = this.roundDurationSec;
     this.rng = createSeededRng(config.seed ^ 0x2f6e2b1);
 
     const bonusSet = new Set<GadgetId>();
-    this.playerBonusMap = new Map();
     for (const p of config.players) {
-      let playerFirstBonus: GadgetId | null = null;
       if (p.bonusGadget && GADGET_CATALOG[p.bonusGadget]?.bonusLobbyOnly) {
         bonusSet.add(p.bonusGadget);
-        playerFirstBonus = p.bonusGadget;
       }
       if (p.unlockedBonusGadgets) {
         for (const g of p.unlockedBonusGadgets) {
           if (GADGET_CATALOG[g]?.bonusLobbyOnly) {
             bonusSet.add(g);
-            if (!playerFirstBonus) {
-              playerFirstBonus = g;
-            }
           }
         }
       }
-      this.playerBonusMap.set(p.id, playerFirstBonus);
     }
     this.unlockedBonusGadgets = Array.from(bonusSet);
 
+    // Construct persistent SDF island ONCE for the entire multi-round match!
     this._world = new SdfWorld(
-      this.config.seed + this.round * 101,
+      this.config.seed,
       this.config.theme,
       this.mapScale,
     );
@@ -233,7 +273,7 @@ export class MatchEngine {
     this.phaseTimeRemainingSec = this.turnDurationSec;
   }
 
-  /** Active round SDF world (rebuilt deterministically on each round with seed + round * 101). */
+  /** Persistent match SDF world (carved craters and tunnels remain across all rounds). */
   public get world(): SdfWorld {
     return this._world;
   }
@@ -307,6 +347,8 @@ export class MatchEngine {
         critters: this.critters,
         shooter: critter,
         areTeammates: (a, b) => this.areTeammates(a, b),
+        onEnemyDamage: (attacker, damage, source) =>
+          this.awardHazardEnemyDamageCoins(attacker, damage, source),
         onEnemyKo: (attacker) => this.awardEnemyKo(attacker),
         onWaterContact: (target, attacker) =>
           this.resolveWaterContact(target, attacker),
@@ -365,7 +407,7 @@ export class MatchEngine {
       }
     }
 
-    // Check water contact (Cycle 1-8 Rescue Parachute -35 HP vs Cycle 9+ Lethal Sudden Death)
+    // Check water contact (Cycle 1-8 Rescue Parachute -35 HP vs Sudden Death Lethal)
     if (critter.alive && critter.position.y <= this.waterLevel) {
       events.push(...this.resolveWaterContact(critter));
     }
@@ -385,11 +427,11 @@ export class MatchEngine {
     return events;
   }
 
-  /** Execute non-turn-ending utility actions (Vine Grapple, Prism Wall, or Sky Bomber drop). */
+  /** Execute non-turn-ending utility actions (Vine Grapple, Prism Wall, Mend Brew, or Sky Bomber drop). */
   public applyUtility(
     playerId: string,
     action: {
-      gadgetId: "vine_grapple" | "prism_wall" | "sky_bomber_drop";
+      gadgetId: "vine_grapple" | "prism_wall" | "mend_brew" | "sky_bomber_drop";
       direction: Vec3;
       target?: Vec3;
     },
@@ -401,15 +443,46 @@ export class MatchEngine {
     if (!critter || !critter.alive) {
       return [];
     }
+
+    const events: EngineEvent[] = [];
+
+    if (action.gadgetId === "mend_brew") {
+      if (this.phase !== "ACTIVE") {
+        return [];
+      }
+      if (!critter.loadout.includes("mend_brew")) {
+        return [];
+      }
+      const charges = critter.gadgetCharges.mend_brew;
+      if (charges === null || charges <= 0) {
+        return [];
+      }
+      if (critter.hp >= critter.maxHp) {
+        return [];
+      }
+      const healCap = GADGET_CATALOG.mend_brew.healAmount ?? 45;
+      const amount = Math.min(critter.maxHp - critter.hp, healCap);
+      critter.gadgetCharges.mend_brew = charges - 1;
+      critter.hp += amount;
+      events.push({
+        type: "ABILITY_HEALED",
+        playerId,
+        amount,
+        newHp: critter.hp,
+      });
+      return events;
+    }
+
     const normDir = safeNormalizeVec3(action.direction);
     if (!normDir) {
       return [];
     }
 
-    const events: EngineEvent[] = [];
-
     if (action.gadgetId === "vine_grapple") {
       if (this.phase !== "ACTIVE" || critter.grappleUsedThisTurn) {
+        return [];
+      }
+      if (!critter.loadout.includes("vine_grapple")) {
         return [];
       }
       const charges = critter.gadgetCharges.vine_grapple;
@@ -494,7 +567,6 @@ export class MatchEngine {
           if (this._world.isSolid(px, py, pz)) {
             const surfY = this._world.getSurfaceY(px, pz);
             if (normDir.y < -0.15) {
-              // Rappel safely down steep cliff faces: find lower foothold below hit or last air point
               let rappelY: number | null = null;
               const startScan = lastAirY + 0.35;
               const minScan = Math.max(this.waterLevel + 0.2, lastAirY - 6.5);
@@ -553,6 +625,8 @@ export class MatchEngine {
               critters: this.critters,
               shooter: critter,
               areTeammates: (a, b) => this.areTeammates(a, b),
+              onEnemyDamage: (attacker, damage, source) =>
+                this.awardHazardEnemyDamageCoins(attacker, damage, source),
               onEnemyKo: (attacker) => this.awardEnemyKo(attacker),
               onWaterContact: (target, attacker) =>
                 this.resolveWaterContact(target, attacker),
@@ -580,6 +654,9 @@ export class MatchEngine {
       if (this.phase !== "ACTIVE") {
         return [];
       }
+      if (!critter.loadout.includes("prism_wall")) {
+        return [];
+      }
       const charges = critter.gadgetCharges.prism_wall;
       if (charges !== null && charges <= 0) {
         return [];
@@ -587,15 +664,34 @@ export class MatchEngine {
       if (charges !== null) {
         critter.gadgetCharges.prism_wall = charges - 1;
       }
-      const wallPos: Vec3 =
-        action.target && isFiniteVec3(action.target)
-          ? { ...action.target }
-          : {
-              x: critter.position.x + normDir.x * 2.0,
-              y: critter.position.y + 0.5,
-              z: critter.position.z + normDir.z * 2.0,
-            };
-      this.prismWalls.push({ ownerId: playerId, position: wallPos, turnsLeft: 2 });
+      const horizLen = Math.hypot(normDir.x, normDir.z);
+      const normal: Vec3 =
+        horizLen > 1e-6
+          ? { x: normDir.x / horizLen, y: 0, z: normDir.z / horizLen }
+          : { x: 0, y: 0, z: 1 };
+      const wx = critter.position.x + normal.x * 2.4;
+      const wz = critter.position.z + normal.z * 2.4;
+      const surfY = this._world.getSurfaceY(wx, wz);
+      const wy =
+        surfY !== null && Math.abs(surfY - critter.position.y) <= 2.0
+          ? surfY
+          : critter.position.y;
+      const wallPos: Vec3 = { x: wx, y: wy, z: wz };
+      const wall: PrismWallState = {
+        id: `wall-r${this.round}-${++this.prismWallCounter}`,
+        ownerId: playerId,
+        position: wallPos,
+        normal,
+        width: 3.6,
+        height: 2.8,
+        turnsLeft: Math.max(2, this.critters.length * 2),
+        active: true,
+      };
+      this.prismWalls.push(wall);
+      events.push({
+        type: "PRISM_WALL_DEPLOYED",
+        wall: clonePrismWall(wall),
+      });
       return events;
     }
 
@@ -628,6 +724,7 @@ export class MatchEngine {
         dropParams,
         this.wind,
         this.waterLevel,
+        this.prismWalls,
       );
       events.push(...this.applySimulationOutcome(critter, "gale_mortar", sim));
       if (this.checkRoundEnded()) {
@@ -639,6 +736,118 @@ export class MatchEngine {
     }
 
     return events;
+  }
+
+  /**
+   * Anytime Armory purchase, refill, or 50% trade-in swap.
+   * Allowed during ACTIVE, RESOLVING, RETREAT, DRAFT_IF_READY, and ROUND_DRAFT for any critter
+   * in the match (even while waiting for rivals' turns). Disallowed in LOBBY, FINAL_FLOOD, MATCH_OVER.
+   */
+  public applyBuyAbility(
+    playerId: string,
+    gadgetId: GadgetId,
+    replaceGadgetId?: GadgetId,
+  ): EngineEvent[] {
+    if (
+      this.phase === "LOBBY" ||
+      this.phase === "FINAL_FLOOD" ||
+      this.phase === "MATCH_OVER"
+    ) {
+      return [];
+    }
+    const critter = this.findCritter(playerId);
+    if (!critter) {
+      return [];
+    }
+    if (!Object.prototype.hasOwnProperty.call(GADGET_CATALOG, gadgetId)) {
+      return [];
+    }
+    const def = GADGET_CATALOG[gadgetId];
+
+    // Case A — Refill Owned Limited Ability
+    if (critter.loadout.includes(gadgetId)) {
+      if (def.startingCharges === null || def.refillCost <= 0) {
+        return [];
+      }
+      if (critter.coins < def.refillCost) {
+        return [];
+      }
+      critter.coins -= def.refillCost;
+      const current = critter.gadgetCharges[gadgetId] ?? 0;
+      critter.gadgetCharges[gadgetId] = current + def.startingCharges;
+      return [
+        {
+          type: "ABILITY_PURCHASED",
+          playerId,
+          gadgetId,
+          isRefill: true,
+          replacedGadgetId: null,
+          cost: def.refillCost,
+          refund: 0,
+          newBalance: critter.coins,
+        },
+      ];
+    }
+
+    // Case B — Buy Into Open Slot (< MAX_LOADOUT_SLOTS)
+    if (critter.loadout.length < MAX_LOADOUT_SLOTS) {
+      if (critter.coins < def.shopCost) {
+        return [];
+      }
+      critter.coins -= def.shopCost;
+      critter.loadout.push(gadgetId);
+      critter.gadgetCharges[gadgetId] = def.startingCharges;
+      return [
+        {
+          type: "ABILITY_PURCHASED",
+          playerId,
+          gadgetId,
+          isRefill: false,
+          replacedGadgetId: null,
+          cost: def.shopCost,
+          refund: 0,
+          newBalance: critter.coins,
+        },
+      ];
+    }
+
+    // Case C — Trade-In Swap (50% Refund) when loadout is full (6 slots)
+    if (
+      replaceGadgetId === undefined ||
+      replaceGadgetId === "gale_mortar" ||
+      replaceGadgetId === gadgetId ||
+      !Object.prototype.hasOwnProperty.call(GADGET_CATALOG, replaceGadgetId)
+    ) {
+      return [];
+    }
+    const replaceIdx = critter.loadout.indexOf(replaceGadgetId);
+    if (replaceIdx === -1) {
+      return [];
+    }
+
+    const refund = Math.floor(GADGET_CATALOG[replaceGadgetId].shopCost * 0.5);
+    const netCost = def.shopCost - refund;
+    if (critter.coins < netCost) {
+      return [];
+    }
+
+    critter.coins -= netCost;
+    critter.loadout[replaceIdx] = gadgetId;
+    critter.gadgetCharges[replaceGadgetId] = 0;
+    critter.gadgetCharges[gadgetId] = def.startingCharges;
+
+    return [
+      {
+        type: "ABILITY_PURCHASED",
+        playerId,
+        gadgetId,
+        isRefill: false,
+        replacedGadgetId: replaceGadgetId,
+        cost: netCost,
+        refund,
+        newBalance: critter.coins,
+      },
+    ];
   }
 
   /** Fire a turn-ending weapon/gadget during ACTIVE phase, carving SDF terrain and entering RESOLVING. */
@@ -664,6 +873,9 @@ export class MatchEngine {
     }
     const gadget = GADGET_CATALOG[fire.gadgetId];
     if (!gadget || !gadget.turnEnding) {
+      return [];
+    }
+    if (!shooter.loadout.includes(fire.gadgetId)) {
       return [];
     }
     const charges = shooter.gadgetCharges[fire.gadgetId];
@@ -699,6 +911,7 @@ export class MatchEngine {
       params,
       this.wind,
       this.waterLevel,
+      this.prismWalls,
     );
 
     const events: EngineEvent[] = this.applySimulationOutcome(
@@ -803,7 +1016,11 @@ export class MatchEngine {
 
   /** Allow KO'd spectator drone critters to nudge horizontal wind once per turn. */
   public applyDroneNudge(playerId: string, delta: Vec3): EngineEvent[] {
-    if (this.phase === "MATCH_OVER" || this.phase === "LOBBY") {
+    if (
+      this.phase === "MATCH_OVER" ||
+      this.phase === "LOBBY" ||
+      this.phase === "FINAL_FLOOD"
+    ) {
       return [];
     }
     const critter = this.findCritter(playerId);
@@ -936,7 +1153,7 @@ export class MatchEngine {
     return [];
   }
 
-  /** Advance phase countdown timers and automatically trigger phase/turn/round transitions. */
+  /** Advance round clock, Round 5 Two-Stage Ocean Deluge, and phase countdown timers. */
   public tick(dtSec: number): EngineEvent[] {
     if (!Number.isFinite(dtSec) || dtSec <= 0) {
       return [];
@@ -945,22 +1162,182 @@ export class MatchEngine {
       return [];
     }
 
+    // Stage 2: Final Round Ocean Deluge engulfment sequence
+    if (this.phase === "FINAL_FLOOD") {
+      const events: EngineEvent[] = [];
+      this.phaseTimeRemainingSec = Math.max(
+        0,
+        this.phaseTimeRemainingSec - dtSec,
+      );
+      const t =
+        1 -
+        this.phaseTimeRemainingSec / Math.max(0.001, this.floodDurationSec);
+      const u = Math.pow(Math.max(0, Math.min(1, t)), 1.35);
+      const target =
+        this.floodTargetWaterLevel ??
+        Math.max(
+          this._world.getHighestSolidY() + 3.5,
+          this._world.worldHeight * 0.78,
+        );
+      this.waterLevel = Number(
+        (
+          this.floodStartWaterLevel +
+          (target - this.floodStartWaterLevel) * u
+        ).toFixed(3),
+      );
+
+      for (const c of this.critters) {
+        if (c.alive && this.waterLevel >= c.position.y + 0.35) {
+          c.alive = false;
+          c.hp = 0;
+          events.push({
+            type: "CRITTER_ENGULFED",
+            playerId: c.id,
+            position: { ...c.position },
+            waterLevel: this.waterLevel,
+          });
+        }
+      }
+
+      if (this.phaseTimeRemainingSec <= 0) {
+        this.waterLevel = Number(target.toFixed(3));
+        for (const c of this.critters) {
+          if (c.alive) {
+            c.alive = false;
+            c.hp = 0;
+            events.push({
+              type: "CRITTER_ENGULFED",
+              playerId: c.id,
+              position: { ...c.position },
+              waterLevel: this.waterLevel,
+            });
+          }
+        }
+        this.winnerId = null;
+        this.winnerTeam = null;
+        this.matchEndReason = "flood_draw";
+        this.phase = "MATCH_OVER";
+        this.activePlayerId = null;
+        events.push({
+          type: "MATCH_ENDED",
+          winnerLabel: "No Winner — Engulfed by the Ocean",
+        });
+        events.push({
+          type: "PHASE_CHANGED",
+          phase: "MATCH_OVER",
+          activePlayerId: null,
+        });
+      }
+      return events;
+    }
+
+    const events: EngineEvent[] = [];
+
+    // Decrement 5-minute round timer during active combat phases
+    if (
+      this.phase === "ACTIVE" ||
+      this.phase === "RESOLVING" ||
+      this.phase === "RETREAT"
+    ) {
+      this.roundTimeRemainingSec = Math.max(
+        0,
+        this.roundTimeRemainingSec - dtSec,
+      );
+
+      // Round 5 Stage 1: Final 60s Warning Tide Creep
+      const warnWindow = Math.min(
+        ROUND5_WARNING_WINDOW_SEC,
+        this.roundDurationSec * 0.5,
+      );
+      if (
+        this.round >= this.maxRounds &&
+        this.roundTimeRemainingSec > 0 &&
+        this.roundTimeRemainingSec <= warnWindow
+      ) {
+        const p = 1 - this.roundTimeRemainingSec / Math.max(0.001, warnWindow);
+        const desiredWater = Number(
+          (INITIAL_WATER_LEVEL + ROUND5_WARNING_TIDE_RISE * p).toFixed(3),
+        );
+        if (desiredWater > this.waterLevel) {
+          const prevStep = Math.floor(
+            (this.waterLevel - INITIAL_WATER_LEVEL) / 0.5,
+          );
+          this.waterLevel = desiredWater;
+          const nextStep = Math.floor(
+            (this.waterLevel - INITIAL_WATER_LEVEL) / 0.5,
+          );
+          if (nextStep > prevStep) {
+            events.push({ type: "WATER_ROSE", waterLevel: this.waterLevel });
+          }
+        }
+
+        Hazards.pruneSubmergedHazards(
+          this._world,
+          this.hazards,
+          this.waterLevel,
+        );
+
+        let submergedAny = false;
+        for (const c of this.critters) {
+          if (c.alive && c.position.y <= this.waterLevel) {
+            c.alive = false;
+            c.hp = 0;
+            submergedAny = true;
+          }
+        }
+        if (submergedAny) {
+          if (this.checkRoundEnded()) {
+            events.push(...this.finishRound());
+            return events;
+          }
+          if (
+            (this.phase === "ACTIVE" || this.phase === "RETREAT") &&
+            this.activePlayerId
+          ) {
+            const active = this.findCritter(this.activePlayerId);
+            if (active && !active.alive) {
+              events.push(...this.enterDraftOrNextTurn());
+              return events;
+            }
+          }
+        }
+      }
+
+      // Round Clock Hit 0:00
+      if (this.roundTimeRemainingSec <= 0) {
+        if (this.round >= this.maxRounds) {
+          this.roundWinners.push(null);
+          events.push({
+            type: "ROUND_ENDED",
+            round: this.round,
+            winnerLabel: "Draw",
+          });
+          events.push(...this.startFinalFlood());
+          return events;
+        }
+        events.push(...this.finishRoundAsTimeUpDraw());
+        return events;
+      }
+    }
+
     this.phaseTimeRemainingSec = Math.max(0, this.phaseTimeRemainingSec - dtSec);
     if (this.phaseTimeRemainingSec > 0) {
-      return [];
+      return events;
     }
 
     if (this.phase === "ACTIVE") {
-      return this.enterDraftOrNextTurn();
+      events.push(...this.enterDraftOrNextTurn());
+      return events;
     }
     if (this.phase === "RESOLVING") {
-      return this.completeResolving();
+      events.push(...this.completeResolving());
+      return events;
     }
     if (this.phase === "RETREAT") {
-      return this.enterDraftOrNextTurn();
+      events.push(...this.enterDraftOrNextTurn());
+      return events;
     }
     if (this.phase === "DRAFT_IF_READY" || this.phase === "ROUND_DRAFT") {
-      const events: EngineEvent[] = [];
       const pendingCopy = [...this.pendingDrafts];
       for (const d of pendingCopy) {
         const fallback = d.options[0];
@@ -971,7 +1348,7 @@ export class MatchEngine {
       return events;
     }
 
-    return [];
+    return events;
   }
 
   /** Return a clean JSON-serializable snapshot of the complete authoritative match state. */
@@ -995,11 +1372,18 @@ export class MatchEngine {
       activePlayerId: this.activePlayerId,
       phaseTimerMs: Math.round(this.phaseTimeRemainingSec * 1000),
       phaseTimeRemainingSec: Number(this.phaseTimeRemainingSec.toFixed(4)),
+      roundTimeRemainingSec: Number(this.roundTimeRemainingSec.toFixed(4)),
+      roundDurationSec: this.roundDurationSec,
       waterLevel: this.waterLevel,
+      floodTargetWaterLevel: this.floodTargetWaterLevel,
+      matchEndReason: this.matchEndReason,
       wind: { ...this.wind },
       critters: this.critters.map(cloneCritter),
       evoPods: this.evoPods.map(clonePod),
       hazards: this.hazards.map(Hazards.cloneHazard),
+      prismWalls: this.prismWalls
+        .filter((w) => w.active)
+        .map(clonePrismWall),
       pendingDrafts: this.pendingDrafts.map(cloneDraft),
       carveLog: this._world.getCarveLog(),
       scores,
@@ -1010,43 +1394,84 @@ export class MatchEngine {
     };
   }
 
+  private awardCoins(
+    critter: CritterState,
+    amount: number,
+    reason: string,
+  ): EngineEvent {
+    critter.coins += amount;
+    return {
+      type: "COINS_EARNED",
+      playerId: critter.id,
+      amount,
+      reason,
+      newBalance: critter.coins,
+    };
+  }
+
+  private awardHazardEnemyDamageCoins(
+    attacker: CritterState,
+    damage: number,
+    source: "spark_mine" | "blast_barrel",
+  ): EngineEvent[] {
+    const events: EngineEvent[] = [];
+    if (damage > 0) {
+      const dmgCoins = Math.max(5, Math.floor(damage / 3));
+      events.push(this.awardCoins(attacker, dmgCoins, "enemy_damage"));
+    }
+    if (source === "blast_barrel") {
+      events.push(
+        this.awardCoins(attacker, COINS_BARREL_CHAIN_HIT, "barrel_chain_hit"),
+      );
+    }
+    return events;
+  }
+
   private computeMaxMoveDistance(
     species: CritterState["species"],
     equipped: Partial<Record<HardpointSlot, MutationId>>,
   ): number {
-    const base = this.mapScale === "grand" ? 20.0 : 14.0;
-    const speciesMult = species === "norway_rat" ? 1.18 : 1.0;
-    const mutMult = equipped.legs === "spring_paws" ? 1.2 : 1.0;
-    return Number((base * speciesMult * mutMult).toFixed(4));
+    return computeSharedMaxMoveDistance(this.mapScale, species, equipped);
   }
 
   private computeRetreatMoveDistance(
     species: CritterState["species"],
     equipped: Partial<Record<HardpointSlot, MutationId>>,
   ): number {
-    const base = this.mapScale === "grand" ? 7.0 : 5.0;
-    const speciesMult = species === "norway_rat" ? 1.18 : 1.0;
-    const mutMult = equipped.legs === "spring_paws" ? 1.2 : 1.0;
-    const rollMult = SPECIES_CATALOG[species].retreatRollBoost;
-    return Number((base * speciesMult * mutMult * rollMult).toFixed(4));
+    return computeSharedRetreatMoveDistance(this.mapScale, species, equipped);
   }
 
   private getRoundCycle(): number {
-    return Math.floor((this.turnNumber - 1) / Math.max(1, this.critters.length)) + 1;
+    return (
+      Math.floor((this.turnNumber - 1) / Math.max(1, this.critters.length)) + 1
+    );
   }
 
   private isSuddenDeath(): boolean {
-    return this.getRoundCycle() >= 9;
+    const warnWindow = Math.min(
+      ROUND5_WARNING_WINDOW_SEC,
+      this.roundDurationSec * 0.5,
+    );
+    return (
+      this.getRoundCycle() >= 9 ||
+      (this.round >= this.maxRounds && this.roundTimeRemainingSec <= warnWindow)
+    );
   }
 
   private findRescuePosition(critter: CritterState): Vec3 {
-    const candidates = this._world.findSpawnPoints(Math.max(4, this.critters.length));
-    const dry = candidates.filter((pt) => pt.y > this.waterLevel + 1.5);
+    const candidates = this._world.findPersistentRoundSpawnPoints(
+      Math.max(4, this.critters.length),
+      this.waterLevel,
+    );
+    const dry = candidates.filter((pt) => pt.y > this.waterLevel + 1.0);
     const chosen = dry[critter.seatIndex % Math.max(1, dry.length)] ?? dry[0];
     if (chosen) {
       return { ...chosen };
     }
-    const centerSurf = this._world.getSurfaceY(this._world.centerX, this._world.centerZ);
+    const centerSurf = this._world.getSurfaceY(
+      this._world.centerX,
+      this._world.centerZ,
+    );
     return {
       x: this._world.centerX,
       y: Math.max(this.waterLevel + 2.0, centerSurf ?? 10.0),
@@ -1072,7 +1497,7 @@ export class MatchEngine {
           attacker.id !== critter.id &&
           !this.areTeammates(attacker, critter)
         ) {
-          this.awardEnemyKo(attacker);
+          return this.awardEnemyKo(attacker);
         }
         return [];
       }
@@ -1097,13 +1522,9 @@ export class MatchEngine {
       attacker.id !== critter.id &&
       !this.areTeammates(attacker, critter)
     ) {
-      this.awardEnemyKo(attacker);
+      return this.awardEnemyKo(attacker);
     }
     return [];
-  }
-
-  private buildRoundGadgetCharges(bonus: GadgetId | null): Record<GadgetId, number | null> {
-    return createDefaultGadgetCharges(bonus);
   }
 
   private initializeCritters(): void {
@@ -1115,7 +1536,10 @@ export class MatchEngine {
       const spawn = spawns[idx] ?? { x: centerX + idx, y: 10.0, z: centerZ };
       const team = normalizeTeam(this.config.mode, p.team, idx);
       const stats = computeCritterStats(p.species, {});
-      const bonus = this.playerBonusMap.get(p.id) ?? null;
+      const startingKit = validateAndBuildStartingLoadout(
+        p.startingLoadout,
+        this.startingCoins,
+      );
       this.fallPeakY.set(p.id, spawn.y);
       return {
         id: p.id,
@@ -1138,7 +1562,9 @@ export class MatchEngine {
         pendingEvoDraft: false,
         equipped: {},
         apex: null,
-        gadgetCharges: this.buildRoundGadgetCharges(bonus),
+        coins: startingKit.remainingCoins,
+        loadout: startingKit.loadout,
+        gadgetCharges: startingKit.gadgetCharges,
         roundShieldRemaining: stats.roundShieldHits,
         kills: 0,
         damageDealt: 0,
@@ -1169,7 +1595,7 @@ export class MatchEngine {
     );
   }
 
-  private awardEnemyKo(attacker: CritterState): void {
+  private awardEnemyKo(attacker: CritterState): EngineEvent[] {
     attacker.kills += 1;
     attacker.score += 1;
     if (this.config.mode === "2v2" && attacker.team) {
@@ -1179,6 +1605,7 @@ export class MatchEngine {
     if (attacker.evoCharge >= 100) {
       attacker.pendingEvoDraft = true;
     }
+    return [this.awardCoins(attacker, COINS_ENEMY_KO, "enemy_ko")];
   }
 
   private rollWind(): void {
@@ -1270,6 +1697,50 @@ export class MatchEngine {
     return null;
   }
 
+  private grantPodBonusGadget(
+    critter: CritterState,
+    candidate: GadgetId,
+    events: EngineEvent[],
+  ): GadgetId | null {
+    if (critter.loadout.includes(candidate)) {
+      const prev = critter.gadgetCharges[candidate];
+      if (prev !== null) {
+        critter.gadgetCharges[candidate] = prev + 1;
+        return candidate;
+      }
+    } else if (critter.loadout.length < MAX_LOADOUT_SLOTS) {
+      critter.loadout.push(candidate);
+      critter.gadgetCharges[candidate] =
+        GADGET_CATALOG[candidate].startingCharges === null ? null : 1;
+      return candidate;
+    }
+
+    // Loadout full (or candidate is unlimited) -> increment an owned limited gadget
+    const ownedLimited = critter.loadout.filter(
+      (id) => GADGET_CATALOG[id].startingCharges !== null,
+    );
+    if (ownedLimited.length > 0) {
+      const chosen =
+        ownedLimited[Math.floor(this.rng() * ownedLimited.length)] ??
+        ownedLimited[0];
+      if (chosen) {
+        critter.gadgetCharges[chosen] =
+          (critter.gadgetCharges[chosen] ?? 0) + 1;
+        return chosen;
+      }
+    }
+
+    // All owned gadgets are unlimited -> grant +15 extra Siege Coins!
+    events.push(
+      this.awardCoins(
+        critter,
+        COINS_UNLIMITED_POD_FALLBACK,
+        "pod_bonus_coins",
+      ),
+    );
+    return null;
+  }
+
   private collectPodsInRange(critter: CritterState): EngineEvent[] {
     const events: EngineEvent[] = [];
     const magnet = SPECIES_CATALOG[critter.species].podMagnetRadius;
@@ -1304,6 +1775,9 @@ export class MatchEngine {
             podKind: "med_berry",
             healedHp,
           });
+          events.push(
+            this.awardCoins(critter, COINS_POD_COLLECTED, "pod_collected"),
+          );
           continue;
         }
 
@@ -1312,13 +1786,15 @@ export class MatchEngine {
           if (critter.evoCharge >= 100) {
             critter.pendingEvoDraft = true;
           }
-          const bonusGadget =
+          const candidate =
             superGadgetPool[Math.floor(this.rng() * superGadgetPool.length)] ??
             "gravity_mine";
-          const prev = critter.gadgetCharges[bonusGadget];
-          if (prev !== null) {
-            critter.gadgetCharges[bonusGadget] = prev + 1;
-          }
+          const extraEvents: EngineEvent[] = [];
+          const bonusGadget = this.grantPodBonusGadget(
+            critter,
+            candidate,
+            extraEvents,
+          );
           events.push({
             type: "EVO_POD_COLLECTED",
             playerId: critter.id,
@@ -1327,6 +1803,10 @@ export class MatchEngine {
             podKind: "super_gadget",
             healedHp: 0,
           });
+          events.push(
+            this.awardCoins(critter, COINS_POD_COLLECTED, "pod_collected"),
+          );
+          events.push(...extraEvents);
           continue;
         }
 
@@ -1339,12 +1819,14 @@ export class MatchEngine {
           ...STANDARD_LIMITED_GADGETS,
           ...this.unlockedBonusGadgets,
         ];
-        const bonusGadget =
+        const candidate =
           pool[Math.floor(this.rng() * pool.length)] ?? "spore_burst";
-        const prev = critter.gadgetCharges[bonusGadget];
-        if (prev !== null) {
-          critter.gadgetCharges[bonusGadget] = prev + 1;
-        }
+        const extraEvents: EngineEvent[] = [];
+        const bonusGadget = this.grantPodBonusGadget(
+          critter,
+          candidate,
+          extraEvents,
+        );
 
         events.push({
           type: "EVO_POD_COLLECTED",
@@ -1354,6 +1836,10 @@ export class MatchEngine {
           podKind: "evo_dna",
           healedHp: 0,
         });
+        events.push(
+          this.awardCoins(critter, COINS_POD_COLLECTED, "pod_collected"),
+        );
+        events.push(...extraEvents);
       }
     }
 
@@ -1391,6 +1877,15 @@ export class MatchEngine {
 
       if (!isSelf && !isFriendly) {
         shooter.damageDealt += hit.damage;
+        if (hit.damage > 0) {
+          events.push(
+            this.awardCoins(
+              shooter,
+              Math.max(5, Math.floor(hit.damage / 3)),
+              "enemy_damage",
+            ),
+          );
+        }
       }
 
       if (hit.drowned && !this.isSuddenDeath() && target.alive) {
@@ -1399,7 +1894,7 @@ export class MatchEngine {
         if (target.hp <= 0) {
           target.alive = false;
           if (!isSelf && !isFriendly) {
-            this.awardEnemyKo(shooter);
+            events.push(...this.awardEnemyKo(shooter));
           }
         } else {
           target.position = {
@@ -1412,11 +1907,23 @@ export class MatchEngine {
         target.hp = hit.newHp;
         if (hit.knockedOut && target.alive) {
           target.alive = false;
-          // Review Focus #2 & #3: Only true enemy KOs award +1 KO point & +50% Evo Charge!
+          // Review Focus #2 & #3: Only true enemy KOs award +1 KO point, +50% Evo Charge & +40 Siege Coins!
           if (!isSelf && !isFriendly) {
-            this.awardEnemyKo(shooter);
+            events.push(...this.awardEnemyKo(shooter));
           }
         }
+      }
+    }
+
+    for (const wallId of simulation.shatteredPrismWallIds ?? []) {
+      const wall = this.prismWalls.find((w) => w.id === wallId && w.active);
+      if (wall) {
+        wall.active = false;
+        events.push({
+          type: "PRISM_WALL_SHATTERED",
+          wallId: wall.id,
+          position: { ...wall.position },
+        });
       }
     }
 
@@ -1427,17 +1934,22 @@ export class MatchEngine {
       simulation,
     });
 
-    // Trigger Blast Barrel chain detonations from projectile/melee impacts
+    // Trigger Blast Barrel chain detonations from damaging projectile/melee impacts
+    const damagingImpacts = simulation.impacts.filter(
+      (imp) => imp.damageRadius > 0 || imp.baseDamage > 0,
+    );
     events.push(
       ...Hazards.resolveBarrelChainDetonations({
         world: this._world,
         hazards: this.hazards,
         critters: this.critters,
         shooter,
-        initialImpacts: simulation.impacts,
+        initialImpacts: damagingImpacts,
         waterLevel: this.waterLevel,
         preImpactPositions,
         areTeammates: (a, b) => this.areTeammates(a, b),
+        onEnemyDamage: (attacker, damage) =>
+          this.awardHazardEnemyDamageCoins(attacker, damage, "blast_barrel"),
         onEnemyKo: (attacker) => this.awardEnemyKo(attacker),
         onWaterContact: (target, attacker) =>
           this.resolveWaterContact(target, attacker),
@@ -1459,6 +1971,8 @@ export class MatchEngine {
               critters: this.critters,
               shooter,
               areTeammates: (a, b) => this.areTeammates(a, b),
+              onEnemyDamage: (attacker, damage, source) =>
+                this.awardHazardEnemyDamageCoins(attacker, damage, source),
               onEnemyKo: (attacker) => this.awardEnemyKo(attacker),
               onWaterContact: (affected, attacker) =>
                 this.resolveWaterContact(affected, attacker),
@@ -1514,6 +2028,7 @@ export class MatchEngine {
 
     // Decay temporary prism walls & land parachuting pods
     this.prismWalls = this.prismWalls
+      .filter((w) => w.active)
       .map((w) => ({ ...w, turnsLeft: w.turnsLeft - 1 }))
       .filter((w) => w.turnsLeft > 0);
     for (const pod of this.evoPods) {
@@ -1524,28 +2039,16 @@ export class MatchEngine {
 
     this.shiftWindSlightly();
 
-    // Sudden Death begins at Cycle 9 (after every player has taken 8 full turns!)
+    // Sudden Death rising water begins at Cycle 9 (preserves persistent island without crumbleOuterRing)
     const suddenDeathTurn = Math.max(1, this.critters.length) * 8 + 1;
     if (this.turnNumber >= suddenDeathTurn) {
-      const crumbleStep = this.turnNumber - suddenDeathTurn;
       this.waterLevel = Number((this.waterLevel + 0.65).toFixed(2));
-      const crumbleRadius =
-        this.mapScale === "grand"
-          ? Math.max(22.0, 66.0 - crumbleStep * 3.0)
-          : Math.max(10.0, 27.5 - crumbleStep * 1.3);
-      this._world.crumbleOuterRing(crumbleRadius);
       Hazards.pruneSubmergedHazards(this._world, this.hazards, this.waterLevel);
       events.push({ type: "WATER_ROSE", waterLevel: this.waterLevel });
 
-      // Drown any critter submerged by rising water or left over open ocean after cliff crumble
       for (const c of this.critters) {
         if (!c.alive) continue;
-        const surfY = this._world.getSurfaceY(c.position.x, c.position.z);
-        if (
-          c.position.y <= this.waterLevel ||
-          surfY === null ||
-          surfY <= this.waterLevel
-        ) {
+        if (c.position.y <= this.waterLevel) {
           c.position = {
             ...c.position,
             y: Math.min(c.position.y, this.waterLevel),
@@ -1589,7 +2092,10 @@ export class MatchEngine {
   }
 
   private spawnEvoPod(): EvoPodState | null {
-    const candidates = this._world.findSpawnPoints(6);
+    const candidates = this._world.findPersistentRoundSpawnPoints(
+      6,
+      this.waterLevel,
+    );
     const valid = candidates.filter((pt) => pt.y > this.waterLevel + 0.8);
     if (valid.length === 0) {
       return null;
@@ -1623,9 +2129,83 @@ export class MatchEngine {
     return aliveCount <= 1;
   }
 
+  private startFinalFlood(): EngineEvent[] {
+    this.phase = "FINAL_FLOOD";
+    this.activePlayerId = null;
+    this.phaseTimeRemainingSec = this.floodDurationSec;
+    this.floodStartWaterLevel = this.waterLevel;
+    this.floodTargetWaterLevel = Number(
+      Math.max(
+        this._world.getHighestSolidY() + 3.5,
+        this._world.worldHeight * 0.78,
+      ).toFixed(3),
+    );
+    return [
+      {
+        type: "FINAL_FLOOD_STARTED",
+        targetWaterLevel: this.floodTargetWaterLevel,
+        durationSec: this.floodDurationSec,
+      },
+      {
+        type: "PHASE_CHANGED",
+        phase: "FINAL_FLOOD",
+        activePlayerId: null,
+      },
+    ];
+  }
+
+  private awardEndOfRoundStipends(trailingIds: ReadonlySet<string>): EngineEvent[] {
+    const events: EngineEvent[] = [];
+    for (const c of this.critters) {
+      const isTrailing = trailingIds.has(c.id);
+      const amount = isTrailing
+        ? COINS_ROUND_STIPEND + COINS_TRAILING_BONUS
+        : COINS_ROUND_STIPEND;
+      events.push(
+        this.awardCoins(
+          c,
+          amount,
+          isTrailing ? "round_stipend_comeback" : "round_stipend",
+        ),
+      );
+    }
+    return events;
+  }
+
+  private enterRoundDraft(): EngineEvent[] {
+    const events: EngineEvent[] = [];
+    const trailingIds = this.getTrailingPlayerIds();
+    events.push(...this.awardEndOfRoundStipends(trailingIds));
+    this.pendingDrafts = this.critters.map((c) =>
+      this.buildDraftForPlayer(c, trailingIds.has(c.id) ? 1 : 0),
+    );
+    this.phase = "ROUND_DRAFT";
+    this.activePlayerId = null;
+    this.phaseTimeRemainingSec = DEFAULT_DRAFT_DURATION_SEC;
+    events.push({
+      type: "PHASE_CHANGED",
+      phase: "ROUND_DRAFT",
+      activePlayerId: null,
+    });
+    return events;
+  }
+
+  private finishRoundAsTimeUpDraw(): EngineEvent[] {
+    const events: EngineEvent[] = [];
+    this.roundWinners.push(null);
+    events.push({
+      type: "ROUND_ENDED",
+      round: this.round,
+      winnerLabel: "Draw",
+    });
+    events.push(...this.enterRoundDraft());
+    return events;
+  }
+
   private finishRound(): EngineEvent[] {
     const events: EngineEvent[] = [];
     let winnerLabel = "Draw";
+    let roundWasDraw = false;
 
     if (this.config.mode === "2v2") {
       const aliveA = this.critters.some((c) => c.team === "A" && c.alive);
@@ -1639,6 +2219,7 @@ export class MatchEngine {
         this.teamScores.B += 2;
         this.roundWinners.push("B");
       } else {
+        roundWasDraw = true;
         this.roundWinners.push(null);
       }
     } else {
@@ -1648,6 +2229,7 @@ export class MatchEngine {
         survivor.score += 2;
         this.roundWinners.push(survivor.id);
       } else {
+        roundWasDraw = true;
         this.roundWinners.push(null);
       }
     }
@@ -1658,17 +2240,21 @@ export class MatchEngine {
       winnerLabel,
     });
 
-    const matchDecision = this.evaluateMatchWinner();
-    const shouldEndMatch =
-      (this.round >= this.maxRounds && !matchDecision.tied) ||
-      this.round >= this.maxRounds + 1;
+    // Always play all rounds through maxRounds (default 5)
+    if (this.round >= this.maxRounds) {
+      // Round 5 simultaneous KO / draw triggers Stage 2 Ocean Deluge!
+      if (roundWasDraw) {
+        events.push(...this.startFinalFlood());
+        return events;
+      }
 
-    if (shouldEndMatch) {
+      const matchDecision = this.evaluateMatchWinner();
       this.phase = "MATCH_OVER";
       this.activePlayerId = null;
       this.phaseTimeRemainingSec = 0;
       this.winnerId = matchDecision.winnerId;
       this.winnerTeam = matchDecision.winnerTeam;
+      this.matchEndReason = "score";
       events.push({
         type: "MATCH_ENDED",
         winnerLabel: matchDecision.label,
@@ -1681,23 +2267,14 @@ export class MatchEngine {
       return events;
     }
 
-    // Enter ROUND_DRAFT for all players, giving trailing player/team +1 free reroll
-    const trailingIds = this.getTrailingPlayerIds();
-    this.pendingDrafts = this.critters.map((c) =>
-      this.buildDraftForPlayer(c, trailingIds.has(c.id) ? 1 : 0),
-    );
-    this.phase = "ROUND_DRAFT";
-    this.activePlayerId = null;
-    this.phaseTimeRemainingSec = DEFAULT_DRAFT_DURATION_SEC;
-    events.push({
-      type: "PHASE_CHANGED",
-      phase: "ROUND_DRAFT",
-      activePlayerId: null,
-    });
-
+    events.push(...this.enterRoundDraft());
     return events;
   }
 
+  /**
+   * Evaluate final match winner by Total Score (+2/Round Win, +1/KO),
+   * breaking ties by Total Kills, then Total Damage Dealt.
+   */
   private evaluateMatchWinner(): {
     tied: boolean;
     winnerId: string | null;
@@ -1705,32 +2282,67 @@ export class MatchEngine {
     label: string;
   } {
     if (this.config.mode === "2v2") {
-      if (this.teamScores.A > this.teamScores.B) {
+      if (this.teamScores.A !== this.teamScores.B) {
+        const winTeam: TeamId = this.teamScores.A > this.teamScores.B ? "A" : "B";
         return {
           tied: false,
           winnerId: null,
-          winnerTeam: "A",
-          label: "Team A",
+          winnerTeam: winTeam,
+          label: winTeam === "A" ? "Team A" : "Team B",
         };
       }
-      if (this.teamScores.B > this.teamScores.A) {
+
+      const killsA = this.critters
+        .filter((c) => c.team === "A")
+        .reduce((sum, c) => sum + c.kills, 0);
+      const killsB = this.critters
+        .filter((c) => c.team === "B")
+        .reduce((sum, c) => sum + c.kills, 0);
+      if (killsA !== killsB) {
+        const winTeam: TeamId = killsA > killsB ? "A" : "B";
         return {
           tied: false,
           winnerId: null,
-          winnerTeam: "B",
-          label: "Team B",
+          winnerTeam: winTeam,
+          label: winTeam === "A" ? "Team A" : "Team B",
         };
       }
+
+      const dmgA = this.critters
+        .filter((c) => c.team === "A")
+        .reduce((sum, c) => sum + c.damageDealt, 0);
+      const dmgB = this.critters
+        .filter((c) => c.team === "B")
+        .reduce((sum, c) => sum + c.damageDealt, 0);
+      if (dmgA !== dmgB) {
+        const winTeam: TeamId = dmgA > dmgB ? "A" : "B";
+        return {
+          tied: false,
+          winnerId: null,
+          winnerTeam: winTeam,
+          label: winTeam === "A" ? "Team A" : "Team B",
+        };
+      }
+
       return { tied: true, winnerId: null, winnerTeam: null, label: "Draw" };
     }
 
-    const sorted = [...this.critters].sort((a, b) => b.score - a.score);
+    const sorted = [...this.critters].sort((a, b) => {
+      if (b.score !== a.score) return b.score - a.score;
+      if (b.kills !== a.kills) return b.kills - a.kills;
+      return b.damageDealt - a.damageDealt;
+    });
     const first = sorted[0];
     const second = sorted[1];
     if (!first) {
       return { tied: true, winnerId: null, winnerTeam: null, label: "Draw" };
     }
-    if (second && first.score === second.score) {
+    if (
+      second &&
+      first.score === second.score &&
+      first.kills === second.kills &&
+      first.damageDealt === second.damageDealt
+    ) {
       return { tied: true, winnerId: null, winnerTeam: null, label: "Draw" };
     }
     return {
@@ -1843,26 +2455,30 @@ export class MatchEngine {
   private startNextRound(): EngineEvent[] {
     this.round += 1;
     this.turnNumber = 1;
+    this.roundTimeRemainingSec = this.roundDurationSec;
     this.waterLevel = INITIAL_WATER_LEVEL;
+    this.floodTargetWaterLevel = null;
     this.evoPods = [];
     this.prismWalls = [];
     this.pendingDrafts = [];
-    this._world = new SdfWorld(
-      this.config.seed + this.round * 101,
-      this.config.theme,
-      this.mapScale,
-    );
 
-    const spawns = this._world.findSpawnPoints(this.critters.length);
+    // Keep the persistent carved SDF world & cumulative carveLog intact across all rounds!
+    const spawns = this._world.findPersistentRoundSpawnPoints(
+      this.critters.length,
+      this.waterLevel,
+    );
     const centerX = this._world.centerX;
     const centerZ = this._world.centerZ;
     this.fallPeakY.clear();
     for (let i = 0; i < this.critters.length; i++) {
       const c = this.critters[i];
       if (!c) continue;
-      const spawn = spawns[i] ?? { x: centerX + i, y: 10.0, z: centerZ };
+      const spawn = spawns[i] ?? {
+        x: centerX + i,
+        y: this.waterLevel + 2.0,
+        z: centerZ,
+      };
       const stats = computeCritterStats(c.species, c.equipped);
-      const bonus = this.playerBonusMap.get(c.id) ?? null;
       c.position = { ...spawn };
       c.velocity = { x: 0, y: 0, z: 0 };
       c.alive = true;
@@ -1871,7 +2487,8 @@ export class MatchEngine {
       c.moveStamina = 100;
       c.maxMoveDistance = this.computeMaxMoveDistance(c.species, c.equipped);
       c.roundShieldRemaining = stats.roundShieldHits;
-      c.gadgetCharges = this.buildRoundGadgetCharges(bonus);
+      // Persistent Build: KEEP loadout & unspent coins; refill all owned abilities free!
+      c.gadgetCharges = createRoundLoadoutCharges(c.loadout);
       c.droneNudgeUsedThisTurn = false;
       c.retreatBurrowUsedThisTurn = false;
       c.skyBomberDropUsedThisTurn = false;
@@ -1880,7 +2497,12 @@ export class MatchEngine {
       this.fallPeakY.set(c.id, spawn.y);
     }
 
-    this.hazards = Hazards.createRoundHazards(this._world, this.round, spawns);
+    // Spawn fresh tactical hazards on dry remaining terrain
+    this.hazards = Hazards.createRoundHazards(
+      this._world,
+      this.round,
+      spawns,
+    ).filter((h) => h.position.y > this.waterLevel + 0.5);
     this.thornTriggeredThisTurn.clear();
 
     this.rollWind();

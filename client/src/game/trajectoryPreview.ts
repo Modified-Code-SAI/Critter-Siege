@@ -2,6 +2,7 @@ import * as THREE from "three";
 import {
   sampleAimArc,
   type GadgetId,
+  type PrismWallState,
   type SdfWorld,
   type Vec3,
 } from "@critter/shared";
@@ -133,6 +134,8 @@ export class TrajectoryPreview {
     extended: boolean,
     visible: boolean,
     ghostParams?: TrajectoryPreviewParams | null,
+    prismWalls?: readonly PrismWallState[],
+    shooterId?: string,
   ): void {
     if (this.disposed || !visible) {
       this.group.visible = false;
@@ -150,6 +153,8 @@ export class TrajectoryPreview {
       extended,
       this.instancedDots,
       this.landingRing,
+      prismWalls,
+      shooterId,
     );
 
     const ghostCount = ghostParams
@@ -160,6 +165,8 @@ export class TrajectoryPreview {
           extended,
           this.ghostDots,
           this.ghostLandingRing,
+          prismWalls,
+          shooterId,
         )
       : 0;
 
@@ -195,8 +202,17 @@ export class TrajectoryPreview {
     extended: boolean,
     dotsMesh: THREE.InstancedMesh,
     ringMesh: THREE.Mesh,
+    prismWalls?: readonly PrismWallState[],
+    shooterId?: string,
   ): number {
-    const points = sampleAimArc(world, params, wind, extended);
+    const points = sampleAimArc(
+      world,
+      params,
+      wind,
+      extended,
+      prismWalls,
+      shooterId,
+    );
     const dotCount = Math.min(points.length, MAX_ARC_DOTS);
 
     if (dotCount === 0) {

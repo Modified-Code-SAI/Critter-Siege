@@ -1,10 +1,13 @@
 import * as THREE from "three";
 import {
   GADGET_CATALOG,
+  GRAVITY,
   SDF_DIMS,
   SPECIES_CATALOG,
   SdfWorld,
   computeCritterStats,
+  computeMaxMoveDistance,
+  computeRetreatMoveDistance,
   type CritterState,
   type EngineEvent,
   type GadgetId,
@@ -22,7 +25,10 @@ import { CameraRig, type CameraMode } from "./game/cameraRig.js";
 import { InputController } from "./game/inputController.js";
 import { TrajectoryPreview } from "./game/trajectoryPreview.js";
 import { GameClient, type LobbyViewState } from "./net/gameClient.js";
-import { ProgressionStore } from "./profile/progression.js";
+import {
+  COSMETIC_ACCENT_CATALOG,
+  ProgressionStore,
+} from "./profile/progression.js";
 import { CritterRig } from "./scene/critterMesh.js";
 import { EnvironmentProps } from "./scene/environmentProps.js";
 import { preloadAllSpeciesModels } from "./scene/modelLoader.js";
@@ -37,21 +43,6 @@ import {
   type SelectableCameraMode,
 } from "./ui/hud.js";
 
-const STANDARD_GADGETS: readonly GadgetId[] = [
-  "gale_mortar",
-  "quake_club",
-  "vine_grapple",
-  "spore_burst",
-  "burrow_bore",
-  "seeker_firefly",
-];
-
-const BONUS_GADGETS: readonly GadgetId[] = [
-  "gravity_mine",
-  "prism_wall",
-  "shock_magnet",
-];
-
 const GADGET_COLORS: Record<GadgetId, number> = {
   gale_mortar: 0xffa73b,
   quake_club: 0xf43f5e,
@@ -62,6 +53,7 @@ const GADGET_COLORS: Record<GadgetId, number> = {
   gravity_mine: 0xa855f7,
   prism_wall: 0x67e8f9,
   shock_magnet: 0x60a5fa,
+  mend_brew: 0x22c55e,
 };
 
 const LOBBY_SHOWCASE_SPECIES: readonly {
@@ -75,7 +67,6 @@ const LOBBY_SHOWCASE_SPECIES: readonly {
   { species: "glider_squirrel", color: "#f43f5e", label: "Glider Squirrel" },
 ];
 
-const GRAVITY = 18.0;
 const MOVE_SYNC_INTERVAL_MS = 66;
 const AUTO_HOP_MAX_STEP_M = 1.0;
 const BACKFLIP_JUMP_MULT = 1.48;
@@ -109,6 +100,8 @@ interface ShotPlayback {
   hits?: ShotHitPopup[];
   hitsPopupsDone?: boolean;
   hitStopSec?: number;
+  isPrismIntercept?: boolean;
+  allowOutsideResolving?: boolean;
 }
 
 /** SessionStorage key preserving ?server= WebSocket URL across page reloads. */
@@ -419,11 +412,13 @@ class CritterSiegeApp {
   private readonly environmentProps: EnvironmentProps;
   private previewHazards: HazardState[] = [];
   private activeWorldKey = "";
+  private lastMatchRound = 0;
   private appliedCarveCount = 0;
-  private appliedCrumbleTurn = 0;
+  private musicUnlocked = false;
 
   private readonly onWindowResizeBound: () => void;
   private readonly onWindowKeyDownBound: (e: KeyboardEvent) => void;
+  private readonly onUserGestureUnlockBound: () => void;
 
   private onlineLobby: LobbyViewState | null = null;
   private matchState: MatchState | null = null;
@@ -446,6 +441,7 @@ class CritterSiegeApp {
   private lastMoveSyncMs = 0;
   private lastSyncedPos = new THREE.Vector3(WORLD_CENTER_X, 10, WORLD_CENTER_Z);
   private lastSyncedYaw = 0;
+  private readonly popupProjVec = new THREE.Vector3();
 
   // Shot Cam animation, ghost aim memory, grapple reel-up glide & audio feedback state
   private shotPlayback: ShotPlayback | null = null;
@@ -490,6 +486,7 @@ class CritterSiegeApp {
       mapScale: "auto",
       botCount: 3,
       bonusGadget: profile.unlockedBonusGadgets[0] ?? null,
+      startingLoadout: ["gale_mortar", "quake_club", "vine_grapple"],
       joinCodeInput: readRoomCodeFromUrl(),
     };
 
@@ -593,6 +590,23 @@ class CritterSiegeApp {
         }
         this.refreshLobbyHud();
       },
+      onUnlockCosmetic: (cosmeticId) => {
+        const res = this.progression.purchaseCosmetic(cosmeticId);
+        if (res.ok) {
+          this.audio.playMutationChime();
+          if (!this.inMatch) {
+            this.spawnLobbyShowcaseCritters();
+          }
+          const def = COSMETIC_ACCENT_CATALOG.find((c) => c.id === cosmeticId);
+          this.hud.showToast(
+            `Unlocked ${def ? def.name : cosmeticId} collar accent!`,
+            "success",
+          );
+        } else if (res.reason) {
+          this.hud.showToast(res.reason, "error");
+        }
+        this.refreshLobbyHud();
+      },
       onSelectBonusGadget: (gadget) => {
         this.audio.playUiClick();
         this.lobbySelection.bonusGadget = gadget;
@@ -615,6 +629,14 @@ class CritterSiegeApp {
           }
         } else if (res.reason) {
           this.hud.showToast(res.reason, "error");
+        }
+        this.refreshLobbyHud();
+      },
+      onStartingLoadoutChange: (loadout) => {
+        this.audio.playUiClick();
+        this.lobbySelection.startingLoadout = [...loadout];
+        if (this.onlineLobby?.mode === "online") {
+          this.gameClient.sendLobbyConfig({ startingLoadout: loadout });
         }
         this.refreshLobbyHud();
       },
@@ -674,6 +696,9 @@ class CritterSiegeApp {
               : {}),
             botCount: this.lobbySelection.botCount,
             bonusGadget: this.lobbySelection.bonusGadget,
+            ...(this.lobbySelection.startingLoadout !== undefined
+              ? { startingLoadout: [...this.lobbySelection.startingLoadout] }
+              : {}),
           },
         );
       },
@@ -691,6 +716,7 @@ class CritterSiegeApp {
           p.displayName,
           p.selectedSpecies,
           this.lobbySelection.bonusGadget,
+          this.lobbySelection.startingLoadout,
         );
       },
       onStartOnlineMatch: () => {
@@ -707,6 +733,9 @@ class CritterSiegeApp {
         this.selectedGadget = gid;
         this.input.setSelectedGadget(gid);
       },
+      onBuyAbility: (gadgetId, replaceGadgetId) => {
+        this.gameClient.sendBuyAbility(gadgetId, replaceGadgetId);
+      },
       onPickMutation: (mutationId, replaceSlot) => {
         this.audio.playMutationChime();
         this.gameClient.sendPickMutation(mutationId, replaceSlot);
@@ -718,6 +747,16 @@ class CritterSiegeApp {
       onToggleMute: () => {
         const muted = this.audio.toggleMute();
         this.hud.showToast(muted ? "Audio muted" : "Audio enabled", "info");
+      },
+      onToggleMusicMute: () => {
+        const muted = this.audio.toggleMusicMute();
+        this.hud.showToast(muted ? "Music muted" : "Music enabled", "info");
+      },
+      onArmoryOpenChange: (open) => {
+        if (open) {
+          this.input.exitPointerLock();
+        }
+        this.updateAdaptiveMusicMood();
       },
       onPlayAgain: () => {
         this.audio.playUiClick();
@@ -796,15 +835,47 @@ class CritterSiegeApp {
       if (e.code === "KeyM") {
         const muted = this.audio.toggleMute();
         this.hud.showToast(muted ? "Audio muted" : "Audio enabled", "info");
-      } else if (e.code === "Digit7") {
-        this.selectGadgetByIndex(6);
+      } else if (e.code === "KeyN") {
+        const muted = this.audio.toggleMusicMute();
+        this.hud.showToast(muted ? "Music muted" : "Music enabled", "info");
+      } else if (
+        e.code === "KeyB" &&
+        this.inMatch &&
+        this.matchState &&
+        this.matchState.phase !== "FINAL_FLOOD" &&
+        this.matchState.phase !== "MATCH_OVER"
+      ) {
+        this.hud.toggleArmory();
+        if (this.hud.isArmoryOpen()) {
+          this.input.exitPointerLock();
+        }
+      } else if (e.code === "Escape" && this.hud.isArmoryOpen()) {
+        this.hud.setArmoryOpen(false);
+      } else if (e.code === "KeyL" && this.inMatch) {
+        this.hud.toggleStandings();
       } else if (e.key === "?" && this.inMatch) {
         this.hud.toggleHelpCard();
       }
     };
+    this.onUserGestureUnlockBound = () => {
+      if (this.musicUnlocked) {
+        return;
+      }
+      this.musicUnlocked = true;
+      window.removeEventListener("pointerdown", this.onUserGestureUnlockBound);
+      window.removeEventListener("keydown", this.onUserGestureUnlockBound);
+      this.audio.unlockAndStartMusic();
+      this.updateAdaptiveMusicMood();
+    };
 
     window.addEventListener("resize", this.onWindowResizeBound);
     window.addEventListener("keydown", this.onWindowKeyDownBound);
+    window.addEventListener("pointerdown", this.onUserGestureUnlockBound, {
+      passive: true,
+    });
+    window.addEventListener("keydown", this.onUserGestureUnlockBound, {
+      passive: true,
+    });
 
     this.refreshLobbyHud();
 
@@ -831,11 +902,14 @@ class CritterSiegeApp {
     this.rewardedMatchId = null;
     this.essenceBreakdown = null;
     this.dronePing = null;
+    this.lastMatchRound = 0;
     this.quickStartMoved = false;
     this.quickStartFired = false;
     this.lastLocalShotAim = null;
     this.clearGrappleGlides();
+    this.hud.setArmoryOpen(false);
     this.vfx.setDronePing(null);
+    this.vfx.syncPrismWalls([], 0);
     this.shotPlayback = null;
     this.cameraRig.setShotCamActive(false);
     this.cameraRig.exitDroneRecon();
@@ -853,11 +927,15 @@ class CritterSiegeApp {
         : {}),
       botCount: Math.max(1, this.lobbySelection.botCount),
       bonusGadget: this.lobbySelection.bonusGadget,
+      ...(this.lobbySelection.startingLoadout !== undefined
+        ? { startingLoadout: [...this.lobbySelection.startingLoadout] }
+        : {}),
     });
   }
 
   private returnToLobby(): void {
     this.input.exitPointerLock();
+    this.hud.setArmoryOpen(false);
     this.gameClient.disconnect();
     this.inMatch = false;
     this.matchState = null;
@@ -870,6 +948,7 @@ class CritterSiegeApp {
     this.vfx.setDronePing(null);
     this.vfx.setProjectileVisual(null);
     this.vfx.syncEvoPods([], 0);
+    this.vfx.syncPrismWalls([], 0);
     this.trajectoryPreview.update(
       this.activeWorld,
       {
@@ -889,8 +968,10 @@ class CritterSiegeApp {
     this.input.setCanAct(false, false, false);
 
     this.activeWorldKey = "";
+    this.lastMatchRound = 0;
     this.appliedCarveCount = 0;
-    this.appliedCrumbleTurn = 0;
+    this.worldScene.setRoundAtmosphere(1, 5);
+    this.worldScene.setFloodIntensity(0);
     this.rebuildLobbyPreview(this.lobbySelection.theme);
     this.refreshLobbyHud();
   }
@@ -919,6 +1000,9 @@ class CritterSiegeApp {
   private handleLobbyUpdate(lobby: LobbyViewState): void {
     this.onlineLobby = lobby;
     if (!this.inMatch) {
+      if (lobby.startingLoadout && lobby.startingLoadout.length > 0) {
+        this.lobbySelection.startingLoadout = [...lobby.startingLoadout];
+      }
       if (lobby.theme !== this.previewTheme) {
         this.rebuildLobbyPreview(lobby.theme);
       }
@@ -930,21 +1014,24 @@ class CritterSiegeApp {
     this.matchState = state;
     this.inMatch = true;
 
-    // Release Pointer Lock automatically whenever a modal UI requires cursor clicking
+    // Release Pointer Lock automatically whenever a modal UI or flood sequence takes focus
     if (
       state.phase === "ROUND_DRAFT" ||
       state.phase === "DRAFT_IF_READY" ||
+      state.phase === "FINAL_FLOOD" ||
       state.phase === "MATCH_OVER"
     ) {
       this.input.exitPointerLock();
     }
 
-    const suddenDeathTurn = Math.max(1, state.critters.length) * 8 + 1;
-    const worldKey = `${state.matchId}:${state.seed}:${state.round}:${state.theme}:${state.mapScale}`;
+    const worldKey = `${state.matchId}:${state.seed}:${state.theme}:${state.mapScale}`;
+    let roundSnappedWater = false;
+
     if (worldKey !== this.activeWorldKey) {
       this.activeWorldKey = worldKey;
+      this.lastMatchRound = state.round;
       this.activeWorld = new SdfWorld(
-        state.seed + state.round * 101,
+        state.seed,
         state.theme,
         state.mapScale,
       );
@@ -953,18 +1040,21 @@ class CritterSiegeApp {
         this.activeWorld.worldHeight,
         this.activeWorld.worldDepth,
       );
+      this.worldScene.setRoundAtmosphere(state.round, state.maxRounds);
+      this.worldScene.setWaterLevel(state.waterLevel, true);
+      this.worldScene.setFloodIntensity(0);
+      roundSnappedWater = true;
+
       this.vfx.setWorldBounds(
         this.activeWorld.worldWidth,
         this.activeWorld.worldHeight,
         this.activeWorld.worldDepth,
       );
       this.appliedCarveCount = 0;
-      this.appliedCrumbleTurn = 0;
       for (const op of state.carveLog) {
         this.activeWorld.applyCarve(op);
         this.appliedCarveCount += 1;
       }
-      this.syncSuddenDeathCrumble(state, false);
       this.terrainRenderer.rebuildAll(this.activeWorld);
       this.input.setRaycastTargets([this.terrainRenderer.group]);
 
@@ -977,7 +1067,7 @@ class CritterSiegeApp {
         state.waterLevel,
         avoidPoints,
       );
-      if (state.carveLog.length > 0 || state.turnNumber >= suddenDeathTurn) {
+      if (state.carveLog.length > 0) {
         this.environmentProps.pruneAfterCarve(this.activeWorld, state.waterLevel);
       }
       this.environmentProps.syncHazards(state.hazards ?? [], this.elapsedSec);
@@ -991,13 +1081,61 @@ class CritterSiegeApp {
       this.localTurnKey = "";
       this.lastCountdownSec = -1;
     } else {
+      if (state.round !== this.lastMatchRound) {
+        this.lastMatchRound = state.round;
+        this.worldScene.setRoundAtmosphere(state.round, state.maxRounds);
+        this.worldScene.setWaterLevel(state.waterLevel, true);
+        this.worldScene.setFloodIntensity(0);
+        roundSnappedWater = true;
+
+        this.dronePing = null;
+        this.vfx.setDronePing(null);
+        this.shotPlayback = null;
+        this.lastLocalShotAim = null;
+        this.clearGrappleGlides();
+        this.cameraRig.setShotCamActive(false);
+        this.localTurnKey = "";
+        this.lastCountdownSec = -1;
+        this.environmentProps.syncHazards(state.hazards ?? [], this.elapsedSec);
+
+        if (state.round > 1) {
+          this.hud.showTurnBanner(
+            `ROUND ${state.round} / ${state.maxRounds}`,
+            "Battle scars remain — fresh hazards dropped!",
+            "pod",
+          );
+        }
+      }
+
       if (!this.shotPlayback && state.carveLog.length > this.appliedCarveCount) {
         this.flushPendingCarves(state);
       }
-      this.syncSuddenDeathCrumble(state, true);
     }
 
-    this.worldScene.setWaterLevel(state.waterLevel);
+    if (!roundSnappedWater) {
+      this.worldScene.setWaterTargetLevel(state.waterLevel);
+    }
+
+    let floodIntensity = 0;
+    if (state.phase === "FINAL_FLOOD") {
+      const targetY = state.floodTargetWaterLevel ?? 24;
+      const frac = Math.max(
+        0,
+        Math.min(1, (state.waterLevel - 4.0) / Math.max(1, targetY - 4.0)),
+      );
+      floodIntensity = 0.5 + 0.5 * frac;
+    } else if (
+      state.round >= state.maxRounds &&
+      state.roundTimeRemainingSec <= 60
+    ) {
+      const warnFrac = Math.max(
+        0,
+        Math.min(1, 1 - state.roundTimeRemainingSec / 60),
+      );
+      floodIntensity = 0.45 * warnFrac;
+    }
+    this.worldScene.setFloodIntensity(floodIntensity);
+
     this.syncCritterRigsFromState(state);
 
     // Snap local movement state when turn/round changes or when not actively controlling
@@ -1059,9 +1197,12 @@ class CritterSiegeApp {
         this.localMoveStamina = localCritter.moveStamina;
       }
 
-      // Auto-fallback to Gale Mortar if currently selected gadget ran out of charges
+      // Auto-fallback to Gale Mortar if selected gadget is not in loadout or out of charges
       const curCharges = localCritter.gadgetCharges[this.selectedGadget];
-      if (curCharges !== null && curCharges <= 0) {
+      if (
+        !localCritter.loadout.includes(this.selectedGadget) ||
+        (curCharges !== null && curCharges <= 0)
+      ) {
         this.selectedGadget = "gale_mortar";
         this.input.setSelectedGadget("gale_mortar");
       }
@@ -1076,6 +1217,14 @@ class CritterSiegeApp {
 
   private handleEngineEvents(events: EngineEvent[]): void {
     const localId = this.gameClient.getPlayerId();
+    const hasBatchPrismIntercept = events.some(
+      (e) =>
+        e.type === "SHOT_RESOLVED" &&
+        (e.simulation.shatteredPrismWallIds?.length ?? 0) > 0,
+    );
+    const entersResolving = events.some(
+      (e) => e.type === "PHASE_CHANGED" && e.phase === "RESOLVING",
+    );
     for (const ev of events) {
       switch (ev.type) {
         case "SHOT_RESOLVED": {
@@ -1105,6 +1254,9 @@ class CritterSiegeApp {
             })),
             hitsPopupsDone: false,
             hitStopSec: 0,
+            isPrismIntercept: (sim.shatteredPrismWallIds?.length ?? 0) > 0,
+            allowOutsideResolving:
+              !entersResolving && this.matchState?.phase !== "RESOLVING",
           };
           this.cameraRig.setShotCamActive(true);
           break;
@@ -1271,6 +1423,129 @@ class CritterSiegeApp {
           this.audio.playMutationChime();
           break;
         }
+        case "COINS_EARNED": {
+          if (ev.playerId === localId) {
+            this.audio.playCoinEarned();
+            const rig = this.critterRigs.get(ev.playerId);
+            const c = this.matchState?.critters.find((cr) => cr.id === ev.playerId);
+            const anchor: Vec3 = rig
+              ? {
+                  x: rig.root.position.x,
+                  y: rig.root.position.y + 1.9,
+                  z: rig.root.position.z,
+                }
+              : c
+                ? {
+                    x: c.position.x,
+                    y: c.position.y + 1.9,
+                    z: c.position.z,
+                  }
+                : {
+                    x: this.localPos.x,
+                    y: this.localPos.y + 1.9,
+                    z: this.localPos.z,
+                  };
+            this.spawnWorldPopup(anchor, `+${Math.round(ev.amount)} 🪙`, "event");
+          }
+          break;
+        }
+        case "ABILITY_PURCHASED": {
+          if (ev.playerId === localId) {
+            this.audio.playShopBuy();
+            this.audio.playStinger("purchase");
+            const name = GADGET_CATALOG[ev.gadgetId].name;
+            if (ev.isRefill) {
+              this.hud.showToast(
+                `Refilled ${name} (-${ev.cost} 🪙)`,
+                "success",
+              );
+            } else if (ev.replacedGadgetId) {
+              const oldName = GADGET_CATALOG[ev.replacedGadgetId].name;
+              const costText =
+                ev.cost > 0
+                  ? `Net -${ev.cost} 🪙`
+                  : ev.cost < 0
+                    ? `+${Math.abs(ev.cost)} 🪙 back`
+                    : "Even swap";
+              this.hud.showToast(
+                `Swapped ${oldName} → ${name} (${costText})`,
+                "success",
+              );
+            } else {
+              this.hud.showToast(
+                `Equipped ${name} (-${ev.cost} 🪙)`,
+                "success",
+              );
+            }
+          }
+          break;
+        }
+        case "ABILITY_HEALED": {
+          this.audio.playHealChime();
+          const healedCritter = this.matchState?.critters.find(
+            (c) => c.id === ev.playerId,
+          );
+          const rig = this.critterRigs.get(ev.playerId);
+          const pos: Vec3 = rig
+            ? {
+                x: rig.root.position.x,
+                y: rig.root.position.y + 1.65,
+                z: rig.root.position.z,
+              }
+            : healedCritter
+              ? {
+                  x: healedCritter.position.x,
+                  y: healedCritter.position.y + 1.65,
+                  z: healedCritter.position.z,
+                }
+              : {
+                  x: this.localPos.x,
+                  y: this.localPos.y + 1.65,
+                  z: this.localPos.z,
+                };
+          this.spawnWorldPopup(pos, `+${Math.round(ev.amount)} HP!`, "heal");
+          const who = healedCritter ? healedCritter.name : "Critter";
+          this.hud.showToast(
+            `${who} used Mend Brew (+${Math.round(ev.amount)} HP)!`,
+            "success",
+          );
+          break;
+        }
+        case "FINAL_FLOOD_STARTED": {
+          this.audio.playFloodRumble();
+          this.audio.playStinger("flood_alarm");
+          this.cameraRig.triggerShake(1.1, 1.0);
+          this.hud.setArmoryOpen(false);
+          this.input.exitPointerLock();
+          this.hud.showTurnBanner(
+            "FINAL DELUGE!",
+            "The ocean is swallowing the island!",
+            "retreat",
+          );
+          break;
+        }
+        case "CRITTER_ENGULFED": {
+          this.vfx.spawnSplash({
+            x: ev.position.x,
+            y: ev.waterLevel,
+            z: ev.position.z,
+          });
+          this.audio.playSplash();
+          this.spawnWorldPopup(
+            { x: ev.position.x, y: ev.waterLevel + 1.4, z: ev.position.z },
+            "ENGULFED!",
+            "damage",
+          );
+          const victim = this.matchState?.critters.find(
+            (c) => c.id === ev.playerId,
+          );
+          const who = victim ? victim.name : "Critter";
+          this.hud.showToast(
+            `${who} was engulfed by the rising ocean!`,
+            "error",
+          );
+          break;
+        }
         case "WATER_ROSE": {
           this.audio.playSplash();
           this.hud.showToast("Sudden Death! Ocean tide is rising!", "error");
@@ -1282,10 +1557,38 @@ class CritterSiegeApp {
           break;
         }
         case "ROUND_ENDED": {
+          this.audio.playStinger("round_end");
           this.hud.showToast(
             `Round ${ev.round} winner: ${ev.winnerLabel}`,
             "success",
           );
+          break;
+        }
+        case "PRISM_WALL_DEPLOYED": {
+          this.audio.playMutationChime();
+          this.hud.showToast(
+            "Prism Wall deployed — blocks incoming fire!",
+            "success",
+          );
+          break;
+        }
+        case "PRISM_WALL_SHATTERED": {
+          if (
+            hasBatchPrismIntercept ||
+            this.shotPlayback !== null
+          ) {
+            // Defer shatter VFX, sound, popup, and toast to exact impact arrival in advanceShotPlayback
+            break;
+          }
+          this.vfx.spawnPrismShatter(ev.position);
+          this.audio.playMutationChime();
+          this.cameraRig.triggerShake(0.35, 0.22);
+          this.spawnWorldPopup(
+            { x: ev.position.x, y: ev.position.y + 1.8, z: ev.position.z },
+            "SHIELD BLOCKED!",
+            "shield",
+          );
+          this.hud.showToast("Prism Wall intercepted & shattered!", "info");
           break;
         }
         default:
@@ -1299,9 +1602,9 @@ class CritterSiegeApp {
     text: string,
     tone: "damage" | "heal" | "shield" | "event",
   ): void {
-    const projected = new THREE.Vector3(worldPos.x, worldPos.y, worldPos.z).project(
-      this.cameraRig.camera,
-    );
+    const projected = this.popupProjVec
+      .set(worldPos.x, worldPos.y, worldPos.z)
+      .project(this.cameraRig.camera);
     if (
       !Number.isFinite(projected.x) ||
       !Number.isFinite(projected.y) ||
@@ -1334,39 +1637,6 @@ class CritterSiegeApp {
     }
     this.appliedCarveCount = state.carveLog.length;
     if (dirty.size > 0) {
-      this.terrainRenderer.rebuildChunks(this.activeWorld, Array.from(dirty));
-      this.environmentProps.pruneAfterCarve(this.activeWorld, state.waterLevel);
-    }
-  }
-
-  private syncSuddenDeathCrumble(
-    state: MatchState,
-    rebuildNow: boolean,
-  ): void {
-    const suddenDeathTurn = Math.max(1, state.critters.length) * 8 + 1;
-    if (
-      state.turnNumber < suddenDeathTurn ||
-      state.turnNumber <= this.appliedCrumbleTurn
-    ) {
-      return;
-    }
-    const dirty = new Set<string>();
-    for (
-      let t = Math.max(suddenDeathTurn, this.appliedCrumbleTurn + 1);
-      t <= state.turnNumber;
-      t++
-    ) {
-      const crumbleStep = t - suddenDeathTurn;
-      const crumbleRadius =
-        state.mapScale === "grand"
-          ? Math.max(22.0, 66.0 - crumbleStep * 3.0)
-          : Math.max(10.0, 27.5 - crumbleStep * 1.3);
-      for (const key of this.activeWorld.crumbleOuterRing(crumbleRadius)) {
-        dirty.add(key);
-      }
-    }
-    this.appliedCrumbleTurn = state.turnNumber;
-    if (rebuildNow && dirty.size > 0) {
       this.terrainRenderer.rebuildChunks(this.activeWorld, Array.from(dirty));
       this.environmentProps.pruneAfterCarve(this.activeWorld, state.waterLevel);
     }
@@ -1431,15 +1701,31 @@ class CritterSiegeApp {
     }
 
     const utilityGadget: GadgetId =
-      this.selectedGadget === "prism_wall" ? "prism_wall" : "vine_grapple";
+      this.selectedGadget === "prism_wall"
+        ? "prism_wall"
+        : this.selectedGadget === "mend_brew"
+          ? "mend_brew"
+          : "vine_grapple";
+
+    if (!localCritter.loadout.includes(utilityGadget)) {
+      return;
+    }
+    const charges = localCritter.gadgetCharges[utilityGadget];
+    if (charges !== null && charges <= 0) {
+      return;
+    }
 
     if (utilityGadget === "vine_grapple" && localCritter.grappleUsedThisTurn) {
       this.hud.showToast("Vine Grapple already used this turn!", "info");
       return;
     }
+    if (utilityGadget === "mend_brew" && localCritter.hp >= localCritter.maxHp) {
+      this.hud.showToast("Already at full HP!", "info");
+      return;
+    }
 
     const moveSnap = this.input.update(0);
-    // Sync current local position before grappling/placing cover
+    // Sync current local position before grappling/placing cover/healing
     this.gameClient.sendMove(
       { x: this.localPos.x, y: this.localPos.y, z: this.localPos.z },
       moveSnap.yaw,
@@ -1448,25 +1734,68 @@ class CritterSiegeApp {
     );
 
     const dir = computeAimDirection(moveSnap.yaw, moveSnap.pitch);
-    this.audio.playLaunch(utilityGadget);
+    if (utilityGadget !== "mend_brew") {
+      this.audio.playLaunch(utilityGadget);
+    }
     this.gameClient.sendUtility(utilityGadget, dir);
   }
 
   private handleRetreatBurrow(): void {
     const state = this.matchState;
     const localId = this.gameClient.getPlayerId();
-    if (!state || !localId || state.phase !== "RETREAT" || state.activePlayerId !== localId) {
+    if (
+      !state ||
+      !localId ||
+      state.activePlayerId !== localId ||
+      (state.phase !== "ACTIVE" && state.phase !== "RETREAT")
+    ) {
       return;
     }
     const localCritter = state.critters.find((c) => c.id === localId);
-    if (!localCritter || localCritter.equipped.offense !== "burrow_claws") {
-      this.hud.showToast("Equip Burrow Claws to dig a retreat foxhole!", "info");
+    if (!localCritter || !localCritter.alive) {
       return;
     }
     const moveSnap = this.input.update(0);
-    const dir = computeAimDirection(moveSnap.yaw, Math.min(-0.1, moveSnap.pitch));
-    this.audio.playLaunch("burrow_bore");
-    this.gameClient.sendRetreatBurrow(dir);
+    if (
+      localCritter.apex === "sky_bomber" &&
+      !localCritter.skyBomberDropUsedThisTurn
+    ) {
+      this.gameClient.sendMove(
+        { x: this.localPos.x, y: this.localPos.y, z: this.localPos.z },
+        moveSnap.yaw,
+        moveSnap.pitch,
+        { x: 0, y: 0, z: 0 },
+      );
+      this.audio.playLaunch("gale_mortar");
+      this.gameClient.sendUtility("sky_bomber_drop", { x: 0, y: -1, z: 0 });
+      this.hud.showToast("Sky Bomber air-drop away!", "success");
+      return;
+    }
+    if (state.phase === "RETREAT") {
+      if (localCritter.equipped.offense === "burrow_claws") {
+        if (localCritter.retreatBurrowUsedThisTurn) {
+          this.hud.showToast("Retreat foxhole already dug this turn!", "info");
+          return;
+        }
+        this.gameClient.sendMove(
+          { x: this.localPos.x, y: this.localPos.y, z: this.localPos.z },
+          moveSnap.yaw,
+          moveSnap.pitch,
+          { x: 0, y: 0, z: 0 },
+        );
+        const dir = computeAimDirection(
+          moveSnap.yaw,
+          Math.min(-0.1, moveSnap.pitch),
+        );
+        this.audio.playLaunch("burrow_bore");
+        this.gameClient.sendRetreatBurrow(dir);
+        return;
+      }
+      this.hud.showToast(
+        "Equip Burrow Claws or Sky Bomber Apex for [F] Special!",
+        "info",
+      );
+    }
   }
 
   private handleDroneNudge(dir: Vec3): void {
@@ -1493,14 +1822,7 @@ class CritterSiegeApp {
     const localCritter = this.matchState.critters.find((c) => c.id === localId);
     if (!localCritter) return;
 
-    const visible: GadgetId[] = [...STANDARD_GADGETS];
-    for (const bonus of BONUS_GADGETS) {
-      const c = localCritter.gadgetCharges[bonus];
-      if (c !== null && c > 0) {
-        visible.push(bonus);
-      }
-    }
-    const picked = visible[index];
+    const picked = localCritter.loadout[index];
     if (!picked) return;
     const charges = localCritter.gadgetCharges[picked];
     if (charges !== null && charges <= 0) {
@@ -1532,6 +1854,7 @@ class CritterSiegeApp {
   }
 
   private updateLobbyBackdrop(dtSec: number): void {
+    this.updateAdaptiveMusicMood();
     this.vfx.updateWindRibbons({ x: 2.4, y: 0, z: 1.1 }, dtSec);
     this.environmentProps.syncHazards(this.previewHazards, this.elapsedSec);
 
@@ -1586,6 +1909,8 @@ class CritterSiegeApp {
     const state = this.matchState;
     if (!state) return;
 
+    this.updateAdaptiveMusicMood();
+
     const localId = this.gameClient.getPlayerId();
     const localCritter =
       state.critters.find((c) => c.id === localId) ?? state.critters[0] ?? null;
@@ -1596,11 +1921,14 @@ class CritterSiegeApp {
 
     const isMyTurn = localId !== null && state.activePlayerId === localId;
     const localAlive = Boolean(localCritter?.alive);
+    const armoryOpen = this.hud.isArmoryOpen();
     const canMove =
+      !armoryOpen &&
       isMyTurn &&
       localAlive &&
       (state.phase === "ACTIVE" || state.phase === "RETREAT");
-    const canFire = isMyTurn && localAlive && state.phase === "ACTIVE";
+    const canFire =
+      !armoryOpen && isMyTurn && localAlive && state.phase === "ACTIVE";
     const camMode: CameraMode = this.cameraRig.getMode();
     const isDroneMode =
       camMode === "drone_recon" || camMode === "spectator_drone";
@@ -1695,9 +2023,10 @@ class CritterSiegeApp {
       );
     }
 
-    // Sync VFX wind ribbons, Evo Pods, and animated interactive hazards
+    // Sync VFX wind ribbons, Evo Pods, 3D Prism Walls, and animated interactive hazards
     this.vfx.updateWindRibbons(state.wind, dtSec);
     this.vfx.syncEvoPods(state.evoPods, this.elapsedSec);
+    this.vfx.syncPrismWalls(state.prismWalls ?? [], this.elapsedSec);
     this.environmentProps.syncHazards(state.hazards ?? [], this.elapsedSec);
 
     // Update Camera Rig first so first_person visibility is 100% in sync this frame
@@ -1722,6 +2051,7 @@ class CritterSiegeApp {
       shotPos,
       world: this.activeWorld,
       dtSec,
+      waterLevel: state.waterLevel,
     });
 
     const effectiveCamMode = this.cameraRig.getMode();
@@ -1836,6 +2166,8 @@ class CritterSiegeApp {
         stats.extendedTrajectory,
         true,
         ghostParams,
+        state.prismWalls,
+        localId ?? undefined,
       );
     } else {
       this.trajectoryPreview.update(
@@ -1875,6 +2207,8 @@ class CritterSiegeApp {
       charging: moveInput.charging,
       chargePower: moveInput.chargePower,
       muted: this.audio.isMuted(),
+      musicMuted: this.audio.isMusicMuted(),
+      armoryOpen,
       dronePingActive: this.dronePing !== null,
       essenceBreakdown: this.essenceBreakdown,
       showQuickStartHint,
@@ -1885,6 +2219,48 @@ class CritterSiegeApp {
         ? this.localMoveStamina
         : localCritter?.moveStamina,
     });
+  }
+
+  private updateAdaptiveMusicMood(): void {
+    const state = this.matchState;
+    if (!this.inMatch || !state) {
+      this.audio.setMusicMood("lobby");
+      return;
+    }
+    if (state.phase === "MATCH_OVER") {
+      this.audio.setMusicMood("victory");
+      return;
+    }
+    if (state.phase === "FINAL_FLOOD") {
+      this.audio.setMusicMood("flood");
+      return;
+    }
+    if (
+      this.hud.isArmoryOpen() ||
+      state.phase === "ROUND_DRAFT" ||
+      state.phase === "DRAFT_IF_READY"
+    ) {
+      this.audio.setMusicMood("shop");
+      return;
+    }
+    const localId = this.gameClient.getPlayerId();
+    const localCritter =
+      state.critters.find((c) => c.id === localId) ?? null;
+    const canMove =
+      localId !== null &&
+      state.activePlayerId === localId &&
+      Boolean(localCritter?.alive) &&
+      (state.phase === "ACTIVE" || state.phase === "RETREAT");
+    const lowHp =
+      localCritter !== null &&
+      localCritter.alive &&
+      localCritter.hp / Math.max(1, localCritter.maxHp) < 0.35;
+    const urgent =
+      state.roundTimeRemainingSec <= 60 ||
+      (canMove && state.phaseTimeRemainingSec <= 6) ||
+      lowHp ||
+      state.round >= Math.max(4, state.maxRounds - 1);
+    this.audio.setMusicMood(urgent ? "intense" : "battle");
   }
 
   private advanceShotPlayback(dtSec: number, state: MatchState): Vec3 | null {
@@ -1949,22 +2325,38 @@ class CritterSiegeApp {
       }
     };
 
+    const triggerImpact = (imp: ScheduledImpact): void => {
+      imp.triggered = true;
+      if (pb.isPrismIntercept && imp.carveOp === null && imp.baseDamage === 0) {
+        this.vfx.spawnPrismShatter(imp.position);
+        this.audio.playMutationChime();
+        this.cameraRig.triggerShake(0.35, 0.22);
+        this.spawnWorldPopup(
+          { x: imp.position.x, y: imp.position.y + 1.2, z: imp.position.z },
+          "SHIELD BLOCKED!",
+          "shield",
+        );
+        this.hud.showToast("Prism Wall intercepted & shattered!", "info");
+        return;
+      }
+      this.flushPendingCarves(state);
+      const blastRadius =
+        imp.carveOp?.radius ?? Math.max(1.2, imp.damageRadius * 0.65);
+      this.vfx.spawnExplosion(imp.position, blastRadius, Boolean(imp.isPull));
+      this.audio.playExplosion(blastRadius);
+      this.cameraRig.triggerShake(
+        Math.min(1.15, 0.25 + blastRadius * 0.22),
+        0.34,
+      );
+      if (blastRadius >= 1.8) {
+        pb.hitStopSec = Math.max(pb.hitStopSec ?? 0, 0.055);
+      }
+      emitHitPopups();
+    };
+
     for (const imp of pb.impacts) {
       if (!imp.triggered && pb.elapsedSec >= imp.time) {
-        imp.triggered = true;
-        this.flushPendingCarves(state);
-        const blastRadius =
-          imp.carveOp?.radius ?? Math.max(1.2, imp.damageRadius * 0.65);
-        this.vfx.spawnExplosion(imp.position, blastRadius, Boolean(imp.isPull));
-        this.audio.playExplosion(blastRadius);
-        this.cameraRig.triggerShake(
-          Math.min(1.15, 0.25 + blastRadius * 0.22),
-          0.34,
-        );
-        if (blastRadius >= 1.8) {
-          pb.hitStopSec = Math.max(pb.hitStopSec ?? 0, 0.055);
-        }
-        emitHitPopups();
+        triggerImpact(imp);
       }
     }
 
@@ -1973,15 +2365,7 @@ class CritterSiegeApp {
       this.flushPendingCarves(state);
       for (const imp of pb.impacts) {
         if (!imp.triggered) {
-          imp.triggered = true;
-          const blastRadius =
-            imp.carveOp?.radius ?? Math.max(1.2, imp.damageRadius * 0.65);
-          this.vfx.spawnExplosion(imp.position, blastRadius, Boolean(imp.isPull));
-          this.audio.playExplosion(blastRadius);
-          this.cameraRig.triggerShake(
-            Math.min(1.15, 0.25 + blastRadius * 0.22),
-            0.34,
-          );
+          triggerImpact(imp);
         }
       }
       emitHitPopups();
@@ -1993,7 +2377,7 @@ class CritterSiegeApp {
 
     if (
       pb.elapsedSec >= pb.durationSec + pb.holdAfterSec ||
-      state.phase !== "RESOLVING"
+      (!pb.allowOutsideResolving && state.phase !== "RESOLVING")
     ) {
       emitHitPopups();
       this.flushPendingCarves(state);
@@ -2024,17 +2408,20 @@ class CritterSiegeApp {
     const speedMult = isRetreat ? stats.retreatRollBoost : 1.0;
     const moveSpeed = stats.moveSpeed * speedMult;
 
-    const baseBudget =
-      state.mapScale === "grand"
-        ? isRetreat
-          ? 7.0
-          : 20.0
-        : isRetreat
-          ? 5.0
-          : 14.0;
-    const speciesMult = critter.species === "norway_rat" ? 1.18 : 1.0;
-    const mutMult = critter.equipped.legs === "spring_paws" ? 1.2 : 1.0;
-    const budgetDist = Math.max(1.0, baseBudget * speciesMult * mutMult * speedMult);
+    const budgetDist = Math.max(
+      1.0,
+      isRetreat
+        ? computeRetreatMoveDistance(
+            state.mapScale,
+            critter.species,
+            critter.equipped,
+          )
+        : computeMaxMoveDistance(
+            state.mapScale,
+            critter.species,
+            critter.equipped,
+          ),
+    );
     const staminaScale = isRetreat ? 40 : 100;
 
     if (this.localGrounded) {
@@ -2295,6 +2682,7 @@ class CritterSiegeApp {
     const kos = localCritter?.kills ?? 0;
     const pods = localCritter?.podsCollected ?? 0;
     const won =
+      state.matchEndReason !== "flood_draw" &&
       localCritter !== null &&
       ((state.mode === "2v2" &&
         state.winnerTeam !== null &&
@@ -2523,6 +2911,8 @@ class CritterSiegeApp {
     cancelAnimationFrame(this.rafId);
     window.removeEventListener("resize", this.onWindowResizeBound);
     window.removeEventListener("keydown", this.onWindowKeyDownBound);
+    window.removeEventListener("pointerdown", this.onUserGestureUnlockBound);
+    window.removeEventListener("keydown", this.onUserGestureUnlockBound);
     this.gameClient.disconnect();
     this.input.dispose();
     this.hud.dispose();

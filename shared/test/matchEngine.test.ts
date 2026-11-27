@@ -67,6 +67,8 @@ function makeDummyCritter(overrides: Partial<CritterState> & { id: string }): Cr
     pendingEvoDraft: false,
     equipped: {},
     apex: null,
+    coins: 45,
+    loadout: ["gale_mortar", "quake_club", "vine_grapple"],
     gadgetCharges: {
       gale_mortar: null,
       quake_club: null,
@@ -77,6 +79,7 @@ function makeDummyCritter(overrides: Partial<CritterState> & { id: string }): Cr
       gravity_mine: 0,
       prism_wall: 0,
       shock_magnet: 0,
+      mend_brew: 0,
     },
     roundShieldRemaining: 0,
     kills: 0,
@@ -475,6 +478,7 @@ describe("Authoritative MatchEngine turn state machine & review edge cases", () 
   it("Review Focus #2 (Self-KO): firing straight down to KO self skips RETREAT and awards 0 KO points", () => {
     const engine = new MatchEngine(
       makeBaseConfig({
+        roundDurationSec: 3600,
         players: [
           { id: "p1", name: "Milo", species: "mole", team: 0, isBot: false, color: "#e67e22" },
           { id: "p2", name: "Remy", species: "norway_rat", team: 1, isBot: false, color: "#3498db" },
@@ -547,6 +551,7 @@ describe("Authoritative MatchEngine turn state machine & review edge cases", () 
       theme: "emerald_spire",
       seed: 303,
       maxRounds: 3,
+      roundDurationSec: 3600,
       players: [
         { id: "A1", name: "A1", species: "mole", team: 0, isBot: false, color: "#e74c3c" },
         { id: "A2", name: "A2", species: "norway_rat", team: 0, isBot: false, color: "#c0392b" },
@@ -660,6 +665,7 @@ describe("Authoritative MatchEngine turn state machine & review edge cases", () 
   it("Review Focus #4 (Deferred Evo Pod Draft & Full 4 Hardpoints): uninterrupted ACTIVE timer, DRAFT_IF_READY after RETREAT, swap cards when full + Apex recalc", () => {
     const engine = new MatchEngine(
       makeBaseConfig({
+        roundDurationSec: 3600,
         players: [
           {
             id: "p1",
@@ -775,6 +781,7 @@ describe("Authoritative MatchEngine turn state machine & review edge cases", () 
     const fullEngine = new MatchEngine(
       makeBaseConfig({
         seed: 555,
+        roundDurationSec: 3600,
         players: [
           { id: "p1", name: "Milo", species: "mole", team: 0, isBot: false, color: "#e67e22" },
           { id: "p2", name: "Remy", species: "badger", team: 1, isBot: false, color: "#3498db" },
@@ -907,7 +914,7 @@ describe("Authoritative MatchEngine turn state machine & review edge cases", () 
 
   it("guarantees 8 turns per player (Water Rescue Parachute -35 HP in Cycles 1-8), raises water +0.65m/turn from Cycle 9+ Sudden Death, drowns lethally in Cycle 9+, enforces 1-per-turn drone wind nudge, and plans valid bot aim", () => {
     // 2p Duel: Cycles 1-8 = Turns 1..16 (water stays calm + water contact rescues for -35 HP!); Cycle 9 = Turn 17
-    const duelEngine = new MatchEngine(makeBaseConfig());
+    const duelEngine = new MatchEngine(makeBaseConfig({ roundDurationSec: 3600 }));
     const duelStartWater = duelEngine.getSnapshot().waterLevel;
     const duelP1Init = duelEngine.getSnapshot().critters.find((c) => c.id === "p1");
     expect(duelP1Init).toBeDefined();
@@ -939,6 +946,7 @@ describe("Authoritative MatchEngine turn state machine & review edge cases", () 
     // 3p Grand: Cycles 1-8 = Turns 1..24; Sudden Death begins at Cycle 9 (Turn 25)
     const engine = new MatchEngine(
       makeBaseConfig({
+        roundDurationSec: 3600,
         players: [
           { id: "p1", name: "Milo", species: "mole", team: 0, isBot: false, color: "#e67e22" },
           { id: "p2", name: "Remy", species: "norway_rat", team: 1, isBot: true, color: "#3498db" },
@@ -1097,9 +1105,10 @@ describe("Authoritative MatchEngine turn state machine & review edge cases", () 
     }
   });
 
-  it("drowns an outer-edge critter when Cycle 9+ grand cliff crumble leaves open ocean below and handles Cycle 9+ vine_grapple water plunge", () => {
+  it("preserves outer-edge cliffs in Rounds 1-4 (no automatic crumbleOuterRing) while Cycle 9+ vine_grapple water plunge still drowns lethally", () => {
     const engine = new MatchEngine(
       makeBaseConfig({
+        roundDurationSec: 3600,
         players: [
           { id: "p1", name: "Milo", species: "mole", team: 0, isBot: false, color: "#e67e22" },
           { id: "p2", name: "Remy", species: "norway_rat", team: 1, isBot: false, color: "#3498db" },
@@ -1115,16 +1124,16 @@ describe("Authoritative MatchEngine turn state machine & review edge cases", () 
     advanceAndWalkTo(engine, "p1", rimGoal, 20);
     expect(engine.getSnapshot().critters.find((c) => c.id === "p1")?.alive).toBe(true);
 
-    // Advance to Cycle 9 (Turn 25 in 3p Grand) so crumbleOuterRing(66.0) erodes the rim under p1 (surfY === null)
-    while (engine.getSnapshot().turnNumber < 25) {
+    // Advance to Cycle 9 (Turn 25 in 3p Grand): outer-ring crumble is disabled in R1-4 to preserve persistent island
+    for (let guard = 0; guard < 40 && engine.getSnapshot().turnNumber < 25; guard++) {
       engine.tick(36);
     }
 
     const snap25 = engine.getSnapshot();
-    const p1AfterCrumble = snap25.critters.find((c) => c.id === "p1");
-    expect(p1AfterCrumble?.alive).toBe(false);
-    expect(p1AfterCrumble?.hp).toBe(0);
-    expect(p1AfterCrumble?.position.y).toBeLessThanOrEqual(snap25.waterLevel);
+    expect(snap25.turnNumber).toBe(25);
+    expect(snap25.waterLevel).toBeGreaterThan(1.5);
+    const p1AtCycle9 = snap25.critters.find((c) => c.id === "p1");
+    expect(p1AtCycle9?.alive).toBe(true);
 
     // Verify vine_grapple targeting below waterLevel during Cycle 9+ Sudden Death drowns lethally
     const activeId = snap25.activePlayerId;
@@ -1734,6 +1743,7 @@ describe("Authoritative MatchEngine turn state machine & review edge cases", () 
       makeBaseConfig({
         seed: 7070,
         theme: "mountain_spine",
+        roundDurationSec: 3600,
       }),
     );
 
@@ -1880,6 +1890,1625 @@ describe("Authoritative MatchEngine turn state machine & review edge cases", () 
       expect(p1After.alive).toBe(true);
       expect(p1After.hp).toBeGreaterThan(0);
       expect(p1After.position.y).toBeGreaterThan(afterSnap.waterLevel + 1.0);
+    }
+  });
+});
+
+function completeAllPendingDrafts(
+  engine: MatchEngine,
+  avoidAegis = false,
+): void {
+  const snap = engine.getSnapshot();
+  for (const d of snap.pendingDrafts) {
+    const choice = avoidAegis
+      ? (d.options.find((opt) => opt !== "aegis_crest") ?? d.options[0])
+      : d.options[0];
+    if (choice) {
+      engine.applyMutationPick(d.playerId, choice);
+    }
+  }
+}
+
+function eliminateCritterByVerticalDrops(
+  engine: MatchEngine,
+  playerId: string,
+): void {
+  const tickSec = engine.getSnapshot().mapScale === "grand" ? 36 : 29;
+  for (let guard = 0; guard < 12; guard++) {
+    const snap = engine.getSnapshot();
+    if (snap.phase !== "ACTIVE") break;
+    if (snap.activePlayerId === playerId) break;
+    engine.tick(tickSec);
+  }
+  const target = engine.getSnapshot().critters.find((c) => c.id === playerId);
+  if (!target || !target.alive) return;
+  const base = { ...target.position };
+  for (let drop = 0; drop < 45; drop++) {
+    const cur = engine.getSnapshot().critters.find((c) => c.id === playerId);
+    if (!cur || !cur.alive || engine.getSnapshot().phase !== "ACTIVE") {
+      break;
+    }
+    engine.applyMove(playerId, { x: base.x, y: base.y + 15.0, z: base.z }, 0, 0);
+    engine.applyMove(playerId, base, 0, 0);
+  }
+}
+
+describe("Phase 1 Overhaul: 5-Round Persistent Map, Two-Stage Tide & Siege Coin Economy", () => {
+  it("defaults to 5 rounds x 300s, always plays all 5 rounds despite 3-0 lead, resolves R1-4 time-up draws with stipends, and breaks R5 ties via Score -> Kills -> DamageDealt", () => {
+    const engine = new MatchEngine({
+      roomCode: "FIVE",
+      mode: "ffa",
+      theme: "emerald_spire",
+      seed: 9101,
+      players: [
+        { id: "p1", name: "Milo", species: "mole", color: "#e67e22" },
+        { id: "p2", name: "Remy", species: "norway_rat", color: "#3498db" },
+      ],
+    });
+
+    const init = engine.getSnapshot();
+    expect(init.maxRounds).toBe(5);
+    expect(init.roundDurationSec).toBe(300);
+    expect(init.roundTimeRemainingSec).toBe(300);
+    expect(init.round).toBe(1);
+
+    // p1 wins Rounds 1, 2, and 3 (3-0 lead) -> match MUST NOT end early!
+    for (let r = 1; r <= 3; r++) {
+      expect(engine.getSnapshot().round).toBe(r);
+      eliminateCritterByVerticalDrops(engine, "p2");
+      const draftSnap = engine.getSnapshot();
+      expect(draftSnap.phase).toBe("ROUND_DRAFT");
+      expect(draftSnap.roundWinners).toHaveLength(r);
+      expect(draftSnap.roundWinners[r - 1]).toBe("p1");
+      completeAllPendingDrafts(engine);
+    }
+
+    const r4Start = engine.getSnapshot();
+    expect(r4Start.round).toBe(4);
+    expect(r4Start.phase).toBe("ACTIVE");
+    expect(r4Start.roundTimeRemainingSec).toBe(300);
+
+    // Round 4 hits 0:00 -> Round Draw + Siege Coin stipends (trailing p2 gets +50 comeback stipend, leader p1 gets +35)
+    const p1CoinsBeforeR4Draw =
+      r4Start.critters.find((c) => c.id === "p1")?.coins ?? 0;
+    const p2CoinsBeforeR4Draw =
+      r4Start.critters.find((c) => c.id === "p2")?.coins ?? 0;
+
+    const r4TimeUpEvs = engine.tick(300);
+    expect(
+      r4TimeUpEvs.some(
+        (e) =>
+          e.type === "ROUND_ENDED" && e.round === 4 && e.winnerLabel === "Draw",
+      ),
+    ).toBe(true);
+    const r4Draft = engine.getSnapshot();
+    expect(r4Draft.phase).toBe("ROUND_DRAFT");
+    expect(r4Draft.roundWinners[3]).toBeNull();
+    expect(r4Draft.critters.find((c) => c.id === "p1")?.coins).toBe(
+      p1CoinsBeforeR4Draw + 35,
+    );
+    expect(r4Draft.critters.find((c) => c.id === "p2")?.coins).toBe(
+      p2CoinsBeforeR4Draw + 50,
+    );
+
+    completeAllPendingDrafts(engine);
+    expect(engine.getSnapshot().round).toBe(5);
+    expect(engine.getSnapshot().phase).toBe("ACTIVE");
+
+    // Round 5 elimination before 0:00 -> MATCH_OVER (no Round 6)
+    eliminateCritterByVerticalDrops(engine, "p2");
+    const finalSnap = engine.getSnapshot();
+    expect(finalSnap.phase).toBe("MATCH_OVER");
+    expect(finalSnap.round).toBe(5);
+    expect(finalSnap.winnerId).toBe("p1");
+    expect(finalSnap.matchEndReason).toBe("score");
+    expect(finalSnap.roundWinners).toEqual(["p1", "p1", "p1", null, "p1"]);
+
+    // Tiebreaker verification: Tied Total Score (2 vs 2) and Tied Kills (0 vs 0) -> DamageDealt breaks tie on Round 5 elimination!
+    const tieEngine = new MatchEngine({
+      roomCode: "TIEB",
+      mode: "ffa",
+      theme: "emerald_spire",
+      seed: 9102,
+      roundDurationSec: 3600,
+      players: [
+        { id: "p1", name: "Milo", species: "mole", color: "#e67e22" },
+        { id: "p2", name: "Remy", species: "norway_rat", color: "#3498db" },
+      ],
+    });
+
+    // Round 1: p1 self-falls -> p2 wins Round 1 (score: p1=0, p2=2, kills 0-0, dmg 0-0)
+    eliminateCritterByVerticalDrops(tieEngine, "p1");
+    completeAllPendingDrafts(tieEngine, true);
+
+    // Rounds 2, 3, 4: time-up draws
+    for (let r = 2; r <= 4; r++) {
+      tieEngine.tick(3600);
+      completeAllPendingDrafts(tieEngine, true);
+    }
+    expect(tieEngine.getSnapshot().round).toBe(5);
+
+    // Round 5: p1 walks close to p2 and lands 1 Quake Club strike (dealing > 0 damage without KO),
+    // then p2 self-falls -> p1 wins Round 5 (+2 score -> tied 2-2, kills 0-0, p1.damageDealt > p2.damageDealt)!
+    const p2StartR5 = tieEngine
+      .getSnapshot()
+      .critters.find((c) => c.id === "p2");
+    expect(p2StartR5).toBeDefined();
+    if (p2StartR5) {
+      const inwardSign = p2StartR5.position.x < tieEngine.world.centerX ? 1 : -1;
+      const strikeSpot = {
+        x: p2StartR5.position.x + inwardSign * 1.4,
+        y: p2StartR5.position.y,
+        z: p2StartR5.position.z,
+      };
+      advanceAndWalkTo(tieEngine, "p1", strikeSpot, 20);
+      for (
+        let guard = 0;
+        guard < 6 && tieEngine.getSnapshot().activePlayerId !== "p1";
+        guard++
+      ) {
+        tieEngine.tick(29);
+      }
+      const p1Now = tieEngine
+        .getSnapshot()
+        .critters.find((c) => c.id === "p1");
+      const p2Now = tieEngine
+        .getSnapshot()
+        .critters.find((c) => c.id === "p2");
+      if (p1Now && p2Now) {
+        const dx = p2Now.position.x - p1Now.position.x;
+        const dz = p2Now.position.z - p1Now.position.z;
+        tieEngine.applyFire("p1", {
+          gadgetId: "quake_club",
+          direction: { x: dx || 1, y: 0.1, z: dz },
+          power: 1.0,
+        });
+        tieEngine.completeResolving();
+        if (tieEngine.getSnapshot().phase === "RETREAT") {
+          tieEngine.tick(6.1);
+        }
+      }
+    }
+
+    const midR5 = tieEngine.getSnapshot();
+    expect(midR5.critters.find((c) => c.id === "p1")?.damageDealt).toBeGreaterThan(
+      0,
+    );
+    expect(midR5.critters.find((c) => c.id === "p2")?.alive).toBe(true);
+
+    eliminateCritterByVerticalDrops(tieEngine, "p2");
+    const tieFinal = tieEngine.getSnapshot();
+    expect(tieFinal.phase).toBe("MATCH_OVER");
+    expect(tieFinal.scores.p1).toBe(2);
+    expect(tieFinal.scores.p2).toBe(2);
+    expect(tieFinal.critters.find((c) => c.id === "p1")?.kills).toBe(0);
+    expect(tieFinal.critters.find((c) => c.id === "p2")?.kills).toBe(0);
+    expect(tieFinal.winnerId).toBe("p1");
+    expect(tieFinal.matchEndReason).toBe("score");
+  });
+
+  it("persists carved craters and cumulative carveLog across rounds while respawning critters and fresh hazards on dry ground", () => {
+    const engine = new MatchEngine({
+      roomCode: "PERS",
+      mode: "ffa",
+      theme: "emerald_spire",
+      seed: 8202,
+      players: [
+        { id: "p1", name: "Milo", species: "mole", color: "#e67e22" },
+        { id: "p2", name: "Remy", species: "norway_rat", color: "#3498db" },
+      ],
+    });
+
+    const p1R1 = engine.getSnapshot().critters.find((c) => c.id === "p1");
+    expect(p1R1).toBeDefined();
+    if (!p1R1) return;
+
+    // Sample a solid subterranean point directly beneath p1's spawn ledge
+    const rockPoint = {
+      x: p1R1.position.x,
+      y: p1R1.position.y - 1.0,
+      z: p1R1.position.z,
+    };
+    expect(engine.world.isSolid(rockPoint.x, rockPoint.y, rockPoint.z)).toBe(
+      true,
+    );
+
+    // Carve a crater in Round 1
+    const fireEvsR1 = engine.applyFire("p1", {
+      gadgetId: "gale_mortar",
+      direction: { x: 0, y: -1, z: 0 },
+      power: 0.25,
+    });
+    expect(fireEvsR1.some((e) => e.type === "TERRAIN_CARVED")).toBe(true);
+    engine.completeResolving();
+
+    const afterCarveR1 = engine.getSnapshot();
+    const carveCountR1 = afterCarveR1.carveLog.length;
+    expect(carveCountR1).toBeGreaterThanOrEqual(1);
+    expect(engine.world.isSolid(rockPoint.x, rockPoint.y, rockPoint.z)).toBe(
+      false,
+    );
+
+    // Finish Round 1 -> Round 2
+    engine.tick(300);
+    expect(engine.getSnapshot().phase).toBe("ROUND_DRAFT");
+    completeAllPendingDrafts(engine);
+
+    const r2Snap = engine.getSnapshot();
+    expect(r2Snap.round).toBe(2);
+    expect(r2Snap.phase).toBe("ACTIVE");
+    // Crater from Round 1 MUST remain carved air in Round 2 and carveLog stays cumulative!
+    expect(engine.world.isSolid(rockPoint.x, rockPoint.y, rockPoint.z)).toBe(
+      false,
+    );
+    expect(r2Snap.carveLog.length).toBe(carveCountR1);
+    expect(r2Snap.carveLog).toEqual(afterCarveR1.carveLog);
+
+    // Critters respawn alive at full HP safely above water; fresh hazards sit above water
+    for (const c of r2Snap.critters) {
+      expect(c.alive).toBe(true);
+      expect(c.hp).toBe(c.maxHp);
+      expect(c.position.y).toBeGreaterThan(r2Snap.waterLevel + 0.5);
+    }
+    const r2Hazards = r2Snap.hazards ?? [];
+    expect(r2Hazards.length).toBeGreaterThan(0);
+    expect(
+      r2Hazards.every((h) => h.active && h.position.y > r2Snap.waterLevel + 0.5),
+    ).toBe(true);
+
+    // Carving again in Round 2 appends to cumulative carveLog
+    const activeR2 = r2Snap.activePlayerId;
+    expect(activeR2).not.toBeNull();
+    if (activeR2) {
+      engine.applyFire(activeR2, {
+        gadgetId: "gale_mortar",
+        direction: { x: 0, y: -1, z: 0 },
+        power: 0.25,
+      });
+      expect(engine.getSnapshot().carveLog.length).toBeGreaterThan(
+        carveCountR1,
+      );
+    }
+  });
+
+  it("executes Round 5 Two-Stage Tide (60s warning creep + lethal water) and FINAL_FLOOD ocean deluge on 0:00 and simultaneous KO", () => {
+    // Part A: Round 5 Stage 1 warning creep -> 0:00 Stage 2 FINAL_FLOOD
+    const engine = new MatchEngine({
+      roomCode: "TIDE",
+      mode: "ffa",
+      theme: "emerald_spire",
+      seed: 9501,
+      floodDurationSec: 6.0,
+      players: [
+        { id: "p1", name: "Milo", species: "mole", color: "#e67e22" },
+        { id: "p2", name: "Remy", species: "norway_rat", color: "#3498db" },
+      ],
+    });
+
+    // Advance Rounds 1..4 via time-up draws to reach Round 5
+    for (let r = 1; r <= 4; r++) {
+      engine.tick(300);
+      completeAllPendingDrafts(engine, true);
+    }
+    expect(engine.getSnapshot().round).toBe(5);
+    expect(engine.getSnapshot().waterLevel).toBe(1.5);
+
+    // Tick down to 60s remaining (Stage 1 warning begins) -> water still at 1.5m
+    engine.tick(240);
+    expect(engine.getSnapshot().roundTimeRemainingSec).toBe(60);
+    expect(engine.getSnapshot().waterLevel).toBe(1.5);
+
+    // Tick 30s into Stage 1 warning -> water creeps +1.25m to 2.75m and emits WATER_ROSE
+    const stage1Evs = engine.tick(30);
+    expect(engine.getSnapshot().roundTimeRemainingSec).toBe(30);
+    expect(engine.getSnapshot().waterLevel).toBeCloseTo(2.75, 2);
+    expect(stage1Evs.some((e) => e.type === "WATER_ROSE")).toBe(true);
+
+    // Tick final 30s to 0:00 -> triggers FINAL_FLOOD (Stage 2)
+    const floodStartEvs = engine.tick(30);
+    expect(floodStartEvs.some((e) => e.type === "FINAL_FLOOD_STARTED")).toBe(
+      true,
+    );
+    const floodStartSnap = engine.getSnapshot();
+    expect(floodStartSnap.phase).toBe("FINAL_FLOOD");
+    expect(floodStartSnap.activePlayerId).toBeNull();
+    expect(floodStartSnap.floodTargetWaterLevel).not.toBeNull();
+    expect(floodStartSnap.floodTargetWaterLevel ?? 0).toBeGreaterThan(
+      engine.world.getHighestSolidY(),
+    );
+
+    // Tick through FINAL_FLOOD in 0.5s increments -> engulfs every critter and ends in flood_draw
+    const engulfedIds = new Set<string>();
+    let sawMatchEnded = false;
+    for (let step = 0; step < 20; step++) {
+      const evs = engine.tick(0.5);
+      for (const ev of evs) {
+        if (ev.type === "CRITTER_ENGULFED") {
+          engulfedIds.add(ev.playerId);
+        }
+        if (ev.type === "MATCH_ENDED") {
+          sawMatchEnded = true;
+        }
+      }
+      if (engine.getSnapshot().phase === "MATCH_OVER") {
+        break;
+      }
+    }
+
+    const endSnap = engine.getSnapshot();
+    expect(engulfedIds).toEqual(new Set(["p1", "p2"]));
+    expect(sawMatchEnded).toBe(true);
+    expect(endSnap.phase).toBe("MATCH_OVER");
+    expect(endSnap.waterLevel).toBeGreaterThan(engine.world.getHighestSolidY());
+    expect(endSnap.critters.every((c) => !c.alive && c.hp === 0)).toBe(true);
+    expect(endSnap.winnerId).toBeNull();
+    expect(endSnap.winnerTeam).toBeNull();
+    expect(endSnap.matchEndReason).toBe("flood_draw");
+
+    // Part B: Stage 1 water plunge is lethal (no parachute) & simultaneous KO in final round triggers FINAL_FLOOD
+    const simEngine = new MatchEngine({
+      roomCode: "SIMK",
+      mode: "ffa",
+      theme: "emerald_spire",
+      seed: 9502,
+      maxRounds: 1,
+      roundDurationSec: 300,
+      floodDurationSec: 4.0,
+      players: [
+        { id: "p1", name: "Milo", species: "mole", color: "#e67e22" },
+        { id: "p2", name: "Remy", species: "norway_rat", color: "#3498db" },
+      ],
+    });
+
+    // Verify Stage 1 warning water plunge is lethal (no WATER_RESCUED)
+    const lethalCheck = new MatchEngine({
+      roomCode: "LETH",
+      mode: "ffa",
+      theme: "emerald_spire",
+      seed: 9502,
+      maxRounds: 1,
+      roundDurationSec: 300,
+      players: [
+        { id: "p1", name: "Milo", species: "mole", color: "#e67e22" },
+        { id: "p2", name: "Remy", species: "norway_rat", color: "#3498db" },
+      ],
+    });
+    lethalCheck.tick(260); // 40s left -> inside final 60s Stage 1 warning
+    const activeLethal = lethalCheck.getSnapshot().activePlayerId;
+    expect(activeLethal).not.toBeNull();
+    if (activeLethal) {
+      const c = lethalCheck
+        .getSnapshot()
+        .critters.find((x) => x.id === activeLethal);
+      if (c) {
+        const plungeEvs = lethalCheck.applyMove(
+          activeLethal,
+          {
+            x: c.position.x,
+            y: lethalCheck.getSnapshot().waterLevel - 0.3,
+            z: c.position.z,
+          },
+          0,
+          0,
+        );
+        expect(plungeEvs.some((e) => e.type === "WATER_RESCUED")).toBe(false);
+        expect(
+          lethalCheck
+            .getSnapshot()
+            .critters.find((x) => x.id === activeLethal)?.alive,
+        ).toBe(false);
+      }
+    }
+
+    // Simultaneous KO on final round: chip both critters down to <= 20 HP, stand adjacent, fire straight down
+    const chipToLowHp = (eng: MatchEngine, id: string): void => {
+      for (
+        let g = 0;
+        g < 6 && eng.getSnapshot().activePlayerId !== id;
+        g++
+      ) {
+        eng.tick(29);
+      }
+      const c = eng.getSnapshot().critters.find((x) => x.id === id);
+      if (!c) return;
+      const base = { ...c.position };
+      for (let d = 0; d < 12; d++) {
+        const cur = eng.getSnapshot().critters.find((x) => x.id === id);
+        if (!cur || !cur.alive || cur.hp <= 20) break;
+        eng.applyMove(id, { x: base.x, y: base.y + 15.0, z: base.z }, 0, 0);
+        eng.applyMove(id, base, 0, 0);
+      }
+    };
+
+    // Move p1 next to p2 first, then chip both to <= 20 HP and blast both at once
+    const p2Ref = simEngine.getSnapshot().critters.find((c) => c.id === "p2");
+    expect(p2Ref).toBeDefined();
+    if (p2Ref) {
+      const inwardSign = p2Ref.position.x < simEngine.world.centerX ? 1 : -1;
+      const adj = {
+        x: p2Ref.position.x + inwardSign * 1.2,
+        y: p2Ref.position.y,
+        z: p2Ref.position.z,
+      };
+      advanceAndWalkTo(simEngine, "p1", adj, 12);
+    }
+    chipToLowHp(simEngine, "p1");
+    chipToLowHp(simEngine, "p2");
+    for (
+      let g = 0;
+      g < 6 && simEngine.getSnapshot().activePlayerId !== "p1";
+      g++
+    ) {
+      simEngine.tick(29);
+    }
+    simEngine.applyFire("p1", {
+      gadgetId: "gale_mortar",
+      direction: { x: 0, y: -1, z: 0 },
+      power: 0.25,
+    });
+    const simResolveEvs = simEngine.completeResolving();
+    expect(simResolveEvs.some((e) => e.type === "FINAL_FLOOD_STARTED")).toBe(
+      true,
+    );
+    expect(simEngine.getSnapshot().phase).toBe("FINAL_FLOOD");
+    simEngine.tick(4.5);
+    const simEnd = simEngine.getSnapshot();
+    expect(simEnd.phase).toBe("MATCH_OVER");
+    expect(simEnd.winnerId).toBeNull();
+    expect(simEnd.winnerTeam).toBeNull();
+    expect(simEnd.matchEndReason).toBe("flood_draw");
+  });
+
+  it("enforces 10-ability Siege Coin economy, mend_brew +45 HP non-turn-ending heal, anytime armory buys/refills/50% trade-in swaps, and persistent free per-round refills", () => {
+    // Part A: Starting loadout budget enforcement, mend_brew, and rival-turn open-slot purchase
+    const engine = new MatchEngine({
+      roomCode: "SHOP",
+      mode: "ffa",
+      theme: "emerald_spire",
+      seed: 9601,
+      players: [
+        {
+          id: "p1",
+          name: "Alchemist",
+          species: "mole",
+          // 25 + 30 + 40 = 95 <= 100; seeker_firefly (70) exceeds remaining 5 -> rejected
+          startingLoadout: [
+            "quake_club",
+            "vine_grapple",
+            "mend_brew",
+            "seeker_firefly",
+          ],
+        },
+        {
+          id: "p2",
+          name: "Merchant",
+          species: "norway_rat",
+        },
+      ],
+    });
+
+    const init = engine.getSnapshot();
+    const p1Init = init.critters.find((c) => c.id === "p1");
+    const p2Init = init.critters.find((c) => c.id === "p2");
+    expect(p1Init?.loadout).toEqual([
+      "gale_mortar",
+      "quake_club",
+      "vine_grapple",
+      "mend_brew",
+    ]);
+    expect(p1Init?.coins).toBe(5);
+    expect(p1Init?.gadgetCharges.mend_brew).toBe(2);
+    expect(p1Init?.gadgetCharges.seeker_firefly).toBe(0);
+    expect(p2Init?.loadout).toEqual([
+      "gale_mortar",
+      "quake_club",
+      "vine_grapple",
+    ]);
+    expect(p2Init?.coins).toBe(45);
+
+    // mend_brew at full HP is rejected without spending charge
+    expect(
+      engine.applyUtility("p1", {
+        gadgetId: "mend_brew",
+        direction: { x: 1, y: 0, z: 0 },
+      }),
+    ).toHaveLength(0);
+    expect(
+      engine.getSnapshot().critters.find((c) => c.id === "p1")?.gadgetCharges
+        .mend_brew,
+    ).toBe(2);
+
+    // Hurt p1 by 25 HP -> mend_brew heals +25 (clamped to maxHp), stays ACTIVE!
+    if (!p1Init) return;
+    const base = { ...p1Init.position };
+    engine.applyMove("p1", { x: base.x, y: base.y + 15.0, z: base.z }, 0, 0);
+    engine.applyMove("p1", base, 0, 0);
+    expect(engine.getSnapshot().critters.find((c) => c.id === "p1")?.hp).toBe(
+      p1Init.maxHp - 25,
+    );
+
+    const heal1Evs = engine.applyUtility("p1", {
+      gadgetId: "mend_brew",
+      direction: { x: 1, y: 0, z: 0 },
+    });
+    expect(heal1Evs).toEqual([
+      {
+        type: "ABILITY_HEALED",
+        playerId: "p1",
+        amount: 25,
+        newHp: p1Init.maxHp,
+      },
+    ]);
+    expect(engine.getSnapshot().phase).toBe("ACTIVE");
+    expect(engine.getSnapshot().activePlayerId).toBe("p1");
+    expect(
+      engine.getSnapshot().critters.find((c) => c.id === "p1")?.gadgetCharges
+        .mend_brew,
+    ).toBe(1);
+
+    // Hurt p1 by 50 HP -> mend_brew heals exact +45 HP, stays ACTIVE, charges -> 0
+    for (let d = 0; d < 2; d++) {
+      engine.applyMove("p1", { x: base.x, y: base.y + 15.0, z: base.z }, 0, 0);
+      engine.applyMove("p1", base, 0, 0);
+    }
+    const heal2Evs = engine.applyUtility("p1", {
+      gadgetId: "mend_brew",
+      direction: { x: 1, y: 0, z: 0 },
+    });
+    expect(heal2Evs).toEqual([
+      {
+        type: "ABILITY_HEALED",
+        playerId: "p1",
+        amount: 45,
+        newHp: p1Init.maxHp - 5,
+      },
+    ]);
+    expect(engine.getSnapshot().phase).toBe("ACTIVE");
+    expect(
+      engine.getSnapshot().critters.find((c) => c.id === "p1")?.gadgetCharges
+        .mend_brew,
+    ).toBe(0);
+    // 0 charges left -> rejected
+    expect(
+      engine.applyUtility("p1", {
+        gadgetId: "mend_brew",
+        direction: { x: 1, y: 0, z: 0 },
+      }),
+    ).toHaveLength(0);
+
+    // Anytime Armory: WHILE IT IS STILL p1's TURN, p2 buys into an open slot and fails overspend
+    expect(engine.getSnapshot().activePlayerId).toBe("p1");
+    expect(engine.applyBuyAbility("p2", "seeker_firefly")).toHaveLength(0); // 70 > 45
+    const buyOpenEvs = engine.applyBuyAbility("p2", "mend_brew"); // 40 <= 45
+    expect(buyOpenEvs).toEqual([
+      {
+        type: "ABILITY_PURCHASED",
+        playerId: "p2",
+        gadgetId: "mend_brew",
+        isRefill: false,
+        replacedGadgetId: null,
+        cost: 40,
+        refund: 0,
+        newBalance: 5,
+      },
+    ]);
+    const p2AfterOpen = engine
+      .getSnapshot()
+      .critters.find((c) => c.id === "p2");
+    expect(p2AfterOpen?.loadout).toContain("mend_brew");
+    expect(p2AfterOpen?.gadgetCharges.mend_brew).toBe(2);
+
+    // Coin awards on Evo Pod (+25), enemy damage, and enemy KO (+40)
+    const coinEngine = new MatchEngine({
+      roomCode: "COIN",
+      mode: "ffa",
+      theme: "emerald_spire",
+      seed: 9602,
+      roundDurationSec: 3600,
+      players: [
+        { id: "p1", name: "Hunter", species: "mole" },
+        { id: "p2", name: "Prey", species: "norway_rat" },
+      ],
+    });
+    // Spawn Pod on Turn 2 and collect with p1 (+25 Siege Coins)
+    coinEngine.tick(29);
+    const pod = coinEngine.getSnapshot().evoPods[0];
+    expect(pod).toBeDefined();
+    if (pod) {
+      const coinsBeforePod =
+        coinEngine.getSnapshot().critters.find((c) => c.id === "p1")?.coins ??
+        0;
+      const podEvs = advanceAndWalkTo(coinEngine, "p1", { ...pod.position });
+      expect(
+        podEvs.some(
+          (e) =>
+            e.type === "COINS_EARNED" &&
+            e.playerId === "p1" &&
+            e.amount === 25 &&
+            e.reason === "pod_collected",
+        ),
+      ).toBe(true);
+      expect(
+        coinEngine.getSnapshot().critters.find((c) => c.id === "p1")?.coins,
+      ).toBeGreaterThanOrEqual(coinsBeforePod + 25);
+    }
+
+    // Chip p2 low so p1's Quake Club deals damage AND scores enemy KO -> enemy_damage + enemy_ko (+40) coins!
+    for (
+      let g = 0;
+      g < 6 && coinEngine.getSnapshot().activePlayerId !== "p2";
+      g++
+    ) {
+      coinEngine.tick(29);
+    }
+    const p2Target = coinEngine
+      .getSnapshot()
+      .critters.find((c) => c.id === "p2");
+    if (p2Target) {
+      const p2Base = { ...p2Target.position };
+      for (let d = 0; d < 12; d++) {
+        const cur = coinEngine
+          .getSnapshot()
+          .critters.find((c) => c.id === "p2");
+        if (!cur || !cur.alive || cur.hp <= 15) break;
+        coinEngine.applyMove(
+          "p2",
+          { x: p2Base.x, y: p2Base.y + 15.0, z: p2Base.z },
+          0,
+          0,
+        );
+        coinEngine.applyMove("p2", p2Base, 0, 0);
+      }
+      const inwardSign =
+        p2Target.position.x < coinEngine.world.centerX ? 1 : -1;
+      advanceAndWalkTo(
+        coinEngine,
+        "p1",
+        {
+          x: p2Target.position.x + inwardSign * 1.3,
+          y: p2Target.position.y,
+          z: p2Target.position.z,
+        },
+        20,
+      );
+      for (
+        let g = 0;
+        g < 6 && coinEngine.getSnapshot().activePlayerId !== "p1";
+        g++
+      ) {
+        coinEngine.tick(29);
+      }
+      const p1Att = coinEngine
+        .getSnapshot()
+        .critters.find((c) => c.id === "p1");
+      const p2Def = coinEngine
+        .getSnapshot()
+        .critters.find((c) => c.id === "p2");
+      if (p1Att && p2Def) {
+        const koFireEvs = coinEngine.applyFire("p1", {
+          gadgetId: "quake_club",
+          direction: {
+            x: p2Def.position.x - p1Att.position.x || 1,
+            y: 0.05,
+            z: p2Def.position.z - p1Att.position.z,
+          },
+          power: 1.0,
+        });
+        expect(
+          koFireEvs.some(
+            (e) =>
+              e.type === "COINS_EARNED" &&
+              e.playerId === "p1" &&
+              e.reason === "enemy_damage",
+          ),
+        ).toBe(true);
+        expect(
+          koFireEvs.some(
+            (e) =>
+              e.type === "COINS_EARNED" &&
+              e.playerId === "p1" &&
+              e.amount === 40 &&
+              e.reason === "enemy_ko",
+          ),
+        ).toBe(true);
+      }
+    }
+
+    // Part B: Full 6-slot mid-round refill, 50% Trade-In Swap, gale_mortar protection & persistent free per-round refills
+    const shopEngine = new MatchEngine({
+      roomCode: "SWAP",
+      mode: "ffa",
+      theme: "emerald_spire",
+      seed: 9603,
+      startingCoins: 300,
+      players: [
+        { id: "p1", name: "Host", species: "mole" },
+        { id: "p2", name: "Shopper", species: "badger" },
+      ],
+    });
+    // p2 starts with default kit (55 spent -> 245 coins left), activePlayerId is p1
+    expect(shopEngine.getSnapshot().activePlayerId).toBe("p1");
+    expect(
+      shopEngine.getSnapshot().critters.find((c) => c.id === "p2")?.coins,
+    ).toBe(245);
+
+    // Fill slots 4, 5, 6 during p1's turn (40 + 35 + 50 = 125 -> 120 coins left)
+    expect(shopEngine.applyBuyAbility("p2", "mend_brew")).toHaveLength(1);
+    expect(shopEngine.applyBuyAbility("p2", "prism_wall")).toHaveLength(1);
+    expect(shopEngine.applyBuyAbility("p2", "spore_burst")).toHaveLength(1);
+    const p2Full = shopEngine
+      .getSnapshot()
+      .critters.find((c) => c.id === "p2");
+    expect(p2Full?.loadout).toEqual([
+      "gale_mortar",
+      "quake_club",
+      "vine_grapple",
+      "mend_brew",
+      "prism_wall",
+      "spore_burst",
+    ]);
+    expect(p2Full?.coins).toBe(120);
+
+    // Mid-round charge refill on owned mend_brew (refillCost 25 -> 95 coins, charges 2 -> 4)
+    const refillEvs = shopEngine.applyBuyAbility("p2", "mend_brew");
+    expect(refillEvs).toEqual([
+      {
+        type: "ABILITY_PURCHASED",
+        playerId: "p2",
+        gadgetId: "mend_brew",
+        isRefill: true,
+        replacedGadgetId: null,
+        cost: 25,
+        refund: 0,
+        newBalance: 95,
+      },
+    ]);
+    expect(
+      shopEngine.getSnapshot().critters.find((c) => c.id === "p2")
+        ?.gadgetCharges.mend_brew,
+    ).toBe(4);
+
+    // Reject 7th ability without replaceGadgetId AND reject replacing gale_mortar
+    expect(shopEngine.applyBuyAbility("p2", "seeker_firefly")).toHaveLength(0);
+    expect(
+      shopEngine.applyBuyAbility("p2", "seeker_firefly", "gale_mortar"),
+    ).toHaveLength(0);
+
+    // 50% Trade-In Swap: spore_burst (50 -> 25 refund) for seeker_firefly (70 -> net 45, balance 95 -> 50)
+    const swapEvs = shopEngine.applyBuyAbility(
+      "p2",
+      "seeker_firefly",
+      "spore_burst",
+    );
+    expect(swapEvs).toEqual([
+      {
+        type: "ABILITY_PURCHASED",
+        playerId: "p2",
+        gadgetId: "seeker_firefly",
+        isRefill: false,
+        replacedGadgetId: "spore_burst",
+        cost: 45,
+        refund: 25,
+        newBalance: 50,
+      },
+    ]);
+    const p2Swapped = shopEngine
+      .getSnapshot()
+      .critters.find((c) => c.id === "p2");
+    expect(p2Swapped?.loadout).toEqual([
+      "gale_mortar",
+      "quake_club",
+      "vine_grapple",
+      "mend_brew",
+      "prism_wall",
+      "seeker_firefly",
+    ]);
+    expect(p2Swapped?.gadgetCharges.spore_burst).toBe(0);
+    expect(p2Swapped?.gadgetCharges.seeker_firefly).toBe(1);
+
+    // Spend p2's vine_grapple charge on p2's turn, then advance Round 1 -> Round 2
+    shopEngine.tick(29);
+    expect(shopEngine.getSnapshot().activePlayerId).toBe("p2");
+    const p2Turn = shopEngine
+      .getSnapshot()
+      .critters.find((c) => c.id === "p2");
+    if (p2Turn) {
+      shopEngine.applyUtility("p2", {
+        gadgetId: "vine_grapple",
+        direction: { x: 1, y: 0.2, z: 0 },
+        target: {
+          x: p2Turn.position.x + 2.0,
+          y: p2Turn.position.y + 0.5,
+          z: p2Turn.position.z,
+        },
+      });
+      expect(
+        shopEngine.getSnapshot().critters.find((c) => c.id === "p2")
+          ?.gadgetCharges.vine_grapple,
+      ).toBe(5);
+    }
+
+    // Time-up Round 1 -> Round 2: Persistent loadout + unspent coins (+35 stipend) + FREE charge refills!
+    shopEngine.tick(300);
+    completeAllPendingDrafts(shopEngine);
+    const r2P2 = shopEngine
+      .getSnapshot()
+      .critters.find((c) => c.id === "p2");
+    expect(shopEngine.getSnapshot().round).toBe(2);
+    expect(r2P2?.loadout).toEqual([
+      "gale_mortar",
+      "quake_club",
+      "vine_grapple",
+      "mend_brew",
+      "prism_wall",
+      "seeker_firefly",
+    ]);
+    expect(r2P2?.coins).toBe(85); // 50 unspent + 35 stipend
+    expect(r2P2?.gadgetCharges.vine_grapple).toBe(6);
+    expect(r2P2?.gadgetCharges.mend_brew).toBe(2);
+    expect(r2P2?.gadgetCharges.seeker_firefly).toBe(1);
+    expect(r2P2?.gadgetCharges.spore_burst).toBe(0);
+  });
+
+  it("deploys Prism Wall into MatchState, intercepts enemy mortar with zero damage/carve, shatters cleanly, and lets the follow-up shot through", () => {
+    const engine = new MatchEngine(
+      makeBaseConfig({
+        seed: 1234,
+        roundDurationSec: 3600,
+        players: [
+          {
+            id: "p1",
+            name: "ShieldMole",
+            species: "mole",
+            startingLoadout: ["gale_mortar", "prism_wall"],
+          },
+          {
+            id: "p2",
+            name: "MortarRat",
+            species: "norway_rat",
+            startingLoadout: ["gale_mortar"],
+          },
+        ],
+      }),
+    );
+
+    const initSnap = engine.getSnapshot();
+    const p1Init = initSnap.critters.find((c) => c.id === "p1");
+    expect(p1Init).toBeDefined();
+    if (!p1Init) return;
+
+    // Pick a flat, unobstructed shooter spot ~6.0m from p1 on the same basin
+    let shooterSpot: { x: number; y: number; z: number } | null = null;
+    for (let i = 0; i < 16; i++) {
+      const ang = (i * Math.PI * 2) / 16;
+      const sx = p1Init.position.x + Math.cos(ang) * 6.0;
+      const sz = p1Init.position.z + Math.sin(ang) * 6.0;
+      const sy = engine.world.getSurfaceY(sx, sz);
+      if (sy === null || Math.abs(sy - p1Init.position.y) > 1.0) continue;
+      const wx = p1Init.position.x + Math.cos(ang) * 2.4;
+      const wz = p1Init.position.z + Math.sin(ang) * 2.4;
+      const wy = engine.world.getSurfaceY(wx, wz);
+      if (wy === null || Math.abs(wy - p1Init.position.y) > 1.0) continue;
+      if (
+        engine.world.hasDirectLineOfSight(
+          p1Init.position,
+          { x: sx, y: sy, z: sz },
+          0.7,
+        )
+      ) {
+        shooterSpot = { x: sx, y: sy, z: sz };
+        break;
+      }
+    }
+    expect(shooterSpot).not.toBeNull();
+    if (!shooterSpot) return;
+
+    // Walk p2 to shooterSpot, then cycle back to p1's ACTIVE turn
+    advanceAndWalkTo(engine, "p2", shooterSpot, 40);
+    for (
+      let g = 0;
+      g < 8 && engine.getSnapshot().activePlayerId !== "p1";
+      g++
+    ) {
+      engine.tick(29);
+    }
+    expect(engine.getSnapshot().activePlayerId).toBe("p1");
+
+    const p1Now = engine.getSnapshot().critters.find((c) => c.id === "p1");
+    const p2Now = engine.getSnapshot().critters.find((c) => c.id === "p2");
+    expect(p1Now?.alive).toBe(true);
+    expect(p2Now?.alive).toBe(true);
+    if (!p1Now || !p2Now) return;
+
+    // p1 deploys Prism Wall facing p2 (non-turn-ending utility)
+    const deployEvents = engine.applyUtility("p1", {
+      gadgetId: "prism_wall",
+      direction: {
+        x: p2Now.position.x - p1Now.position.x,
+        y: 0,
+        z: p2Now.position.z - p1Now.position.z,
+      },
+    });
+    const deployedEv = deployEvents.find(
+      (e) => e.type === "PRISM_WALL_DEPLOYED",
+    );
+    expect(deployedEv).toBeDefined();
+    expect(engine.getSnapshot().phase).toBe("ACTIVE");
+    const deployedWalls = engine.getSnapshot().prismWalls ?? [];
+    expect(deployedWalls).toHaveLength(1);
+    const activeWall = deployedWalls[0];
+    expect(activeWall).toBeDefined();
+    if (!activeWall) return;
+    expect(activeWall.ownerId).toBe("p1");
+    expect(activeWall.active).toBe(true);
+
+    // End p1's turn -> p2 becomes ACTIVE while wall remains active
+    engine.tick(29);
+    expect(engine.getSnapshot().activePlayerId).toBe("p2");
+    expect(engine.getSnapshot().prismWalls).toHaveLength(1);
+
+    const p1HpBefore =
+      engine.getSnapshot().critters.find((c) => c.id === "p1")?.hp ?? 0;
+    const carvesBefore = engine.getSnapshot().carveLog.length;
+    const aimDir = {
+      x: p1Now.position.x - p2Now.position.x,
+      y: p1Now.position.y - p2Now.position.y + 1.1,
+      z: p1Now.position.z - p2Now.position.z,
+    };
+
+    // Shot #1: intercepted by Prism Wall -> 0 damage, 0 carve, wall shatters!
+    const blockedEvents = engine.applyFire("p2", {
+      gadgetId: "gale_mortar",
+      direction: aimDir,
+      power: 0.6,
+    });
+    const shatterEv = blockedEvents.find(
+      (e) => e.type === "PRISM_WALL_SHATTERED",
+    );
+    expect(shatterEv).toBeDefined();
+    if (shatterEv && shatterEv.type === "PRISM_WALL_SHATTERED") {
+      expect(shatterEv.wallId).toBe(activeWall.id);
+    }
+    const shot1Ev = blockedEvents.find((e) => e.type === "SHOT_RESOLVED");
+    expect(shot1Ev).toBeDefined();
+    if (shot1Ev && shot1Ev.type === "SHOT_RESOLVED") {
+      expect(shot1Ev.simulation.shatteredPrismWallIds).toEqual([activeWall.id]);
+      expect(shot1Ev.simulation.carveOps).toHaveLength(0);
+      expect(shot1Ev.simulation.hits).toHaveLength(0);
+    }
+
+    const afterBlockSnap = engine.getSnapshot();
+    expect(
+      afterBlockSnap.critters.find((c) => c.id === "p1")?.hp,
+    ).toBe(p1HpBefore);
+    expect(afterBlockSnap.carveLog.length).toBe(carvesBefore);
+    expect(afterBlockSnap.prismWalls).toHaveLength(0);
+
+    // Complete p2's turn and skip p1's turn -> p2 fires exact same shot again!
+    engine.completeResolving();
+    if (engine.getSnapshot().phase === "RETREAT") {
+      engine.tick(6.1);
+    }
+    for (
+      let g = 0;
+      g < 6 && engine.getSnapshot().activePlayerId !== "p2";
+      g++
+    ) {
+      engine.tick(29);
+    }
+    expect(engine.getSnapshot().activePlayerId).toBe("p2");
+
+    // Shot #2: wall is gone -> hits p1 and carves terrain cleanly!
+    const followUpEvents = engine.applyFire("p2", {
+      gadgetId: "gale_mortar",
+      direction: aimDir,
+      power: 0.6,
+    });
+    expect(
+      followUpEvents.some((e) => e.type === "PRISM_WALL_SHATTERED"),
+    ).toBe(false);
+    const afterFollowUpSnap = engine.getSnapshot();
+    expect(afterFollowUpSnap.carveLog.length).toBeGreaterThan(carvesBefore);
+    expect(
+      afterFollowUpSnap.critters.find((c) => c.id === "p1")?.hp ?? p1HpBefore,
+    ).toBeLessThan(p1HpBefore);
+  });
+
+  it("allows owner one-way fire & aim arc through own Prism Wall, keeps bot preUtilities+fire intact, and blocks max-speed Grand tailwind shots without tunneling", () => {
+    // 1. Caster deploys Prism Wall directly in front of them, fires straight through it to damage rival
+    const engine = new MatchEngine(
+      makeBaseConfig({
+        seed: 77,
+        theme: "emerald_spire",
+        roundDurationSec: 3600,
+        players: [
+          {
+            id: "p1",
+            name: "ShieldMole",
+            species: "mole",
+            team: 0,
+            isBot: false,
+            color: "#e67e22",
+            startingLoadout: ["gale_mortar", "prism_wall"],
+          },
+          {
+            id: "p2",
+            name: "RivalRat",
+            species: "norway_rat",
+            team: 1,
+            isBot: false,
+            color: "#3498db",
+            startingLoadout: ["gale_mortar"],
+          },
+        ],
+      }),
+    );
+
+    const p1Init = engine.getSnapshot().critters.find((c) => c.id === "p1");
+    expect(p1Init).toBeDefined();
+    if (!p1Init) return;
+
+    let rivalSpot: { x: number; y: number; z: number } | null = null;
+    for (let i = 0; i < 16; i++) {
+      const ang = (i * Math.PI * 2) / 16;
+      const sx = p1Init.position.x + Math.cos(ang) * 6.0;
+      const sz = p1Init.position.z + Math.sin(ang) * 6.0;
+      const sy = engine.world.getSurfaceY(sx, sz);
+      if (sy === null || Math.abs(sy - p1Init.position.y) > 1.0) continue;
+      const wx = p1Init.position.x + Math.cos(ang) * 2.4;
+      const wz = p1Init.position.z + Math.sin(ang) * 2.4;
+      const wy = engine.world.getSurfaceY(wx, wz);
+      if (wy === null || Math.abs(wy - p1Init.position.y) > 1.0) continue;
+      if (
+        engine.world.hasDirectLineOfSight(
+          p1Init.position,
+          { x: sx, y: sy, z: sz },
+          0.7,
+        )
+      ) {
+        rivalSpot = { x: sx, y: sy, z: sz };
+        break;
+      }
+    }
+    expect(rivalSpot).not.toBeNull();
+    if (!rivalSpot) return;
+
+    advanceAndWalkTo(engine, "p2", rivalSpot, 40);
+    for (
+      let g = 0;
+      g < 8 && engine.getSnapshot().activePlayerId !== "p1";
+      g++
+    ) {
+      engine.tick(29);
+    }
+    expect(engine.getSnapshot().activePlayerId).toBe("p1");
+
+    const p1Now = engine.getSnapshot().critters.find((c) => c.id === "p1");
+    const p2Now = engine.getSnapshot().critters.find((c) => c.id === "p2");
+    expect(p1Now?.alive).toBe(true);
+    expect(p2Now?.alive).toBe(true);
+    if (!p1Now || !p2Now) return;
+
+    const toRival = {
+      x: p2Now.position.x - p1Now.position.x,
+      y: 0,
+      z: p2Now.position.z - p1Now.position.z,
+    };
+    engine.applyUtility("p1", {
+      gadgetId: "prism_wall",
+      direction: toRival,
+    });
+    const wallsAfterDeploy = engine.getSnapshot().prismWalls ?? [];
+    expect(wallsAfterDeploy).toHaveLength(1);
+    const ownWall = wallsAfterDeploy[0];
+    expect(ownWall?.ownerId).toBe("p1");
+    if (!ownWall) return;
+
+    // Verify sampleAimArc passes through own wall for p1, but stops on p1's wall for p2
+    const p1AimDir = {
+      x: p2Now.position.x - p1Now.position.x,
+      y: p2Now.position.y - p1Now.position.y + 1.1,
+      z: p2Now.position.z - p1Now.position.z,
+    };
+    const ownArc = sampleAimArc(
+      engine.world,
+      {
+        gadgetId: "gale_mortar",
+        origin: { x: p1Now.position.x, y: p1Now.position.y + 0.6, z: p1Now.position.z },
+        direction: p1AimDir,
+        power: 0.45,
+      },
+      engine.getSnapshot().wind,
+      false,
+      wallsAfterDeploy,
+      "p1",
+    );
+    const ownArcEnd = ownArc[ownArc.length - 1];
+    expect(ownArcEnd).toBeDefined();
+    if (ownArcEnd) {
+      const distFromP1 = Math.hypot(
+        ownArcEnd.x - p1Now.position.x,
+        ownArcEnd.z - p1Now.position.z,
+      );
+      expect(distFromP1).toBeGreaterThan(3.5);
+    }
+
+    const rivalAimDir = {
+      x: p1Now.position.x - p2Now.position.x,
+      y: p1Now.position.y - p2Now.position.y + 1.1,
+      z: p1Now.position.z - p2Now.position.z,
+    };
+    const enemyArc = sampleAimArc(
+      engine.world,
+      {
+        gadgetId: "gale_mortar",
+        origin: { x: p2Now.position.x, y: p2Now.position.y + 0.6, z: p2Now.position.z },
+        direction: rivalAimDir,
+        power: 0.6,
+      },
+      engine.getSnapshot().wind,
+      false,
+      wallsAfterDeploy,
+      "p2",
+    );
+    const enemyArcEnd = enemyArc[enemyArc.length - 1];
+    expect(enemyArcEnd).toBeDefined();
+    if (enemyArcEnd) {
+      const distToWall = Math.hypot(
+        enemyArcEnd.x - ownWall.position.x,
+        enemyArcEnd.z - ownWall.position.z,
+      );
+      expect(distToWall).toBeLessThan(1.8);
+    }
+
+    // p1 fires gale_mortar directly through own Prism Wall -> wall stays intact & p2 takes damage!
+    const p2HpBefore = p2Now.hp;
+    const ownerShotEvents = engine.applyFire("p1", {
+      gadgetId: "gale_mortar",
+      direction: p1AimDir,
+      power: 0.35,
+    });
+    expect(
+      ownerShotEvents.some((e) => e.type === "PRISM_WALL_SHATTERED"),
+    ).toBe(false);
+    const afterOwnerShot = engine.getSnapshot();
+    expect(afterOwnerShot.prismWalls).toHaveLength(1);
+    expect(afterOwnerShot.prismWalls?.[0]?.id).toBe(ownWall.id);
+    expect(
+      afterOwnerShot.critters.find((c) => c.id === "p2")?.hp ?? p2HpBefore,
+    ).toBeLessThan(p2HpBefore);
+
+    // Complete p1's turn -> p2 fires return shot and is intercepted by p1's still-standing wall!
+    engine.completeResolving();
+    if (engine.getSnapshot().phase === "RETREAT") {
+      engine.tick(6.1);
+    }
+    expect(engine.getSnapshot().activePlayerId).toBe("p2");
+
+    const preReturnSnap = engine.getSnapshot();
+    const p2Current = preReturnSnap.critters.find((c) => c.id === "p2");
+    expect(p2Current?.alive).toBe(true);
+    if (!p2Current) return;
+
+    const p1HpBeforeReturn =
+      preReturnSnap.critters.find((c) => c.id === "p1")?.hp ?? 0;
+    const carvesBeforeReturn = preReturnSnap.carveLog.length;
+    const retOrigin = {
+      x: p2Current.position.x,
+      y: p2Current.position.y + 0.6,
+      z: p2Current.position.z,
+    };
+    const retTarget = {
+      x: ownWall.position.x,
+      y: ownWall.position.y + ownWall.height * 0.5,
+      z: ownWall.position.z,
+    };
+    const rdx = retTarget.x - retOrigin.x;
+    const rdy = retTarget.y - retOrigin.y;
+    const rdz = retTarget.z - retOrigin.z;
+    const retSpeed = 9.0 + 0.65 * 18.5;
+    const retT = Math.max(0.12, Math.hypot(rdx, rdy, rdz) / retSpeed);
+    const returnAimDir = {
+      x: rdx - 0.5 * preReturnSnap.wind.x * retT * retT,
+      y: rdy + 0.5 * GRAVITY * retT * retT,
+      z: rdz - 0.5 * preReturnSnap.wind.z * retT * retT,
+    };
+
+    const returnEvents = engine.applyFire("p2", {
+      gadgetId: "gale_mortar",
+      direction: returnAimDir,
+      power: 0.65,
+    });
+    expect(
+      returnEvents.some((e) => e.type === "PRISM_WALL_SHATTERED"),
+    ).toBe(true);
+    const afterReturn = engine.getSnapshot();
+    expect(afterReturn.critters.find((c) => c.id === "p1")?.hp).toBe(
+      p1HpBeforeReturn,
+    );
+    expect(afterReturn.carveLog.length).toBe(carvesBeforeReturn);
+    expect(afterReturn.prismWalls).toHaveLength(0);
+
+    // 2. Executing planBotTurn's preUtilities (mend_brew + prism_wall) + applyFire never self-shatters
+    const botEngine = new MatchEngine(
+      makeBaseConfig({
+        seed: 77,
+        theme: "emerald_spire",
+        roundDurationSec: 3600,
+        players: [
+          {
+            id: "bot-1",
+            name: "Bramble (Bot)",
+            species: "badger",
+            team: 0,
+            isBot: true,
+            color: "#22c55e",
+            startingLoadout: ["gale_mortar", "mend_brew", "prism_wall"],
+          },
+          {
+            id: "human-1",
+            name: "TargetRat",
+            species: "norway_rat",
+            team: 1,
+            isBot: false,
+            color: "#3498db",
+            startingLoadout: ["gale_mortar"],
+          },
+        ],
+      }),
+    );
+
+    const botInit = botEngine.getSnapshot().critters.find((c) => c.id === "bot-1");
+    expect(botInit).toBeDefined();
+    if (!botInit) return;
+
+    // Walk human-1 into unobstructed LOS of bot-1
+    let humanSpot: { x: number; y: number; z: number } | null = null;
+    for (let i = 0; i < 16; i++) {
+      const ang = (i * Math.PI * 2) / 16;
+      const sx = botInit.position.x + Math.cos(ang) * 7.5;
+      const sz = botInit.position.z + Math.sin(ang) * 7.5;
+      const sy = botEngine.world.getSurfaceY(sx, sz);
+      if (sy === null || Math.abs(sy - botInit.position.y) > 1.2) continue;
+      if (
+        botEngine.world.hasDirectLineOfSight(
+          botInit.position,
+          { x: sx, y: sy, z: sz },
+          1.1,
+        )
+      ) {
+        humanSpot = { x: sx, y: sy, z: sz };
+        break;
+      }
+    }
+    expect(humanSpot).not.toBeNull();
+    if (!humanSpot) return;
+
+    advanceAndWalkTo(botEngine, "human-1", humanSpot, 40);
+    for (
+      let g = 0;
+      g < 8 && botEngine.getSnapshot().activePlayerId !== "bot-1";
+      g++
+    ) {
+      botEngine.tick(29);
+    }
+    expect(botEngine.getSnapshot().activePlayerId).toBe("bot-1");
+
+    // Chip bot-1 down to <= 65% HP via vertical drops so planBotTurn queues both mend_brew & prism_wall
+    const botBase = botEngine.getSnapshot().critters.find((c) => c.id === "bot-1");
+    expect(botBase).toBeDefined();
+    if (!botBase) return;
+    const basePos = { ...botBase.position };
+    for (let d = 0; d < 6; d++) {
+      const cur = botEngine.getSnapshot().critters.find((c) => c.id === "bot-1");
+      if (!cur || cur.hp <= cur.maxHp * 0.62) break;
+      botEngine.applyMove("bot-1", { x: basePos.x, y: basePos.y + 15.0, z: basePos.z }, 0, 0);
+      botEngine.applyMove("bot-1", basePos, 0, 0);
+    }
+
+    const botSnapBefore = botEngine.getSnapshot();
+    const botBefore = botSnapBefore.critters.find((c) => c.id === "bot-1");
+    expect(botBefore).toBeDefined();
+    if (!botBefore) return;
+    expect(botBefore.hp).toBeLessThanOrEqual(botBefore.maxHp * 0.65);
+
+    const botPlan = planBotTurn(botSnapBefore, botEngine.world, "bot-1");
+    expect(botPlan.preUtilities?.map((u) => u.gadgetId)).toEqual([
+      "mend_brew",
+      "prism_wall",
+    ]);
+
+    botEngine.applyMove("bot-1", botPlan.moveTarget, 0, 0);
+    for (const util of botPlan.preUtilities ?? []) {
+      botEngine.applyUtility("bot-1", util);
+    }
+    expect(botEngine.getSnapshot().prismWalls).toHaveLength(1);
+
+    const botFireEvents = botEngine.applyFire("bot-1", {
+      gadgetId: botPlan.gadgetId,
+      direction: botPlan.direction,
+      power: botPlan.power,
+      ...(botPlan.droneTarget ? { droneTarget: botPlan.droneTarget } : {}),
+    });
+    expect(
+      botFireEvents.some((e) => e.type === "PRISM_WALL_SHATTERED"),
+    ).toBe(false);
+    expect(botEngine.getSnapshot().prismWalls).toHaveLength(1);
+    expect(botEngine.getSnapshot().prismWalls?.[0]?.ownerId).toBe("bot-1");
+
+    // 3. Max Grand launch speed (42 m/s) + strong tailwind (>48 m/s -> >1.2m/step): zero tunneling!
+    const grandWorld = new SdfWorld(77, "emerald_spire", "grand");
+    const grandCenterY = grandWorld.worldHeight * 0.85;
+    const shieldedPos = {
+      x: grandWorld.centerX + 12.0,
+      y: grandCenterY,
+      z: grandWorld.centerZ,
+    };
+    const shooterPos = {
+      x: grandWorld.centerX - 12.0,
+      y: grandCenterY,
+      z: grandWorld.centerZ,
+    };
+    const grandWall = {
+      id: "grand-wall-1",
+      ownerId: "p1",
+      position: {
+        x: shieldedPos.x - 2.4,
+        y: shieldedPos.y - 0.5,
+        z: shieldedPos.z,
+      },
+      normal: { x: -1, y: 0, z: 0 },
+      width: 3.4,
+      height: 2.8,
+      active: true,
+    };
+    const shieldedCritter = makeDummyCritter({
+      id: "p1",
+      position: shieldedPos,
+      hp: 240,
+      maxHp: 240,
+    });
+    const highSpeedSim = simulateShot(
+      grandWorld,
+      [shieldedCritter],
+      {
+        shooterId: "p2",
+        gadgetId: "gale_mortar",
+        origin: { x: shooterPos.x, y: shooterPos.y + 0.6, z: shooterPos.z },
+        direction: { x: 0.99, y: 0.14, z: 0 },
+        power: 1.0,
+        species: "norway_rat",
+        equipped: {},
+        apex: null,
+      },
+      { x: 14.0, y: 0, z: 0 },
+      1.5,
+      [grandWall],
+    );
+    expect(highSpeedSim.shatteredPrismWallIds).toEqual(["grand-wall-1"]);
+    expect(highSpeedSim.hits).toHaveLength(0);
+    expect(highSpeedSim.carveOps).toHaveLength(0);
+    const interceptImpact = highSpeedSim.impacts[0];
+    expect(interceptImpact).toBeDefined();
+    if (interceptImpact) {
+      expect(
+        Math.abs(interceptImpact.position.x - grandWall.position.x),
+      ).toBeLessThanOrEqual(0.45 + 1e-4);
+    }
+  });
+
+  it("plans tactical bot mend_brew, prism_wall, shock_magnet, and gravity_mine actions only when owned", () => {
+    const world = new SdfWorld(42, "emerald_spire", "duel");
+    const sp = world.findSpawnPoints(1)[0];
+    expect(sp).toBeDefined();
+    if (!sp) return;
+
+    // Place enemy 10m outward at matching elevation near a cliff dropoff with clean unobstructed LOS
+    let enemyPos: { x: number; y: number; z: number } | null = null;
+    for (let i = 0; i < 24; i++) {
+      const ang = (i * Math.PI * 2) / 24;
+      const ex = sp.x + Math.cos(ang) * 10.0;
+      const ez = sp.z + Math.sin(ang) * 10.0;
+      const cand = { x: ex, y: sp.y, z: ez };
+      const hasDrop =
+        world.getSurfaceY(ex + 3.5, ez) === null ||
+        world.getSurfaceY(ex - 3.5, ez) === null ||
+        world.getSurfaceY(ex, ez + 3.5) === null ||
+        world.getSurfaceY(ex, ez - 3.5) === null;
+      if (hasDrop && world.hasDirectLineOfSight(sp, cand, 1.1)) {
+        enemyPos = cand;
+        break;
+      }
+    }
+    expect(enemyPos).not.toBeNull();
+    if (!enemyPos) return;
+
+    const makeState = (
+      botOverrides: Partial<CritterState>,
+      enemyOverrides?: Partial<CritterState>,
+    ) => {
+      const bot = makeDummyCritter({
+        id: "bot-1",
+        isBot: true,
+        position: { ...sp },
+        moveStamina: 0,
+        hp: 120,
+        maxHp: 240,
+        ...botOverrides,
+      });
+      const enemy = makeDummyCritter({
+        id: "enemy-1",
+        position: { ...enemyPos },
+        hp: 200,
+        maxHp: 240,
+        ...enemyOverrides,
+      });
+      return {
+        matchId: "bot-test",
+        roomCode: "BOTT",
+        seed: 42,
+        theme: "emerald_spire" as const,
+        mode: "ffa" as const,
+        mapScale: "duel" as const,
+        phase: "ACTIVE" as const,
+        round: 1,
+        maxRounds: 5,
+        turnNumber: 1,
+        activeCritterId: bot.id,
+        activePlayerId: bot.id,
+        phaseTimerMs: 28000,
+        phaseTimeRemainingSec: 28,
+        roundTimeRemainingSec: 300,
+        roundDurationSec: 300,
+        waterLevel: 1.5,
+        floodTargetWaterLevel: null,
+        matchEndReason: null,
+        wind: { x: 0, y: 0, z: 0 },
+        critters: [bot, enemy],
+        evoPods: [],
+        hazards: [],
+        prismWalls: [],
+        pendingDrafts: [],
+        carveLog: [],
+        scores: { "bot-1": 0, "enemy-1": 0 },
+        teamScores: { A: 0, B: 0 },
+        winnerId: null,
+        winnerTeam: null,
+        roundWinners: [],
+      };
+    };
+
+    // 1. Damaged bot with mend_brew + prism_wall + shock_magnet queues both preUtilities and fires shock_magnet
+    const shockState = makeState({
+      loadout: ["gale_mortar", "mend_brew", "prism_wall", "shock_magnet"],
+      gadgetCharges: {
+        gale_mortar: null,
+        quake_club: 0,
+        vine_grapple: 0,
+        spore_burst: 0,
+        burrow_bore: 0,
+        seeker_firefly: 0,
+        gravity_mine: 0,
+        prism_wall: 2,
+        shock_magnet: 2,
+        mend_brew: 2,
+      },
+    });
+    const shockPlan = planBotTurn(shockState, world, "bot-1");
+    expect(shockPlan.preUtilities?.map((u) => u.gadgetId)).toEqual([
+      "mend_brew",
+      "prism_wall",
+    ]);
+    expect(shockPlan.gadgetId).toBe("shock_magnet");
+
+    // 2. Bot with gravity_mine (and no shock_magnet) targeting low-ledge enemy fires gravity_mine
+    const gravityState = makeState({
+      hp: 240,
+      maxHp: 240,
+      loadout: ["gale_mortar", "gravity_mine"],
+      gadgetCharges: {
+        gale_mortar: null,
+        quake_club: 0,
+        vine_grapple: 0,
+        spore_burst: 0,
+        burrow_bore: 0,
+        seeker_firefly: 0,
+        gravity_mine: 2,
+        prism_wall: 0,
+        shock_magnet: 0,
+        mend_brew: 0,
+      },
+    });
+    const gravityPlan = planBotTurn(gravityState, world, "bot-1");
+    expect(gravityPlan.preUtilities).toBeUndefined();
+    expect(gravityPlan.gadgetId).toBe("gravity_mine");
+
+    // 3. Bot without shock_magnet/gravity_mine in loadout never fires unowned gadgets
+    const starterState = makeState({
+      loadout: ["gale_mortar"],
+      gadgetCharges: {
+        gale_mortar: null,
+        quake_club: 0,
+        vine_grapple: 0,
+        spore_burst: 0,
+        burrow_bore: 0,
+        seeker_firefly: 0,
+        gravity_mine: 2,
+        prism_wall: 2,
+        shock_magnet: 2,
+        mend_brew: 2,
+      },
+    });
+    const starterPlan = planBotTurn(starterState, world, "bot-1");
+    expect(starterPlan.preUtilities).toBeUndefined();
+    expect(starterPlan.gadgetId).toBe("gale_mortar");
+  });
+
+  it("matches exact brute-force trilinear surface heights in SdfWorld.getSurfaceY across all 4 themes", () => {
+    const referenceGetSurfaceY = (
+      world: SdfWorld,
+      x: number,
+      z: number,
+    ): number | null => {
+      const { ny, voxelSize: vs } = world.dims;
+      const step = vs * 0.5;
+      const maxY = (ny - 2) * vs;
+      const minY = vs;
+      let prevY = maxY;
+      let prevVal = world.sample(x, prevY, z);
+      for (let y = maxY - step; y >= minY; y -= step) {
+        const currVal = world.sample(x, y, z);
+        if (prevVal >= 0 && currVal < 0) {
+          let lo = y;
+          let hi = prevY;
+          for (let iter = 0; iter < 4; iter++) {
+            const mid = (lo + hi) * 0.5;
+            if (world.sample(x, mid, z) < 0) {
+              lo = mid;
+            } else {
+              hi = mid;
+            }
+          }
+          return (lo + hi) * 0.5;
+        }
+        prevY = y;
+        prevVal = currVal;
+      }
+      return null;
+    };
+
+    const themes = [
+      "emerald_spire",
+      "canyon_arch",
+      "twin_pillars",
+      "mountain_spine",
+    ] as const;
+
+    for (const theme of themes) {
+      const world = new SdfWorld(777, theme, "duel");
+      // Also apply a crater carve near center to test carved columns too
+      world.applyCarve({
+        center: { x: world.centerX + 4.2, y: 12.0, z: world.centerZ - 3.1 },
+        radius: 3.4,
+        shape: "sphere",
+      });
+
+      let solidChecks = 0;
+      let airChecks = 0;
+      for (let x = -1.0; x <= world.worldWidth + 1.0; x += 3.35) {
+        for (let z = -1.0; z <= world.worldDepth + 1.0; z += 3.35) {
+          const fastY = world.getSurfaceY(x, z);
+          const refY = referenceGetSurfaceY(world, x, z);
+          expect(fastY).toBe(refY);
+          if (fastY !== null) {
+            solidChecks += 1;
+          } else {
+            airChecks += 1;
+          }
+        }
+      }
+      expect(solidChecks).toBeGreaterThan(20);
+      expect(airChecks).toBeGreaterThan(20);
     }
   });
 });

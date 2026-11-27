@@ -5,12 +5,34 @@ import type {
   GadgetDefinition,
   GadgetId,
   HardpointSlot,
+  MapScale,
   MutationDefinition,
   MutationId,
   SpeciesDefinition,
   SpeciesId,
   ThemeId,
 } from "./types.js";
+
+/** Default total rounds played in every Critter Siege match. */
+export const DEFAULT_MAX_ROUNDS = 5;
+
+/** Default per-round combat clock in seconds (5 minutes). */
+export const DEFAULT_ROUND_DURATION_SEC = 300;
+
+/** Default starting Siege Coins granted to every player at match start. */
+export const DEFAULT_STARTING_COINS = 100;
+
+/** Maximum equipped active ability slots per critter (Slot 1 is always free Gale Mortar). */
+export const MAX_LOADOUT_SLOTS = 6;
+
+/** Default duration in seconds for the Round 5 Stage 2 Ocean Deluge sequence. */
+export const DEFAULT_FLOOD_DURATION_SEC = 7.0;
+
+/** Final warning window in seconds on the final round where tide creeps upward. */
+export const ROUND5_WARNING_WINDOW_SEC = 60;
+
+/** Stage 1 gradual tide rise in meters over the final round warning window. */
+export const ROUND5_WARNING_TIDE_RISE = 2.5;
 
 /** Ordered physical hardpoint slots on every critter rig. */
 export const HARDPOINT_SLOTS: readonly HardpointSlot[] = [
@@ -27,6 +49,41 @@ export const THEME_IDS: readonly ThemeId[] = [
   "twin_pillars",
   "mountain_spine",
 ] as const;
+
+/** Default player color palette shared across lobby seats, sandbox, and engine state. */
+export const PLAYER_COLOR_PALETTE: readonly string[] = [
+  "#f97316",
+  "#38bdf8",
+  "#22c55e",
+  "#f43f5e",
+  "#a855f7",
+  "#eab308",
+] as const;
+
+/** Computes per-turn ACTIVE walking distance budget (in meters) from map scale, species, and hardpoints. */
+export function computeMaxMoveDistance(
+  mapScale: MapScale,
+  species: SpeciesId,
+  equipped: Partial<Record<HardpointSlot, MutationId>>,
+): number {
+  const base = mapScale === "grand" ? 20.0 : 14.0;
+  const speciesMult = species === "norway_rat" ? 1.18 : 1.0;
+  const mutMult = equipped.legs === "spring_paws" ? 1.2 : 1.0;
+  return Number((base * speciesMult * mutMult).toFixed(4));
+}
+
+/** Computes RETREAT-phase dash distance budget (in meters) from map scale, species, and hardpoints. */
+export function computeRetreatMoveDistance(
+  mapScale: MapScale,
+  species: SpeciesId,
+  equipped: Partial<Record<HardpointSlot, MutationId>>,
+): number {
+  const base = mapScale === "grand" ? 7.0 : 5.0;
+  const speciesMult = species === "norway_rat" ? 1.18 : 1.0;
+  const mutMult = equipped.legs === "spring_paws" ? 1.2 : 1.0;
+  const rollMult = SPECIES_CATALOG[species].retreatRollBoost;
+  return Number((base * speciesMult * mutMult * rollMult).toFixed(4));
+}
 
 /** Complete catalog of starter and Siege-Essence-unlockable species. */
 export const SPECIES_CATALOG: Readonly<Record<SpeciesId, SpeciesDefinition>> = {
@@ -255,7 +312,7 @@ export const APEX_CATALOG: Readonly<Record<ApexId, ApexDefinition>> = {
   },
 };
 
-/** Complete gadget arsenal: 6 standard match tools plus 3 Siege Essence lobby unlocks. */
+/** Complete 10-ability gadget arsenal purchasable with in-match Siege Coins. */
 export const GADGET_CATALOG: Readonly<Record<GadgetId, GadgetDefinition>> = {
   gale_mortar: {
     id: "gale_mortar",
@@ -265,6 +322,10 @@ export const GADGET_CATALOG: Readonly<Record<GadgetId, GadgetDefinition>> = {
     bonusLobbyOnly: false,
     unlockCost: 0,
     chargesPerRound: null,
+    startingCharges: null,
+    shopCost: 0,
+    refillCost: 0,
+    freeStarter: true,
     turnEnding: true,
     windAffected: true,
     baseDamage: 34,
@@ -279,6 +340,9 @@ export const GADGET_CATALOG: Readonly<Record<GadgetId, GadgetDefinition>> = {
     bonusLobbyOnly: false,
     unlockCost: 0,
     chargesPerRound: null,
+    startingCharges: null,
+    shopCost: 25,
+    refillCost: 0,
     turnEnding: true,
     windAffected: false,
     baseDamage: 24,
@@ -293,6 +357,9 @@ export const GADGET_CATALOG: Readonly<Record<GadgetId, GadgetDefinition>> = {
     bonusLobbyOnly: false,
     unlockCost: 0,
     chargesPerRound: 6,
+    startingCharges: 6,
+    shopCost: 30,
+    refillCost: 15,
     turnEnding: false,
     windAffected: false,
     baseDamage: 0,
@@ -307,6 +374,9 @@ export const GADGET_CATALOG: Readonly<Record<GadgetId, GadgetDefinition>> = {
     bonusLobbyOnly: false,
     unlockCost: 0,
     chargesPerRound: 2,
+    startingCharges: 2,
+    shopCost: 50,
+    refillCost: 30,
     turnEnding: true,
     windAffected: true,
     baseDamage: 16,
@@ -322,6 +392,9 @@ export const GADGET_CATALOG: Readonly<Record<GadgetId, GadgetDefinition>> = {
     bonusLobbyOnly: false,
     unlockCost: 0,
     chargesPerRound: 2,
+    startingCharges: 2,
+    shopCost: 55,
+    refillCost: 30,
     turnEnding: true,
     windAffected: false,
     baseDamage: 36,
@@ -337,6 +410,9 @@ export const GADGET_CATALOG: Readonly<Record<GadgetId, GadgetDefinition>> = {
     bonusLobbyOnly: false,
     unlockCost: 0,
     chargesPerRound: 1,
+    startingCharges: 1,
+    shopCost: 70,
+    refillCost: 40,
     turnEnding: true,
     windAffected: false,
     baseDamage: 30,
@@ -352,6 +428,9 @@ export const GADGET_CATALOG: Readonly<Record<GadgetId, GadgetDefinition>> = {
     bonusLobbyOnly: true,
     unlockCost: 90,
     chargesPerRound: 0,
+    startingCharges: 2,
+    shopCost: 55,
+    refillCost: 30,
     turnEnding: true,
     windAffected: true,
     baseDamage: 18,
@@ -366,6 +445,9 @@ export const GADGET_CATALOG: Readonly<Record<GadgetId, GadgetDefinition>> = {
     bonusLobbyOnly: true,
     unlockCost: 90,
     chargesPerRound: 0,
+    startingCharges: 2,
+    shopCost: 35,
+    refillCost: 20,
     turnEnding: false,
     windAffected: false,
     baseDamage: 0,
@@ -380,11 +462,32 @@ export const GADGET_CATALOG: Readonly<Record<GadgetId, GadgetDefinition>> = {
     bonusLobbyOnly: true,
     unlockCost: 110,
     chargesPerRound: 0,
+    startingCharges: 2,
+    shopCost: 60,
+    refillCost: 35,
     turnEnding: true,
     windAffected: false,
     baseDamage: 22,
     carveRadius: 1.8,
     knockback: 14,
+  },
+  mend_brew: {
+    id: "mend_brew",
+    name: "Mend Brew",
+    description:
+      "Herbal restorative tonic that heals +45 HP without ending your turn.",
+    bonusLobbyOnly: false,
+    unlockCost: 0,
+    chargesPerRound: 2,
+    startingCharges: 2,
+    shopCost: 40,
+    refillCost: 25,
+    healAmount: 45,
+    turnEnding: false,
+    windAffected: false,
+    baseDamage: 0,
+    carveRadius: 0,
+    knockback: 0,
   },
 };
 
@@ -528,4 +631,70 @@ export function createDefaultGadgetCharges(
     charges[bonusGadget] = 1;
   }
   return charges;
+}
+
+/** Builds per-round charge counts for a critter's persistent equipped ability loadout. */
+export function createRoundLoadoutCharges(
+  loadout: readonly GadgetId[],
+): Record<GadgetId, number | null> {
+  const owned = new Set<GadgetId>(loadout);
+  const charges = {} as Record<GadgetId, number | null>;
+  for (const id of GADGET_IDS) {
+    charges[id] = owned.has(id) ? GADGET_CATALOG[id].startingCharges : 0;
+  }
+  return charges;
+}
+
+/** Result of validating and purchasing a player's starting Siege Coin loadout. */
+export interface StartingLoadoutResult {
+  loadout: GadgetId[];
+  remainingCoins: number;
+  gadgetCharges: Record<GadgetId, number | null>;
+}
+
+const DEFAULT_STARTER_KIT: readonly GadgetId[] = [
+  "gale_mortar",
+  "quake_club",
+  "vine_grapple",
+];
+
+/**
+ * Validates and builds a critter's starting 1..6 slot loadout within a Siege Coin budget.
+ * Always places free `gale_mortar` in slot 1, spends `shopCost` for valid unique abilities,
+ * and falls back to the balanced starter kit (`gale_mortar`, `quake_club`, `vine_grapple`)
+ * when `requested` is undefined.
+ */
+export function validateAndBuildStartingLoadout(
+  requested: readonly GadgetId[] | undefined,
+  budget: number = DEFAULT_STARTING_COINS,
+): StartingLoadoutResult {
+  const safeBudget = Number.isFinite(budget) ? Math.max(0, Math.floor(budget)) : DEFAULT_STARTING_COINS;
+  let remainingCoins = safeBudget;
+  const loadout: GadgetId[] = ["gale_mortar"];
+  const seen = new Set<GadgetId>(["gale_mortar"]);
+
+  const candidates = requested !== undefined ? requested : DEFAULT_STARTER_KIT;
+  for (const rawId of candidates) {
+    if (loadout.length >= MAX_LOADOUT_SLOTS) {
+      break;
+    }
+    if (
+      !Object.prototype.hasOwnProperty.call(GADGET_CATALOG, rawId) ||
+      seen.has(rawId)
+    ) {
+      continue;
+    }
+    const def = GADGET_CATALOG[rawId];
+    if (def.shopCost <= remainingCoins) {
+      remainingCoins -= def.shopCost;
+      loadout.push(rawId);
+      seen.add(rawId);
+    }
+  }
+
+  return {
+    loadout,
+    remainingCoins,
+    gadgetCharges: createRoundLoadoutCharges(loadout),
+  };
 }
