@@ -1,6 +1,7 @@
 import * as THREE from "three";
 import {
   GADGET_CATALOG,
+  GALE_SCATTER_REACH,
   GRAVITY,
   SDF_DIMS,
   SPECIES_CATALOG,
@@ -8,6 +9,7 @@ import {
   computeCritterStats,
   computeMaxMoveDistance,
   computeRetreatMoveDistance,
+  type CarveOp,
   type CritterState,
   type EngineEvent,
   type GadgetId,
@@ -26,6 +28,14 @@ import {
 } from "./audio/musicContextMapper.js";
 import { SynthAudio, type MusicGameplayContext } from "./audio/synthAudio.js";
 import { CameraRig, type CameraMode } from "./game/cameraRig.js";
+import { evaluateCountdownCue } from "./game/countdownCue.js";
+import { projectDroneMarkers } from "./game/droneProjection.js";
+import {
+  createGrappleAnimState,
+  shouldExitDroneForGrapple,
+  stepGrappleAnim,
+  type GrappleAnimState,
+} from "./game/grappleAnimation.js";
 import { InputController } from "./game/inputController.js";
 import { TrajectoryPreview } from "./game/trajectoryPreview.js";
 import { GameClient, type LobbyViewState } from "./net/gameClient.js";
@@ -37,7 +47,7 @@ import { CritterRig } from "./scene/critterMesh.js";
 import { EnvironmentProps } from "./scene/environmentProps.js";
 import { preloadAllSpeciesModels } from "./scene/modelLoader.js";
 import { TerrainRenderer } from "./scene/terrainRenderer.js";
-import { VfxSystem } from "./scene/vfx.js";
+import { VfxSystem, type DroneBeaconInput } from "./scene/vfx.js";
 import { WorldScene, getThemeAtmosphere } from "./scene/worldScene.js";
 import {
   HudController,
@@ -128,6 +138,7 @@ function hasMusicContextChanged(
 interface ShotPlayback {
   gadgetId: GadgetId;
   path: Vec3[];
+  aimDir: Vec3;
   durationSec: number;
   elapsedSec: number;
   holdAfterSec: number;
@@ -139,6 +150,16 @@ interface ShotPlayback {
   hitStopSec?: number;
   isPrismIntercept?: boolean;
   allowOutsideResolving?: boolean;
+  seekerTargetPos?: Vec3 | null;
+  boreCapsule?: {
+    center: Vec3;
+    end: Vec3;
+    radius: number;
+    startSec: number;
+    slicedCount: number;
+    lastGrindMs: number;
+  } | null;
+  scatterBlastDone?: boolean;
 }
 
 /** SessionStorage key preserving ?server= WebSocket URL across page reloads. */
@@ -332,6 +353,17 @@ function computeAimDirection(yaw: number, pitch: number): Vec3 {
   };
 }
 
+function normalizeVec3(
+  v: Vec3,
+  fallback: Vec3 = { x: 0, y: 0, z: 1 },
+): Vec3 {
+  const len = Math.hypot(v.x, v.y, v.z);
+  if (!Number.isFinite(len) || len < 1e-5) {
+    return { x: fallback.x, y: fallback.y, z: fallback.z };
+  }
+  return { x: v.x / len, y: v.y / len, z: v.z / len };
+}
+
 function findLocalGroundY(
   world: SdfWorld,
   x: number,
@@ -491,12 +523,9 @@ class CritterSiegeApp {
     pitch: number;
     power: number;
   } | null = null;
-  private readonly grappleGlides = new Map<
-    string,
-    { from: Vec3; to: Vec3; elapsedSec: number; durationSec: number }
-  >();
+  private readonly grappleGlides = new Map<string, GrappleAnimState>();
   private lastChargeTickMs = 0;
-  private lastCountdownSec = -1;
+  private lastCountdownKey = "";
   private quickStartMoved = false;
   private quickStartFired = false;
   private lobbyHeroPos: Vec3 = { x: WORLD_CENTER_X, y: 10, z: WORLD_CENTER_Z };
@@ -954,9 +983,11 @@ class CritterSiegeApp {
     this.quickStartMoved = false;
     this.quickStartFired = false;
     this.lastLocalShotAim = null;
+    this.lastCountdownKey = "";
     this.clearGrappleGlides();
     this.hud.setArmoryOpen(false);
     this.vfx.setDronePing(null);
+    this.vfx.syncDronePlayerBeacons([], false, 0);
     this.vfx.syncPrismWalls([], 0);
     this.shotPlayback = null;
     this.cameraRig.setShotCamActive(false);
@@ -990,10 +1021,12 @@ class CritterSiegeApp {
     this.onlineLobby = null;
     this.shotPlayback = null;
     this.lastLocalShotAim = null;
+    this.lastCountdownKey = "";
     this.clearGrappleGlides();
     this.dronePing = null;
     this.essenceBreakdown = null;
     this.vfx.setDronePing(null);
+    this.vfx.syncDronePlayerBeacons([], false, 0);
     this.vfx.setProjectileVisual(null);
     this.vfx.syncEvoPods([], 0);
     this.vfx.syncPrismWalls([], 0);
@@ -1133,7 +1166,7 @@ class CritterSiegeApp {
       this.clearGrappleGlides();
       this.cameraRig.setShotCamActive(false);
       this.localTurnKey = "";
-      this.lastCountdownSec = -1;
+      this.lastCountdownKey = "";
     } else {
       if (state.round !== this.lastMatchRound) {
         this.lastMatchRound = state.round;
@@ -1149,7 +1182,7 @@ class CritterSiegeApp {
         this.clearGrappleGlides();
         this.cameraRig.setShotCamActive(false);
         this.localTurnKey = "";
-        this.lastCountdownSec = -1;
+        this.lastCountdownKey = "";
         this.environmentProps.syncHazards(state.hazards ?? [], this.elapsedSec);
 
         if (state.round > 1) {
@@ -1291,14 +1324,64 @@ class CritterSiegeApp {
           const drownedPositions = sim.hits
             .filter((h) => h.drowned)
             .map((h) => ({ ...h.newPosition }));
+          const path: Vec3[] =
+            sim.path.length > 0
+              ? sim.path
+              : [{ x: this.activeWorld.centerX, y: 10, z: this.activeWorld.centerZ }];
+          const origin = path[0] ?? {
+            x: this.activeWorld.centerX,
+            y: 10,
+            z: this.activeWorld.centerZ,
+          };
+          const nextPt = path[1];
+          const shooter = this.matchState?.critters.find(
+            (c) => c.id === ev.shooterId,
+          );
+          const fallbackDir = shooter
+            ? computeAimDirection(shooter.yaw, shooter.pitch)
+            : { x: 0, y: 0, z: 1 };
+          const aimDir = nextPt
+            ? normalizeVec3(
+                {
+                  x: nextPt.x - origin.x,
+                  y: nextPt.y - origin.y,
+                  z: nextPt.z - origin.z,
+                },
+                fallbackDir,
+              )
+            : fallbackDir;
+          const durationSec = Math.max(0.24, sim.durationSec);
+
+          let boreCapsule: ShotPlayback["boreCapsule"] = null;
+          if (ev.gadgetId === "burrow_bore") {
+            const cap = sim.carveOps.find(
+              (op): op is CarveOp & { end: Vec3 } =>
+                op.shape === "capsule" && op.end !== undefined,
+            );
+            if (cap) {
+              const tunnelDuration =
+                GADGET_CATALOG.burrow_bore.tunnelDurationSec ?? 0.6;
+              boreCapsule = {
+                center: { ...cap.center },
+                end: { ...cap.end },
+                radius: cap.radius,
+                startSec: Math.max(0.05, durationSec - tunnelDuration),
+                slicedCount: 0,
+                lastGrindMs: 0,
+              };
+            }
+          }
+
+          const seekerTargetPos =
+            ev.gadgetId === "seeker_firefly"
+              ? (path[path.length - 1] ?? this.dronePing)
+              : null;
 
           this.shotPlayback = {
             gadgetId: ev.gadgetId,
-            path:
-              sim.path.length > 0
-                ? sim.path
-                : [{ x: this.activeWorld.centerX, y: 10, z: this.activeWorld.centerZ }],
-            durationSec: Math.max(0.24, sim.durationSec),
+            path,
+            aimDir,
+            durationSec,
             elapsedSec: 0,
             holdAfterSec: 0.45,
             impacts: sim.impacts.map((imp) => ({ ...imp, triggered: false })),
@@ -1316,28 +1399,39 @@ class CritterSiegeApp {
             isPrismIntercept: (sim.shatteredPrismWallIds?.length ?? 0) > 0,
             allowOutsideResolving:
               !entersResolving && this.matchState?.phase !== "RESOLVING",
+            seekerTargetPos,
+            boreCapsule,
+            scatterBlastDone: ev.gadgetId === "quake_club",
           };
-          this.cameraRig.setShotCamActive(true);
+
+          if (ev.gadgetId === "quake_club") {
+            // Stay in Over-the-Shoulder / First Person to see Gale Scatter's wind-shotgun blast directly!
+            this.vfx.spawnWindShotgunBlast(origin, aimDir, GALE_SCATTER_REACH);
+            this.cameraRig.triggerShake(0.32, 0.22);
+          } else {
+            this.cameraRig.setShotCamActive(true);
+          }
           break;
         }
         case "VINE_GRAPPLED": {
-          this.grappleGlides.set(ev.playerId, {
-            from: { ...ev.from },
-            to: { ...ev.to },
-            elapsedSec: 0,
-            durationSec: 0.42,
-          });
-          this.vfx.spawnGrappleBeam(ev.from, ev.to);
-          this.vfx.setGrappleTether(ev.playerId, ev.from, ev.to);
+          const isPodPull = Boolean(ev.isPodPull);
+          const glide = createGrappleAnimState(ev.from, ev.to, isPodPull);
+          this.grappleGlides.set(ev.playerId, glide);
           if (ev.playerId !== localId) {
             this.audio.playLaunch("vine_grapple");
           } else {
+            if (shouldExitDroneForGrapple(this.cameraRig.getMode())) {
+              this.cameraRig.exitDroneRecon();
+            }
             this.localPos.set(ev.from.x, ev.from.y, ev.from.z);
             this.localVel.set(0, 0, 0);
-            this.localGrounded = false;
+            if (!isPodPull) {
+              this.localGrounded = false;
+            }
             this.localTimeSinceGroundedSec = 0;
             this.backflipUsedThisJump = false;
-            this.lastSyncedPos.set(ev.to.x, ev.to.y, ev.to.z);
+            const finalTarget = isPodPull ? ev.from : ev.to;
+            this.lastSyncedPos.set(finalTarget.x, finalTarget.y, finalTarget.z);
           }
           break;
         }
@@ -1878,7 +1972,10 @@ class CritterSiegeApp {
 
   private handleDronePing(point: Vec3): void {
     this.dronePing = { x: point.x, y: point.y, z: point.z };
-    this.vfx.setDronePing(this.dronePing);
+    this.vfx.setDronePing(
+      this.dronePing,
+      this.selectedGadget === "seeker_firefly",
+    );
     this.audio.playUiClick();
     this.hud.showToast("Drone target ping locked for Seeker Firefly!", "success");
   }
@@ -2017,48 +2114,71 @@ class CritterSiegeApp {
       this.audio.playChargeTick(moveInput.chargePower);
     }
 
-    // Turn countdown audio ticks on local active turn
-    if (canMove) {
-      const secCeil = Math.ceil(state.phaseTimeRemainingSec);
-      if (secCeil >= 1 && secCeil <= 4 && secCeil !== this.lastCountdownSec) {
-        this.lastCountdownSec = secCeil;
-        this.audio.playTurnTick(secCeil <= 2);
-      } else if (secCeil > 4) {
-        this.lastCountdownSec = -1;
-      }
+    // Turn & retreat countdown audio cues on local active turn
+    const countdown = evaluateCountdownCue(
+      state.phase,
+      canMove,
+      state.phaseTimeRemainingSec,
+      this.lastCountdownKey,
+    );
+    this.lastCountdownKey = countdown.nextKey;
+    switch (countdown.cue) {
+      case "active_tick":
+        this.audio.playTurnTick(false);
+        break;
+      case "active_tick_urgent":
+        this.audio.playTurnTick(true);
+        break;
+      case "retreat_beep":
+        this.audio.playRetreatBeep(false);
+        break;
+      case "retreat_beep_urgent":
+        this.audio.playRetreatBeep(true);
+        break;
+      default:
+        break;
     }
 
     // Update Shot Cam projectile flight animation
     const shotPos = this.advanceShotPlayback(dtSec, state);
 
-    // Advance smooth 0.42s Vine Grapple reel-up / cliff-rappel glides along live taut 3D ropes
+    // Sync Seeker Firefly GPS target-lock crosshair mode vs standard Drone Recon ring
+    const seekerLocked =
+      (this.selectedGadget === "seeker_firefly" && this.dronePing !== null) ||
+      this.shotPlayback?.gadgetId === "seeker_firefly";
+    const pingTargetPos =
+      this.shotPlayback?.gadgetId === "seeker_firefly"
+        ? (this.shotPlayback.seekerTargetPos ?? this.dronePing)
+        : this.dronePing;
+    this.vfx.setDronePing(pingTargetPos, seekerLocked);
+
+    // Advance two-stage Vine Grapple animations (0.20s hook launch -> latch spark+clink -> 0.55s pull/retract)
     const activeGlidePositions = new Map<string, Vec3>();
     if (this.grappleGlides.size > 0) {
       const completedGlides: string[] = [];
       for (const [id, glide] of this.grappleGlides.entries()) {
-        glide.elapsedSec += dtSec;
-        const rawT = Math.min(1, glide.elapsedSec / Math.max(0.05, glide.durationSec));
-        const u = rawT * rawT * (3 - 2 * rawT);
-        const dist = Math.hypot(
-          glide.to.x - glide.from.x,
-          glide.to.y - glide.from.y,
-          glide.to.z - glide.from.z,
-        );
-        const arcLift = Math.sin(rawT * Math.PI) * Math.min(1.1, dist * 0.08);
-        const curPos: Vec3 = {
-          x: glide.from.x + (glide.to.x - glide.from.x) * u,
-          y: glide.from.y + (glide.to.y - glide.from.y) * u + arcLift,
-          z: glide.from.z + (glide.to.z - glide.from.z) * u,
-        };
-        activeGlidePositions.set(id, curPos);
-        if (id === localId) {
-          this.localPos.set(curPos.x, curPos.y, curPos.z);
+        const frame = stepGrappleAnim(glide, dtSec);
+        if (frame.justLatched) {
+          this.vfx.spawnGrappleLatchSpark(glide.to);
+          this.audio.playGrappleLatch();
         }
-        if (rawT >= 1) {
+        activeGlidePositions.set(id, frame.critterPos);
+        if (id === localId) {
+          this.localPos.set(
+            frame.critterPos.x,
+            frame.critterPos.y,
+            frame.critterPos.z,
+          );
+        }
+        if (frame.phase === "done") {
           completedGlides.push(id);
           this.vfx.setGrappleTether(id, null);
           if (id === localId) {
-            this.localPos.set(glide.to.x, glide.to.y, glide.to.z);
+            this.localPos.set(
+              frame.critterPos.x,
+              frame.critterPos.y,
+              frame.critterPos.z,
+            );
             this.localVel.set(0, 0, 0);
             this.localGrounded = true;
             this.localTimeSinceGroundedSec = 0;
@@ -2066,7 +2186,7 @@ class CritterSiegeApp {
             this.lastSyncedPos.copy(this.localPos);
           }
         } else {
-          this.vfx.setGrappleTether(id, curPos, glide.to);
+          this.vfx.setGrappleTether(id, frame.tetherFrom, frame.tetherTo);
         }
       }
       for (const id of completedGlides) {
@@ -2130,9 +2250,14 @@ class CritterSiegeApp {
     this.updateAdaptiveMusicMood(moveInput.charging, moveInput.chargePower);
 
     const effectiveCamMode = this.cameraRig.getMode();
+    const effectiveIsDroneMode =
+      effectiveCamMode === "drone_recon" ||
+      effectiveCamMode === "spectator_drone";
     const trackedCritterId = focusCritter?.id ?? localId;
 
     // Update all critter rigs + airborne ground contact shadow discs
+    const livePositions = new Map<string, Vec3>();
+    const droneBeacons: DroneBeaconInput[] = [];
     for (const c of state.critters) {
       const rig = this.critterRigs.get(c.id);
       if (!rig) continue;
@@ -2143,10 +2268,14 @@ class CritterSiegeApp {
       let vy = 0;
 
       if (glidePos) {
+        const prevX = rig.root.position.x;
         const prevY = rig.root.position.y;
+        const prevZ = rig.root.position.z;
         rig.root.position.set(glidePos.x, glidePos.y, glidePos.z);
         rig.root.rotation.y = isLocalControlled ? moveInput.yaw : c.yaw;
-        moving = true;
+        moving =
+          Math.hypot(glidePos.x - prevX, glidePos.z - prevZ) > 0.005 ||
+          Math.abs(glidePos.y - prevY) > 0.005;
         vy = (glidePos.y - prevY) / Math.max(0.016, dtSec);
       } else if (isLocalControlled) {
         rig.root.position.copy(this.localPos);
@@ -2166,6 +2295,22 @@ class CritterSiegeApp {
         rig.root.position.y += dy * lerpAlpha;
         rig.root.position.z += dz * lerpAlpha;
         rig.root.rotation.y = c.yaw;
+      }
+
+      if (c.alive) {
+        const livePos: Vec3 = {
+          x: rig.root.position.x,
+          y: rig.root.position.y,
+          z: rig.root.position.z,
+        };
+        livePositions.set(c.id, livePos);
+        droneBeacons.push({
+          id: c.id,
+          position: livePos,
+          color: c.color,
+          isLocal: localId !== null && c.id === localId,
+          isActiveTurn: c.id === state.activePlayerId,
+        });
       }
 
       rig.setHp(c.hp, c.maxHp, c.alive);
@@ -2198,15 +2343,38 @@ class CritterSiegeApp {
       );
     }
 
-    // Update live 3D Trajectory Preview (+ Last-Shot Ghost Aim Marker) during local aiming
+    // Sync 3D Drone View light pillars + project 2D floating callout markers
+    this.vfx.syncDronePlayerBeacons(
+      droneBeacons,
+      effectiveIsDroneMode,
+      this.elapsedSec,
+    );
+    const droneMarkers = effectiveIsDroneMode
+      ? projectDroneMarkers(
+          state.critters,
+          localId,
+          state.activePlayerId,
+          this.cameraRig.camera,
+          window.innerWidth,
+          window.innerHeight,
+          livePositions,
+        )
+      : undefined;
+
+    // Update live 3D Trajectory Preview (ballistic arc, Gale Scatter cone, Vine Grapple latch, + Last-Shot Ghost)
     const gadgetDef = GADGET_CATALOG[this.selectedGadget];
+    const grappleCharges = localCritter?.gadgetCharges.vine_grapple ?? 0;
+    const showGrapplePreview =
+      this.selectedGadget === "vine_grapple" &&
+      localCritter !== null &&
+      !localCritter.grappleUsedThisTurn &&
+      (grappleCharges === null || grappleCharges > 0);
     const showArc =
       canFire &&
       localCritter !== null &&
-      this.cameraRig.getMode() !== "drone_recon" &&
-      this.cameraRig.getMode() !== "shot_cam" &&
-      gadgetDef.turnEnding &&
-      this.selectedGadget !== "quake_club";
+      effectiveCamMode !== "drone_recon" &&
+      effectiveCamMode !== "shot_cam" &&
+      (gadgetDef.turnEnding || showGrapplePreview);
 
     if (showArc && localCritter) {
       const stats = computeCritterStats(localCritter.species, localCritter.equipped);
@@ -2216,18 +2384,25 @@ class CritterSiegeApp {
         y: this.localPos.y + 0.6,
         z: this.localPos.z,
       };
-      const ghostParams = this.lastLocalShotAim
-        ? {
-            gadgetId: this.lastLocalShotAim.gadgetId,
-            origin: aimOrigin,
-            direction: computeAimDirection(
-              this.lastLocalShotAim.yaw,
-              this.lastLocalShotAim.pitch,
-            ),
-            power: this.lastLocalShotAim.power,
-            ...(this.dronePing ? { droneTarget: this.dronePing } : {}),
-          }
-        : null;
+      const showGhost =
+        this.lastLocalShotAim !== null &&
+        this.selectedGadget !== "quake_club" &&
+        this.selectedGadget !== "vine_grapple";
+      const ghostParams =
+        showGhost && this.lastLocalShotAim
+          ? {
+              gadgetId: this.lastLocalShotAim.gadgetId,
+              origin: aimOrigin,
+              direction: computeAimDirection(
+                this.lastLocalShotAim.yaw,
+                this.lastLocalShotAim.pitch,
+              ),
+              power: this.lastLocalShotAim.power,
+              ...(this.dronePing ? { droneTarget: this.dronePing } : {}),
+            }
+          : null;
+      const baseGrappleReach = state.mapScale === "grand" ? 26.0 : 18.0;
+      const grappleReach = baseGrappleReach * stats.grappleReachBonus;
       this.trajectoryPreview.update(
         this.activeWorld,
         {
@@ -2236,6 +2411,9 @@ class CritterSiegeApp {
           direction: aimDir,
           power: moveInput.charging ? moveInput.chargePower : 0.58,
           ...(this.dronePing ? { droneTarget: this.dronePing } : {}),
+          grappleReach,
+          waterLevel: state.waterLevel,
+          evoPods: state.evoPods,
         },
         state.wind,
         stats.extendedTrajectory,
@@ -2277,7 +2455,7 @@ class CritterSiegeApp {
     this.hud.updateGameHud({
       matchState: state,
       localPlayerId: localId,
-      cameraMode: this.cameraRig.getMode(),
+      cameraMode: effectiveCamMode,
       selectedGadget: this.selectedGadget,
       charging: moveInput.charging,
       chargePower: moveInput.chargePower,
@@ -2293,6 +2471,7 @@ class CritterSiegeApp {
       localMoveStamina: isMyTurn
         ? this.localMoveStamina
         : localCritter?.moveStamina,
+      ...(droneMarkers ? { droneMarkers } : {}),
     });
   }
 
@@ -2348,11 +2527,108 @@ class CritterSiegeApp {
       z: p0.z + (p1.z - p0.z) * frac,
     };
 
-    const inFlight = pb.elapsedSec < pb.durationSec;
-    this.vfx.setProjectileVisual(
-      inFlight ? currentPos : null,
-      GADGET_COLORS[pb.gadgetId],
+    const dir = normalizeVec3(
+      {
+        x: p1.x - p0.x,
+        y: p1.y - p0.y,
+        z: p1.z - p0.z,
+      },
+      pb.aimDir,
     );
+
+    const inFlight = pb.elapsedSec < pb.durationSec;
+
+    // Progressive 6-slice Burrow Bore capsule carving strictly inside the authoritative capsuleOp envelope
+    let boring = false;
+    if (
+      pb.gadgetId === "burrow_bore" &&
+      pb.boreCapsule &&
+      inFlight &&
+      pb.elapsedSec >= pb.boreCapsule.startSec
+    ) {
+      boring = true;
+      const cap = pb.boreCapsule;
+      const boreSpan = Math.max(0.05, pb.durationSec - cap.startSec);
+      const boreT = Math.max(
+        0,
+        Math.min(1, (pb.elapsedSec - cap.startSec) / boreSpan),
+      );
+      const targetSlice = Math.min(6, Math.floor(boreT * 6) + 1);
+      if (targetSlice > cap.slicedCount) {
+        const boreDir = normalizeVec3(
+          {
+            x: cap.end.x - cap.center.x,
+            y: cap.end.y - cap.center.y,
+            z: cap.end.z - cap.center.z,
+          },
+          dir,
+        );
+        const dirty = new Set<string>();
+        let lastSliceEnd: Vec3 = cap.center;
+        for (let s = cap.slicedCount; s < targetSlice; s++) {
+          const f0 = s / 6;
+          const f1 = (s + 1) / 6;
+          const sliceStart: Vec3 = {
+            x: cap.center.x + (cap.end.x - cap.center.x) * f0,
+            y: cap.center.y + (cap.end.y - cap.center.y) * f0,
+            z: cap.center.z + (cap.end.z - cap.center.z) * f0,
+          };
+          const sliceEnd: Vec3 = {
+            x: cap.center.x + (cap.end.x - cap.center.x) * f1,
+            y: cap.center.y + (cap.end.y - cap.center.y) * f1,
+            z: cap.center.z + (cap.end.z - cap.center.z) * f1,
+          };
+          lastSliceEnd = sliceEnd;
+          for (const key of this.activeWorld.applyCarve({
+            shape: "capsule",
+            center: sliceStart,
+            end: sliceEnd,
+            radius: cap.radius,
+          })) {
+            dirty.add(key);
+          }
+        }
+        cap.slicedCount = targetSlice;
+        if (dirty.size > 0) {
+          const dirtyList = Array.from(dirty);
+          this.terrainRenderer.rebuildChunks(this.activeWorld, dirtyList);
+          this.environmentProps.pruneAfterCarve(
+            this.activeWorld,
+            state.waterLevel,
+          );
+          if (dirtyList.some((key) => key.includes(",0,"))) {
+            this.worldScene.updateShorelineFromWorld(
+              this.activeWorld,
+              state.waterLevel,
+            );
+            this.lastShorelineWaterLevel = state.waterLevel;
+          }
+        }
+        this.vfx.spawnBoreDebris(lastSliceEnd, boreDir);
+        this.cameraRig.triggerShake(0.18, 0.14);
+        const nowMs = performance.now();
+        if (nowMs - cap.lastGrindMs >= 70) {
+          cap.lastGrindMs = nowMs;
+          this.audio.playDrillGrindTick();
+        }
+      }
+    }
+
+    if (pb.gadgetId === "quake_club") {
+      this.vfx.setProjectileVisual(null);
+    } else {
+      this.vfx.setProjectileVisual(
+        inFlight ? currentPos : null,
+        GADGET_COLORS[pb.gadgetId],
+        {
+          gadgetId: pb.gadgetId,
+          direction: dir,
+          boring,
+          targetPos: pb.seekerTargetPos ?? null,
+          dtSec,
+        },
+      );
+    }
 
     const emitHitPopups = (): void => {
       if (pb.hitsPopupsDone || !pb.hits || pb.hits.length === 0) {
@@ -2398,6 +2674,12 @@ class CritterSiegeApp {
         return;
       }
       this.flushPendingCarves(state);
+      if (pb.gadgetId === "quake_club") {
+        // Gale Scatter uses its directional wind-shotgun blast rather than a generic round explosion sphere
+        this.cameraRig.triggerShake(0.18, 0.16);
+        emitHitPopups();
+        return;
+      }
       const blastRadius =
         imp.carveOp?.radius ?? Math.max(1.2, imp.damageRadius * 0.65);
       this.vfx.spawnExplosion(imp.position, blastRadius, Boolean(imp.isPull));
@@ -2445,7 +2727,7 @@ class CritterSiegeApp {
       return null;
     }
 
-    return currentPos;
+    return pb.gadgetId === "quake_club" ? null : currentPos;
   }
 
   private stepLocalCritterMovement(
