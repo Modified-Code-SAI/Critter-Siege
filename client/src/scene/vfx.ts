@@ -17,6 +17,14 @@ export interface ProjectileVisualOptions {
   readonly dtSec?: number;
 }
 
+export interface DroneBeaconInput {
+  readonly id: string;
+  readonly position: Vec3;
+  readonly color: string;
+  readonly isLocal: boolean;
+  readonly isActiveTurn: boolean;
+}
+
 const WORLD_SPAN_X = SDF_DIMS.nx * SDF_DIMS.voxelSize;
 const WORLD_SPAN_Y = SDF_DIMS.ny * SDF_DIMS.voxelSize;
 const WORLD_SPAN_Z = SDF_DIMS.nz * SDF_DIMS.voxelSize;
@@ -33,6 +41,9 @@ const UP_Y = new THREE.Vector3(0, 1, 0);
 const GALE_SCATTER_CONE_TAN = Math.tan(Math.acos(GALE_SCATTER_CONE_MIN_DOT));
 const GPS_LOCK_CYAN = new THREE.Color(0x38f5ff);
 const GPS_LOCK_CRIMSON = new THREE.Color(0xff3b5c);
+const DRONE_BEACON_GOLD_HEX = 0xfacc15;
+const DRONE_BEACON_PILLAR_HEIGHT = 18;
+const DRONE_BEACON_BASE_Y_OFFSET = 0.15;
 
 const ROCK_SHARD_PALETTE: readonly number[] = [
   0xb96c43,
@@ -115,6 +126,14 @@ interface WindRibbon {
   material: THREE.MeshBasicMaterial;
   speedFactor: number;
   phase: number;
+}
+
+interface DroneBeaconVisual {
+  group: THREE.Group;
+  pillar: THREE.Mesh;
+  pillarMat: THREE.MeshBasicMaterial;
+  ring: THREE.Mesh;
+  ringMat: THREE.MeshBasicMaterial;
 }
 
 function clamp01(v: number): number {
@@ -454,6 +473,8 @@ export class VfxSystem {
     hookShankRing: THREE.TorusGeometry;
     hookProngCurve: THREE.TubeGeometry;
     hookProngTip: THREE.ConeGeometry;
+    droneBeaconPillar: THREE.CylinderGeometry;
+    droneBeaconRing: THREE.TorusGeometry;
   };
 
   private readonly dodecaShardPool: InstancedParticlePool;
@@ -509,6 +530,8 @@ export class VfxSystem {
   private readonly droneLockInnerRing: THREE.Mesh;
   private readonly droneLockInnerMat: THREE.MeshBasicMaterial;
   private droneLockMode = false;
+  private readonly droneBeaconGroup: THREE.Group;
+  private readonly droneBeacons = new Map<string, DroneBeaconVisual>();
 
   private pseudoSeed = 1337;
   private worldSpanX = WORLD_SPAN_X;
@@ -565,6 +588,15 @@ export class VfxSystem {
       hookShankRing: new THREE.TorusGeometry(0.082, 0.022, 6, 14),
       hookProngCurve: new THREE.TubeGeometry(hookCurve, 12, 0.024, 6, false),
       hookProngTip: new THREE.ConeGeometry(0.032, 0.13, 8),
+      droneBeaconPillar: new THREE.CylinderGeometry(
+        0.18,
+        0.72,
+        DRONE_BEACON_PILLAR_HEIGHT,
+        12,
+        1,
+        true,
+      ),
+      droneBeaconRing: new THREE.TorusGeometry(1.15, 0.08, 8, 28),
     };
 
     // Pooled InstancedMesh rock chips, additive sparks, and glossy water droplets (zero per-blast churn)
@@ -851,6 +883,12 @@ export class VfxSystem {
       this.droneLockReticleGroup,
     );
     this.group.add(this.dronePingGroup);
+
+    // Tall vertical 3D player beacons shown only while Tactical Drone View is active
+    this.droneBeaconGroup = new THREE.Group();
+    this.droneBeaconGroup.name = "vfx_drone_player_beacons";
+    this.droneBeaconGroup.visible = false;
+    this.group.add(this.droneBeaconGroup);
   }
 
   /**
@@ -2311,6 +2349,126 @@ export class VfxSystem {
     this.droneInnerRing.visible = !this.droneLockMode;
   }
 
+  /**
+   * Synchronize vertical 3D player light pillars and pulsing ground rings for Drone View.
+   * Local player receives an unmistakable radiant gold pillar and wider 1.35x ring; rivals
+   * and allies are color-coded with subtle pulse emphasis on the active turn holder.
+   */
+  public syncDronePlayerBeacons(
+    beacons: readonly DroneBeaconInput[],
+    visible: boolean,
+    elapsedSec: number,
+  ): void {
+    this.droneBeaconGroup.visible = visible;
+    if (!visible) {
+      return;
+    }
+
+    const t = Number.isFinite(elapsedSec) ? elapsedSec : 0;
+    const seen = new Set<string>();
+
+    for (let i = 0; i < beacons.length; i++) {
+      const beacon = beacons[i];
+      if (
+        !beacon ||
+        !Number.isFinite(beacon.position.x) ||
+        !Number.isFinite(beacon.position.y) ||
+        !Number.isFinite(beacon.position.z)
+      ) {
+        continue;
+      }
+
+      seen.add(beacon.id);
+      let visual = this.droneBeacons.get(beacon.id);
+      if (!visual) {
+        const rig = new THREE.Group();
+        rig.name = `drone_beacon_${beacon.id}`;
+
+        const pillarMat = new THREE.MeshBasicMaterial({
+          color: 0xffffff,
+          transparent: true,
+          opacity: 0.32,
+          blending: THREE.AdditiveBlending,
+          depthWrite: false,
+          side: THREE.DoubleSide,
+        });
+        const pillar = new THREE.Mesh(
+          this.sharedGeos.droneBeaconPillar,
+          pillarMat,
+        );
+        pillar.name = "drone_beacon_pillar";
+        pillar.position.y =
+          DRONE_BEACON_BASE_Y_OFFSET + DRONE_BEACON_PILLAR_HEIGHT * 0.5;
+        pillar.frustumCulled = false;
+
+        const ringMat = new THREE.MeshBasicMaterial({
+          color: 0xffffff,
+          transparent: true,
+          opacity: 0.85,
+          blending: THREE.AdditiveBlending,
+          depthWrite: false,
+        });
+        const ring = new THREE.Mesh(this.sharedGeos.droneBeaconRing, ringMat);
+        ring.name = "drone_beacon_ring";
+        ring.rotation.x = Math.PI * 0.5;
+        ring.position.y = DRONE_BEACON_BASE_Y_OFFSET + 0.06;
+        ring.frustumCulled = false;
+
+        rig.add(pillar, ring);
+        this.droneBeaconGroup.add(rig);
+        visual = { group: rig, pillar, pillarMat, ring, ringMat };
+        this.droneBeacons.set(beacon.id, visual);
+      }
+
+      visual.group.position.set(
+        beacon.position.x,
+        beacon.position.y,
+        beacon.position.z,
+      );
+
+      if (beacon.isLocal) {
+        visual.pillarMat.color.setHex(DRONE_BEACON_GOLD_HEX);
+        visual.ringMat.color.setHex(DRONE_BEACON_GOLD_HEX);
+      } else {
+        visual.pillarMat.color.set(beacon.color);
+        visual.ringMat.color.set(beacon.color);
+      }
+
+      const wave = Math.sin(t * (beacon.isActiveTurn ? 5.6 : 3.2));
+      const pulse = 0.5 + 0.5 * wave;
+
+      if (beacon.isLocal) {
+        const ringScale = 1.35 * (1.0 + wave * 0.08);
+        visual.ring.scale.set(ringScale, ringScale, 1);
+        visual.pillar.scale.set(1.12, 1, 1.12);
+        visual.pillarMat.opacity = 0.42 + pulse * 0.14;
+        visual.ringMat.opacity = 0.88 + pulse * 0.12;
+      } else {
+        const baseRingScale = beacon.isActiveTurn ? 1.12 : 1.0;
+        const ringScale =
+          baseRingScale * (1.0 + wave * (beacon.isActiveTurn ? 0.1 : 0.05));
+        visual.ring.scale.set(ringScale, ringScale, 1);
+        const pillarWidth = beacon.isActiveTurn ? 1.04 : 0.94;
+        visual.pillar.scale.set(pillarWidth, 1, pillarWidth);
+        visual.pillarMat.opacity = beacon.isActiveTurn
+          ? 0.34 + pulse * 0.14
+          : 0.24 + pulse * 0.08;
+        visual.ringMat.opacity = beacon.isActiveTurn
+          ? 0.8 + pulse * 0.16
+          : 0.65 + pulse * 0.12;
+      }
+    }
+
+    for (const [id, visual] of this.droneBeacons.entries()) {
+      if (!seen.has(id)) {
+        this.droneBeaconGroup.remove(visual.group);
+        visual.pillarMat.dispose();
+        visual.ringMat.dispose();
+        this.droneBeacons.delete(id);
+      }
+    }
+  }
+
   /** Advance active VFX particle lifetimes, pooled shards/sprites, sunlit pollen drift, and cleanup. */
   public update(dtSec: number, elapsedSec: number): void {
     const safeDt = Number.isFinite(dtSec) ? Math.max(0, Math.min(dtSec, 0.1)) : 0;
@@ -2500,6 +2658,14 @@ export class VfxSystem {
     disposeObjectTree(this.gpsLockBeam);
     disposeObjectTree(this.dronePingGroup);
 
+    for (const visual of this.droneBeacons.values()) {
+      this.droneBeaconGroup.remove(visual.group);
+      visual.pillarMat.dispose();
+      visual.ringMat.dispose();
+    }
+    this.droneBeacons.clear();
+    this.group.remove(this.droneBeaconGroup);
+
     for (const mat of this.shardPaletteMaterials) {
       mat.dispose();
     }
@@ -2516,6 +2682,8 @@ export class VfxSystem {
     this.sharedGeos.hookShankRing.dispose();
     this.sharedGeos.hookProngCurve.dispose();
     this.sharedGeos.hookProngTip.dispose();
+    this.sharedGeos.droneBeaconPillar.dispose();
+    this.sharedGeos.droneBeaconRing.dispose();
 
     this.glowTexture.dispose();
     this.smokeTexture.dispose();

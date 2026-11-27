@@ -1445,6 +1445,168 @@
         letter-spacing: 0.08em;
       }
 
+      .cs-drone-markers {
+        position: absolute;
+        inset: 0;
+        overflow: hidden;
+        pointer-events: none;
+      }
+
+      .cs-drone-marker {
+        position: absolute;
+        top: 0;
+        left: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 3px;
+        pointer-events: none;
+        will-change: transform;
+        z-index: 2;
+      }
+
+      .cs-drone-marker.cs-dm-local {
+        z-index: 4;
+      }
+
+      .cs-drone-marker.cs-dm-active {
+        z-index: 3;
+      }
+
+      .cs-dm-pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 5px 10px;
+        border-radius: 999px;
+        background: rgba(9, 19, 34, 0.82);
+        border: 1.5px solid var(--dm-color, var(--cyan));
+        box-shadow: 0 0 14px color-mix(in srgb, var(--dm-color, #4df4ff) 36%, transparent),
+          0 6px 16px rgba(4, 10, 22, 0.48);
+        backdrop-filter: blur(10px) saturate(1.2);
+        -webkit-backdrop-filter: blur(10px) saturate(1.2);
+        color: #f8fafc;
+        font-size: 11.5px;
+        font-weight: 800;
+        white-space: nowrap;
+        line-height: 1.2;
+      }
+
+      .cs-dm-local .cs-dm-pill {
+        background: linear-gradient(
+          135deg,
+          rgba(42, 30, 6, 0.9),
+          rgba(22, 18, 8, 0.88)
+        );
+        border: 2px solid #facc15;
+        box-shadow: 0 0 20px rgba(250, 204, 21, 0.55),
+          0 8px 20px rgba(4, 10, 22, 0.55);
+      }
+
+      .cs-dm-active .cs-dm-pill {
+        box-shadow: 0 0 18px color-mix(in srgb, var(--dm-color, #4df4ff) 62%, transparent),
+          0 6px 18px rgba(4, 10, 22, 0.55);
+      }
+
+      .cs-dm-offscreen .cs-dm-pill {
+        border-style: dashed;
+        padding: 4px 9px;
+      }
+
+      .cs-dm-star {
+        color: #fde047;
+        font-weight: 900;
+        letter-spacing: 0.03em;
+        text-shadow: 0 0 10px rgba(250, 204, 21, 0.45);
+      }
+
+      .cs-dm-dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: var(--dm-color, var(--cyan));
+        box-shadow: 0 0 8px var(--dm-color, var(--cyan));
+        flex-shrink: 0;
+      }
+
+      .cs-dm-name {
+        color: #ffffff;
+        font-weight: 900;
+      }
+
+      .cs-dm-team {
+        font-size: 9.5px;
+        font-weight: 900;
+        letter-spacing: 0.06em;
+        padding: 1px 6px;
+        border-radius: 999px;
+        background: rgba(77, 244, 255, 0.2);
+        border: 1px solid rgba(77, 244, 255, 0.42);
+        color: #cffafe;
+      }
+
+      .cs-dm-turn-dot {
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: #34d399;
+        box-shadow: 0 0 9px #34d399;
+        flex-shrink: 0;
+        animation: csDroneTurnPulse 1s ease-in-out infinite;
+      }
+
+      @keyframes csDroneTurnPulse {
+        0%, 100% {
+          transform: scale(0.9);
+          opacity: 0.78;
+        }
+        50% {
+          transform: scale(1.28);
+          opacity: 1;
+        }
+      }
+
+      .cs-dm-hp,
+      .cs-dm-meta {
+        font-size: 10.5px;
+        font-weight: 700;
+        color: var(--text-dim);
+        font-variant-numeric: tabular-nums;
+      }
+
+      .cs-dm-local .cs-dm-hp {
+        color: #fef08a;
+        font-weight: 800;
+      }
+
+      .cs-dm-dist {
+        font-size: 10.5px;
+        font-weight: 900;
+        padding: 1px 6px;
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.14);
+        color: #ffffff;
+        font-variant-numeric: tabular-nums;
+      }
+
+      .cs-dm-pin {
+        width: 0;
+        height: 0;
+        border-left: 6px solid transparent;
+        border-right: 6px solid transparent;
+        border-top: 7px solid var(--dm-color, var(--cyan));
+        filter: drop-shadow(0 2px 4px rgba(4, 10, 22, 0.7));
+      }
+
+      .cs-dm-arrow {
+        font-size: 13px;
+        line-height: 1;
+        color: var(--dm-color, var(--cyan));
+        transform: rotate(var(--dm-angle, 0deg));
+        text-shadow: 0 0 8px rgba(4, 10, 22, 0.9),
+          0 0 10px var(--dm-color, var(--cyan));
+      }
+
       /* ── Modals (Sleek Visual Mutation Draft & Match Over) ────────────── */
       .cs-modal-backdrop {
         position: fixed;

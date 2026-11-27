@@ -23,6 +23,7 @@ import {
   type ThemeId,
 } from "@critter/shared";
 import type { CameraMode } from "../game/cameraRig.js";
+import type { DronePlayerMarkerData } from "../game/droneProjection.js";
 import type { LobbyViewState } from "../net/gameClient.js";
 import {
   COSMETIC_ACCENT_CATALOG,
@@ -131,6 +132,7 @@ export interface HudFrameState {
   pointerLocked?: boolean;
   canFire?: boolean;
   localMoveStamina?: number;
+  droneMarkers?: readonly DronePlayerMarkerData[];
 }
 
 /** Local lobby selection state managed between HudController and main.ts. */
@@ -420,6 +422,8 @@ export class HudController {
 
   private readonly droneBadgeEl: HTMLDivElement;
   private readonly droneCompassEl: HTMLDivElement;
+  private readonly droneMarkersEl: HTMLDivElement;
+  private readonly droneMarkerEls = new Map<string, HTMLDivElement>();
 
   private toastTimer: ReturnType<typeof setTimeout> | null = null;
   private bannerTimer: ReturnType<typeof setTimeout> | null = null;
@@ -856,6 +860,7 @@ export class HudController {
     this.droneOverlay = document.createElement("div");
     this.droneOverlay.className = "cs-drone-overlay cs-hidden";
     this.droneOverlay.innerHTML = `
+      <div class="cs-drone-markers" data-ref="drone-markers"></div>
       <div class="cs-drone-bracket cs-db-tl"></div>
       <div class="cs-drone-bracket cs-db-tr"></div>
       <div class="cs-drone-bracket cs-db-bl"></div>
@@ -864,6 +869,9 @@ export class HudController {
       <div class="cs-drone-compass cs-glass" data-ref="drone-compass">WIND CALM</div>
     `;
     this.root.appendChild(this.droneOverlay);
+    this.droneMarkersEl = this.droneOverlay.querySelector(
+      '[data-ref="drone-markers"]',
+    ) as HTMLDivElement;
     this.droneBadgeEl = this.droneOverlay.querySelector(
       '[data-ref="drone-badge"]',
     ) as HTMLDivElement;
@@ -1044,6 +1052,7 @@ export class HudController {
     this.gameLayer.classList.add("cs-hidden");
     this.visorOverlay.classList.add("cs-hidden");
     this.droneOverlay.classList.add("cs-hidden");
+    this.syncDroneMarkersDom(undefined, false);
     this.draftModal.classList.add("cs-hidden");
     this.matchOverModal.classList.add("cs-hidden");
     this.floodAlertEl.classList.add("cs-hidden");
@@ -1349,6 +1358,7 @@ export class HudController {
       const compass = getWindCompassLabel(matchState.wind.x, matchState.wind.z);
       this.droneCompassEl.textContent = `WIND ${compass} · ${windSpeed.toFixed(1)} m/s`;
     }
+    this.syncDroneMarkersDom(frame.droneMarkers, isDrone);
 
     // Live Collapsible 5-Round Standings Panel
     this.syncStandingsDom(matchState, localPlayerId);
@@ -1373,7 +1383,99 @@ export class HudController {
       clearTimeout(timer);
     }
     this.popupTimers.clear();
+    this.droneMarkerEls.clear();
     this.root.innerHTML = "";
+  }
+
+  private syncDroneMarkersDom(
+    markers: readonly DronePlayerMarkerData[] | undefined,
+    visible: boolean,
+  ): void {
+    if (!visible || !markers || markers.length === 0) {
+      if (this.droneMarkerEls.size > 0) {
+        this.droneMarkersEl.innerHTML = "";
+        this.droneMarkerEls.clear();
+      }
+      return;
+    }
+
+    const seen = new Set<string>();
+    for (let i = 0; i < markers.length; i++) {
+      const m = markers[i];
+      if (!m || !Number.isFinite(m.screenX) || !Number.isFinite(m.screenY)) {
+        continue;
+      }
+      seen.add(m.id);
+
+      let el = this.droneMarkerEls.get(m.id);
+      if (!el) {
+        el = document.createElement("div");
+        el.dataset.markerId = m.id;
+        this.droneMarkersEl.appendChild(el);
+        this.droneMarkerEls.set(m.id, el);
+      }
+
+      const accentColor = m.isLocal ? "#facc15" : m.color;
+      el.className = `cs-drone-marker${m.isLocal ? " cs-dm-local" : ""}${m.isActiveTurn ? " cs-dm-active" : ""}${m.offscreen ? " cs-dm-offscreen" : ""}`;
+      el.style.setProperty("--dm-color", accentColor);
+      el.style.transform = `translate3d(${m.screenX.toFixed(1)}px, ${m.screenY.toFixed(1)}px, 0) translate(-50%, -100%)`;
+
+      if (m.offscreen) {
+        const deg = Number.isFinite(m.edgeAngleRad)
+          ? (m.edgeAngleRad * 180) / Math.PI
+          : 0;
+        el.style.setProperty("--dm-angle", `${deg.toFixed(1)}deg`);
+      }
+
+      const hpVal = Math.max(0, Math.ceil(m.hp));
+      const sig = `${m.isLocal ? 1 : 0}|${m.isActiveTurn ? 1 : 0}|${m.offscreen ? 1 : 0}|${m.name}|${m.speciesName}|${hpVal}|${m.team ?? ""}|${m.distanceMeters ?? ""}`;
+      if (el.dataset.sig !== sig) {
+        el.dataset.sig = sig;
+        const turnDot = m.isActiveTurn
+          ? `<span class="cs-dm-turn-dot" title="Active Turn"></span>`
+          : "";
+        const indicator = m.offscreen
+          ? `<div class="cs-dm-arrow" aria-hidden="true">➤</div>`
+          : `<div class="cs-dm-pin" aria-hidden="true"></div>`;
+
+        if (m.isLocal) {
+          el.innerHTML = `
+            <div class="cs-dm-pill">
+              <span class="cs-dm-star">★ YOU · ${escapeHtml(m.name)}</span>
+              ${turnDot}
+              <span class="cs-dm-hp">${hpVal} HP</span>
+            </div>
+            ${indicator}
+          `;
+        } else {
+          const teamTag = m.team
+            ? `<span class="cs-dm-team">TEAM ${escapeHtml(m.team)}</span>`
+            : "";
+          const distTag =
+            m.distanceMeters !== null
+              ? `<span class="cs-dm-dist">${m.distanceMeters}m</span>`
+              : "";
+          el.innerHTML = `
+            <div class="cs-dm-pill">
+              <span class="cs-dm-dot"></span>
+              <span class="cs-dm-name">${escapeHtml(m.name)}</span>
+              ${teamTag}
+              ${turnDot}
+              <span class="cs-dm-meta">${escapeHtml(m.speciesName)} · ${hpVal} HP</span>
+              ${distTag}
+            </div>
+            ${indicator}
+          `;
+        }
+      }
+    }
+
+    for (const [id, el] of this.droneMarkerEls.entries()) {
+      if (!seen.has(id)) {
+        el.remove();
+        this.droneMarkerEls.delete(id);
+      }
+    }
   }
 
   private syncStandingsDom(
