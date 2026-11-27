@@ -20,7 +20,11 @@ import {
   type ThemeId,
   type Vec3,
 } from "@critter/shared";
-import { SynthAudio } from "./audio/synthAudio.js";
+import {
+  deriveMusicGameplayContext,
+  shouldPlayEvolutionStinger,
+} from "./audio/musicContextMapper.js";
+import { SynthAudio, type MusicGameplayContext } from "./audio/synthAudio.js";
 import { CameraRig, type CameraMode } from "./game/cameraRig.js";
 import { InputController } from "./game/inputController.js";
 import { TrajectoryPreview } from "./game/trajectoryPreview.js";
@@ -91,6 +95,34 @@ interface ShotHitPopup {
   damage: number;
   shieldAbsorbed: boolean;
   newPosition: Vec3;
+  knockedOut?: boolean;
+}
+
+const MUSIC_CONTEXT_FLOAT_EPSILON = 0.02;
+
+function hasMusicContextChanged(
+  prev: MusicGameplayContext | null,
+  next: MusicGameplayContext,
+): boolean {
+  if (!prev) {
+    return true;
+  }
+  return (
+    prev.mood !== next.mood ||
+    prev.theme !== next.theme ||
+    prev.round !== next.round ||
+    prev.maxRounds !== next.maxRounds ||
+    prev.isMyTurn !== next.isMyTurn ||
+    prev.isCharging !== next.isCharging ||
+    prev.isShotFlight !== next.isShotFlight ||
+    prev.isDroneView !== next.isDroneView ||
+    prev.isShowdown !== next.isShowdown ||
+    Math.abs(prev.chargePower - next.chargePower) >= MUSIC_CONTEXT_FLOAT_EPSILON ||
+    Math.abs(prev.hpRatio - next.hpRatio) >= MUSIC_CONTEXT_FLOAT_EPSILON ||
+    Math.abs(prev.windSpeed - next.windSpeed) >= MUSIC_CONTEXT_FLOAT_EPSILON ||
+    Math.abs(prev.waterLevel - next.waterLevel) >= MUSIC_CONTEXT_FLOAT_EPSILON ||
+    Math.abs(prev.floodIntensity - next.floodIntensity) >= MUSIC_CONTEXT_FLOAT_EPSILON
+  );
 }
 
 interface ShotPlayback {
@@ -422,6 +454,7 @@ class CritterSiegeApp {
   private lastShorelineWaterLevel = 1.8;
   private shadowFocusPos: Vec3 = { x: WORLD_CENTER_X, y: 8, z: WORLD_CENTER_Z };
   private musicUnlocked = false;
+  private lastMusicContext: MusicGameplayContext | null = null;
 
   private readonly onWindowResizeBound: () => void;
   private readonly onWindowKeyDownBound: (e: KeyboardEvent) => void;
@@ -752,7 +785,6 @@ class CritterSiegeApp {
         this.gameClient.sendBuyAbility(gadgetId, replaceGadgetId);
       },
       onPickMutation: (mutationId, replaceSlot) => {
-        this.audio.playMutationChime();
         this.gameClient.sendPickMutation(mutationId, replaceSlot);
       },
       onRerollDraft: () => {
@@ -880,6 +912,7 @@ class CritterSiegeApp {
       window.removeEventListener("pointerdown", this.onUserGestureUnlockBound);
       window.removeEventListener("keydown", this.onUserGestureUnlockBound);
       this.audio.unlockAndStartMusic();
+      this.lastMusicContext = null;
       this.updateAdaptiveMusicMood();
     };
 
@@ -1276,6 +1309,7 @@ class CritterSiegeApp {
               damage: h.damage,
               shieldAbsorbed: h.shieldAbsorbed,
               newPosition: { ...h.newPosition },
+              knockedOut: h.knockedOut,
             })),
             hitsPopupsDone: false,
             hitStopSec: 0,
@@ -1445,7 +1479,9 @@ class CritterSiegeApp {
           break;
         }
         case "MUTATION_EQUIPPED": {
-          this.audio.playMutationChime();
+          if (shouldPlayEvolutionStinger(ev.playerId, localId)) {
+            this.audio.playStinger("evolution", ev.apex !== null);
+          }
           break;
         }
         case "COINS_EARNED": {
@@ -1556,6 +1592,7 @@ class CritterSiegeApp {
             z: ev.position.z,
           });
           this.audio.playSplash();
+          this.audio.playStinger("ko");
           this.spawnWorldPopup(
             { x: ev.position.x, y: ev.waterLevel + 1.4, z: ev.position.z },
             "ENGULFED!",
@@ -1944,8 +1981,6 @@ class CritterSiegeApp {
     const state = this.matchState;
     if (!state) return;
 
-    this.updateAdaptiveMusicMood();
-
     const localId = this.gameClient.getPlayerId();
     const localCritter =
       state.critters.find((c) => c.id === localId) ?? state.critters[0] ?? null;
@@ -2091,6 +2126,8 @@ class CritterSiegeApp {
       dtSec,
       waterLevel: state.waterLevel,
     });
+
+    this.updateAdaptiveMusicMood(moveInput.charging, moveInput.chargePower);
 
     const effectiveCamMode = this.cameraRig.getMode();
     const trackedCritterId = focusCritter?.id ?? localId;
@@ -2259,46 +2296,26 @@ class CritterSiegeApp {
     });
   }
 
-  private updateAdaptiveMusicMood(): void {
-    const state = this.matchState;
-    if (!this.inMatch || !state) {
-      this.audio.setMusicMood("lobby");
+  private updateAdaptiveMusicMood(
+    isCharging = false,
+    chargePower = 0,
+  ): void {
+    const ctx = deriveMusicGameplayContext({
+      inMatch: this.inMatch,
+      matchState: this.matchState,
+      lobbyTheme: this.previewTheme,
+      localPlayerId: this.gameClient.getPlayerId(),
+      armoryOpen: this.hud.isArmoryOpen(),
+      isCharging,
+      chargePower,
+      isShotFlight: this.shotPlayback !== null,
+      cameraMode: this.cameraRig.getMode(),
+    });
+    if (!hasMusicContextChanged(this.lastMusicContext, ctx)) {
       return;
     }
-    if (state.phase === "MATCH_OVER") {
-      this.audio.setMusicMood("victory");
-      return;
-    }
-    if (state.phase === "FINAL_FLOOD") {
-      this.audio.setMusicMood("flood");
-      return;
-    }
-    if (
-      this.hud.isArmoryOpen() ||
-      state.phase === "ROUND_DRAFT" ||
-      state.phase === "DRAFT_IF_READY"
-    ) {
-      this.audio.setMusicMood("shop");
-      return;
-    }
-    const localId = this.gameClient.getPlayerId();
-    const localCritter =
-      state.critters.find((c) => c.id === localId) ?? null;
-    const canMove =
-      localId !== null &&
-      state.activePlayerId === localId &&
-      Boolean(localCritter?.alive) &&
-      (state.phase === "ACTIVE" || state.phase === "RETREAT");
-    const lowHp =
-      localCritter !== null &&
-      localCritter.alive &&
-      localCritter.hp / Math.max(1, localCritter.maxHp) < 0.35;
-    const urgent =
-      state.roundTimeRemainingSec <= 60 ||
-      (canMove && state.phaseTimeRemainingSec <= 6) ||
-      lowHp ||
-      state.round >= Math.max(4, state.maxRounds - 1);
-    this.audio.setMusicMood(urgent ? "intense" : "battle");
+    this.lastMusicContext = ctx;
+    this.audio.setMusicContext(ctx);
   }
 
   private advanceShotPlayback(dtSec: number, state: MatchState): Vec3 | null {
@@ -2342,6 +2359,9 @@ class CritterSiegeApp {
         return;
       }
       pb.hitsPopupsDone = true;
+      if (pb.hits.some((h) => h.knockedOut)) {
+        this.audio.playStinger("ko");
+      }
       for (const hit of pb.hits) {
         const rig = this.critterRigs.get(hit.critterId);
         const anchor = rig
@@ -2748,6 +2768,8 @@ class CritterSiegeApp {
 
   private rebuildLobbyPreview(theme: ThemeId): void {
     this.previewTheme = theme;
+    this.audio.setMusicTheme(theme);
+    this.lastMusicContext = null;
     this.activeWorld = new SdfWorld(4242, theme, "duel");
     this.worldScene.configureForWorldSize(
       this.activeWorld.worldWidth,
