@@ -92,7 +92,7 @@ const PLUCK_TENSE = [0, 7, 10, 14, 15, 19] as const;
 const D_LYDIAN_FLUTE = [69, 71, 73, 74, 76, 78, 80, 81] as const;
 const D_DORIAN_FLUTE = [69, 71, 72, 74, 76, 77, 79, 81] as const;
 const D_AEOLIAN_FLUTE = [69, 70, 72, 74, 76, 77, 79, 81] as const;
-const D_PHRYGIAN_FLUTE = [68, 70, 72, 74, 75, 77, 79, 80] as const;
+const D_PHRYGIAN_FLUTE = [69, 70, 72, 74, 75, 77, 79, 81] as const;
 
 const A_DORIAN_FLUTE = [69, 71, 72, 74, 76, 78, 79, 81] as const;
 const A_PHRYGIAN_FLUTE = [69, 70, 72, 74, 76, 77, 79, 81] as const;
@@ -116,7 +116,7 @@ const BIOME_PALETTES: Readonly<Record<ThemeId, BiomePalette>> = {
     tonicMidi: 62,
     calmChords: [
       makeChord("Dmaj9", 38, 50, OPEN_MAJ9, 57, PLUCK_MAJ9, D_LYDIAN_FLUTE),
-      makeChord("Eadd9/D", 38, 52, OPEN_ADD9, 59, PLUCK_LYDIAN, D_LYDIAN_FLUTE),
+      makeChord("Eadd9/D", 38, 52, OPEN_ADD9, 52, PLUCK_MAJ9, D_LYDIAN_FLUTE),
       makeChord("Bm9", 47, 47, OPEN_M9, 59, PLUCK_M9, D_LYDIAN_FLUTE),
       makeChord("F#m11", 42, 42, OPEN_M11, 54, PLUCK_M9, D_LYDIAN_FLUTE),
       makeChord("Gmaj7#11", 43, 43, OPEN_MAJ7_SHARP11, 55, PLUCK_LYDIAN, D_LYDIAN_FLUTE),
@@ -234,7 +234,7 @@ const BIOME_PALETTES: Readonly<Record<ThemeId, BiomePalette>> = {
     tonicMidi: 65,
     calmChords: [
       makeChord("Fmaj9", 41, 41, OPEN_MAJ9, 53, PLUCK_MAJ9, F_LYDIAN_FLUTE),
-      makeChord("Gadd9/F", 41, 43, OPEN_ADD9, 55, PLUCK_LYDIAN, F_LYDIAN_FLUTE),
+      makeChord("Gadd9/F", 41, 43, OPEN_ADD9, 55, PLUCK_MAJ9, F_LYDIAN_FLUTE),
       makeChord("Dm11", 38, 50, OPEN_M11, 62, PLUCK_M9, F_LYDIAN_FLUTE),
       makeChord("Am9", 45, 45, OPEN_M9, 57, PLUCK_M9, F_LYDIAN_FLUTE),
       makeChord("Bbmaj7#11", 46, 46, OPEN_MAJ7_SHARP11, 58, PLUCK_LYDIAN, F_LYDIAN_FLUTE),
@@ -268,7 +268,7 @@ const BIOME_PALETTES: Readonly<Record<ThemeId, BiomePalette>> = {
     ],
     victoryChords: [
       makeChord("Fmaj9", 41, 41, OPEN_MAJ9, 53, PLUCK_MAJ9, F_LYDIAN_FLUTE),
-      makeChord("Gadd9", 43, 43, OPEN_ADD9, 55, PLUCK_LYDIAN, F_LYDIAN_FLUTE),
+      makeChord("Gadd9", 43, 43, OPEN_ADD9, 55, PLUCK_MAJ9, F_LYDIAN_FLUTE),
       makeChord("Dm9", 38, 50, OPEN_M9, 62, PLUCK_M9, F_LYDIAN_FLUTE),
       makeChord("Cadd9", 36, 48, OPEN_ADD9, 60, PLUCK_SUS2, F_LYDIAN_FLUTE),
     ],

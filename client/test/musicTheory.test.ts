@@ -110,6 +110,52 @@ describe("musicTheory", () => {
     }
   });
 
+  it("keeps calm Lydian plucks diatonic without minor-second root clashes and aligns D Phrygian flute with A7b9sus4", () => {
+    const pitchClass = (midi: number): number => ((midi % 12) + 12) % 12;
+    const isMinorSecondClash = (a: number, b: number): boolean => {
+      const diff = Math.abs(pitchClass(a) - pitchClass(b));
+      return diff === 1 || diff === 11;
+    };
+
+    // emerald_spire calmChords[1] ("Eadd9/D"): strictly D Lydian, no minor-2nd clash with D root
+    const emeraldCalm1 = getBiomePalette("emerald_spire").calmChords[1];
+    expect(emeraldCalm1).toBeDefined();
+    const dLydianPcs = new Set([2, 4, 6, 8, 9, 11, 1]);
+    if (emeraldCalm1) {
+      expect(emeraldCalm1.name).toBe("Eadd9/D");
+      for (const note of emeraldCalm1.pluckNotes) {
+        expect(dLydianPcs.has(pitchClass(note))).toBe(true);
+        expect(isMinorSecondClash(note, emeraldCalm1.rootMidi)).toBe(false);
+      }
+    }
+
+    // twin_pillars calmChords[1] ("Gadd9/F") & victoryChords[1] ("Gadd9"): strictly F Lydian, no minor-2nd clash with root
+    const twinPalette = getBiomePalette("twin_pillars");
+    const twinCalm1 = twinPalette.calmChords[1];
+    const twinVictory1 = twinPalette.victoryChords[1];
+    expect(twinCalm1).toBeDefined();
+    expect(twinVictory1).toBeDefined();
+    const fLydianPcs = new Set([5, 7, 9, 11, 0, 2, 4]);
+    for (const chord of [twinCalm1, twinVictory1]) {
+      if (chord) {
+        for (const note of chord.pluckNotes) {
+          expect(fLydianPcs.has(pitchClass(note))).toBe(true);
+          expect(isMinorSecondClash(note, chord.rootMidi)).toBe(false);
+        }
+      }
+    }
+
+    // emerald_spire intenseChords[5] ("A7b9sus4"): D Phrygian melody includes A (pc 9) and excludes Ab (pc 8)
+    const emeraldIntense5 = getBiomePalette("emerald_spire").intenseChords[5];
+    expect(emeraldIntense5).toBeDefined();
+    if (emeraldIntense5) {
+      expect(emeraldIntense5.name).toBe("A7b9sus4");
+      const scalePcs = emeraldIntense5.melodyScale.map(pitchClass);
+      expect(scalePcs).toContain(9);
+      expect(scalePcs).not.toContain(8);
+    }
+  });
+
   describe("computeStemMixTargets", () => {
     it("applies warm muffled filter and zero percussion in shop mood", () => {
       const ctx = {
