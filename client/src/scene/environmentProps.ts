@@ -12,12 +12,14 @@ const ZERO_MATRIX = new THREE.Matrix4().makeScale(0, 0, 0);
 interface InstancedBinding {
   mesh: THREE.InstancedMesh;
   index: number;
+  savedMatrix?: THREE.Matrix4;
 }
 
 interface TrackedPropAnchor {
   category: "tree" | "flora" | "boulder" | "landmark";
   pos: Vec3;
   visible: boolean;
+  aimHidden?: boolean;
   bindings: InstancedBinding[];
   landmarkGroup?: THREE.Group;
   glbKind?: PropLandmarkKind;
@@ -54,8 +56,137 @@ export interface EnvironmentPropCounts {
   activeHazards: number;
 }
 
+/** Query describing active aiming camera, critter position, and aim direction for sightline prop clearing. */
+export interface AimOcclusionQuery {
+  readonly cameraPos: Vec3;
+  readonly critterPos: Vec3;
+  readonly aimDir: Vec3;
+  readonly maxRange?: number;
+}
+
 function clamp01(v: number): number {
   return v < 0 ? 0 : v > 1 ? 1 : v;
+}
+
+function isFiniteVec3(v: Vec3): boolean {
+  return Number.isFinite(v.x) && Number.isFinite(v.y) && Number.isFinite(v.z);
+}
+
+/**
+ * Determine whether a scenery prop at `propPos` obstructs the active aiming sightline
+ * (camera-to-critter segment, immediate shoulder halo, or forward aim corridor).
+ * Ground flora always stays visible.
+ */
+export function shouldHidePropForAim(
+  propPos: Vec3,
+  category: "tree" | "flora" | "boulder" | "landmark",
+  query: AimOcclusionQuery,
+): boolean {
+  if (category === "flora") {
+    return false;
+  }
+  if (
+    !isFiniteVec3(propPos) ||
+    !isFiniteVec3(query.cameraPos) ||
+    !isFiniteVec3(query.critterPos) ||
+    !isFiniteVec3(query.aimDir)
+  ) {
+    return false;
+  }
+
+  let heightOffset: number;
+  let radius: number;
+  if (category === "tree") {
+    heightOffset = 2.4;
+    radius = 3.2;
+  } else if (category === "landmark") {
+    heightOffset = 2.6;
+    radius = 3.8;
+  } else {
+    heightOffset = 0.8;
+    radius = 2.1;
+  }
+
+  const px = propPos.x;
+  const py = propPos.y + heightOffset;
+  const pz = propPos.z;
+
+  const hx = query.critterPos.x;
+  const hy = query.critterPos.y + 0.9;
+  const hz = query.critterPos.z;
+
+  // 1. Camera-to-Critter Segment: 3D distance from P to segment [cameraPos, H] <= radius + 1.4
+  const abx = hx - query.cameraPos.x;
+  const aby = hy - query.cameraPos.y;
+  const abz = hz - query.cameraPos.z;
+  const abLenSq = abx * abx + aby * aby + abz * abz;
+  const segT =
+    abLenSq > 1e-12
+      ? clamp01(
+          ((px - query.cameraPos.x) * abx +
+            (py - query.cameraPos.y) * aby +
+            (pz - query.cameraPos.z) * abz) /
+            abLenSq,
+        )
+      : 0;
+  const segCx = query.cameraPos.x + abx * segT;
+  const segCy = query.cameraPos.y + aby * segT;
+  const segCz = query.cameraPos.z + abz * segT;
+  const segThreshold = radius + 1.4;
+  const segDx = px - segCx;
+  const segDy = py - segCy;
+  const segDz = pz - segCz;
+  if (
+    segDx * segDx + segDy * segDy + segDz * segDz <=
+    segThreshold * segThreshold
+  ) {
+    return true;
+  }
+
+  // 2. Immediate Shoulder Halo
+  const horizDist = Math.hypot(
+    px - query.critterPos.x,
+    pz - query.critterPos.z,
+  );
+  if (
+    horizDist <= radius + 2.0 &&
+    py >= query.critterPos.y - 2.5 &&
+    py <= query.critterPos.y + 6.5
+  ) {
+    return true;
+  }
+
+  // 3. Forward Aim Corridor
+  const aimLen = Math.hypot(query.aimDir.x, query.aimDir.y, query.aimDir.z);
+  if (aimLen <= 1e-6) {
+    return false;
+  }
+  const dirX = query.aimDir.x / aimLen;
+  const dirY = query.aimDir.y / aimLen;
+  const dirZ = query.aimDir.z / aimLen;
+
+  const rawRange =
+    query.maxRange !== undefined && Number.isFinite(query.maxRange)
+      ? query.maxRange
+      : 22;
+  const maxRange = rawRange < 4 ? 4 : rawRange > 48 ? 48 : rawRange;
+
+  const dx = px - hx;
+  const dy = py - hy;
+  const dz = pz - hz;
+  const t = dx * dirX + dy * dirY + dz * dirZ;
+  if (t >= -0.5 && t <= maxRange) {
+    const tClamped = t > 0 ? t : 0;
+    const rx = hx + dirX * tClamped;
+    const ry = hy + dirY * tClamped;
+    const rz = hz + dirZ * tClamped;
+    const perpDist = Math.hypot(px - rx, py - ry, pz - rz);
+    if (perpDist <= radius + 1.6 + tClamped * 0.14) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 /**
@@ -728,6 +859,7 @@ export function loadLandmarkGlbIntoGroup(
   kind: PropLandmarkKind,
   landmarkGroup: THREE.Group,
   isStillValid: () => boolean,
+  onAttached?: () => void,
 ): void {
   void loadPropModel(kind).then((clone) => {
     if (!clone) {
@@ -740,6 +872,7 @@ export function loadLandmarkGlbIntoGroup(
       return;
     }
     attachLandmarkGlb(landmarkGroup, clone);
+    onAttached?.();
   });
 }
 
@@ -1089,6 +1222,7 @@ export class EnvironmentProps {
 
       if (submerged || supportLost) {
         anchor.visible = false;
+        anchor.aimHidden = false;
         pruned += 1;
         for (const binding of anchor.bindings) {
           binding.mesh.setMatrixAt(binding.index, ZERO_MATRIX);
@@ -1108,6 +1242,63 @@ export class EnvironmentProps {
     }
 
     return pruned;
+  }
+
+  /**
+   * Temporarily hide obstructing trees, boulders, and landmarks along the active aim sightline
+   * (without affecting permanent carve visibility or prop counts) and restore them once clear.
+   */
+  public updateAimOcclusion(query: AimOcclusionQuery | null): number {
+    const dirtyMeshes = new Set<THREE.InstancedMesh>();
+    let hiddenCount = 0;
+
+    for (const anchor of this.anchors) {
+      if (!anchor.visible) {
+        continue;
+      }
+
+      const shouldHide =
+        query !== null &&
+        shouldHidePropForAim(anchor.pos, anchor.category, query);
+      const currentlyHidden = anchor.aimHidden === true;
+
+      if (shouldHide && !currentlyHidden) {
+        for (const binding of anchor.bindings) {
+          if (!binding.savedMatrix) {
+            const saved = new THREE.Matrix4();
+            binding.mesh.getMatrixAt(binding.index, saved);
+            binding.savedMatrix = saved;
+          }
+          binding.mesh.setMatrixAt(binding.index, ZERO_MATRIX);
+          dirtyMeshes.add(binding.mesh);
+        }
+        if (anchor.landmarkGroup) {
+          anchor.landmarkGroup.visible = false;
+        }
+        anchor.aimHidden = true;
+      } else if (!shouldHide && currentlyHidden) {
+        for (const binding of anchor.bindings) {
+          if (binding.savedMatrix) {
+            binding.mesh.setMatrixAt(binding.index, binding.savedMatrix);
+            dirtyMeshes.add(binding.mesh);
+          }
+        }
+        if (anchor.landmarkGroup) {
+          anchor.landmarkGroup.visible = true;
+        }
+        anchor.aimHidden = false;
+      }
+
+      if (anchor.aimHidden === true) {
+        hiddenCount += 1;
+      }
+    }
+
+    for (const mesh of dirtyMeshes) {
+      mesh.instanceMatrix.needsUpdate = true;
+    }
+
+    return hiddenCount;
   }
 
   /** Return current scenery & active hazard counts. */
@@ -1925,6 +2116,9 @@ vec2 swayXZ = ( windDir * ( 0.32 + windWave * 0.68 ) + vec2( -windDir.y, windDir
           glbKind,
           group,
           () => anchor.visible && group.parent === this.sceneryGroup,
+          () => {
+            group.visible = anchor.visible && anchor.aimHidden !== true;
+          },
         );
       }
     }

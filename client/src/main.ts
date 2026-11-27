@@ -1005,6 +1005,7 @@ class CritterSiegeApp {
     this.vfx.setDronePing(null);
     this.vfx.syncDronePlayerBeacons([], false, 0);
     this.vfx.syncPrismWalls([], 0);
+    this.environmentProps.updateAimOcclusion(null);
     this.shotPlayback = null;
     this.cameraRig.setShotCamActive(false);
     this.cameraRig.exitDroneRecon();
@@ -1047,6 +1048,7 @@ class CritterSiegeApp {
     this.vfx.setProjectileVisual(null);
     this.vfx.syncEvoPods([], 0);
     this.vfx.syncPrismWalls([], 0);
+    this.environmentProps.updateAimOcclusion(null);
     this.trajectoryPreview.update(
       this.activeWorld,
       {
@@ -2386,6 +2388,28 @@ class CritterSiegeApp {
       effectiveCamMode === "drone_recon" ||
       effectiveCamMode === "spectator_drone";
     const trackedCritterId = focusCritter?.id ?? localId;
+
+    // Dynamically hide obstructing trees/boulders/landmarks along active aiming sightline
+    if (
+      canFire &&
+      localCritter !== null &&
+      !effectiveIsDroneMode &&
+      effectiveCamMode !== "shot_cam"
+    ) {
+      const aimDir = computeAimDirection(moveInput.yaw, moveInput.pitch);
+      this.environmentProps.updateAimOcclusion({
+        cameraPos: {
+          x: this.cameraRig.camera.position.x,
+          y: this.cameraRig.camera.position.y,
+          z: this.cameraRig.camera.position.z,
+        },
+        critterPos: focusPos,
+        aimDir,
+        maxRange: 22,
+      });
+    } else {
+      this.environmentProps.updateAimOcclusion(null);
+    }
 
     // Update all critter rigs + airborne ground contact shadow discs
     const livePositions = new Map<string, Vec3>();

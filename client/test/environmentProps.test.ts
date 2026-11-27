@@ -4,6 +4,8 @@ import { SdfWorld, type HazardState } from "@critter/shared";
 import {
   EnvironmentProps,
   attachLandmarkGlb,
+  shouldHidePropForAim,
+  type AimOcclusionQuery,
 } from "../src/scene/environmentProps.js";
 import {
   computeWorldSceneMetrics,
@@ -324,5 +326,240 @@ describe("EnvironmentProps lush scenery & interactive hazard visuals", () => {
     } else {
       props.dispose();
     }
+  });
+});
+
+describe("Dynamic Aim Sightline Prop Clearing", () => {
+  const baseQuery: AimOcclusionQuery = {
+    cameraPos: { x: 0, y: 7, z: -6 },
+    critterPos: { x: 0, y: 5, z: 0 },
+    aimDir: { x: 0, y: 0, z: 1 },
+    maxRange: 22,
+  };
+
+  it("hides tree, landmark, and boulder between camera and critter, in shoulder halo, and along forward 22m aim corridor", () => {
+    // 1. Camera-to-critter segment (between z = -6 and z = 0)
+    expect(shouldHidePropForAim({ x: 0, y: 4.5, z: -3 }, "tree", baseQuery)).toBe(true);
+    expect(shouldHidePropForAim({ x: 0.5, y: 4.5, z: -3.5 }, "landmark", baseQuery)).toBe(true);
+    expect(shouldHidePropForAim({ x: 0, y: 5.5, z: -3 }, "boulder", baseQuery)).toBe(true);
+
+    // 2. Immediate shoulder halo (off to side of critter within radius + 2.0)
+    expect(shouldHidePropForAim({ x: 4.8, y: 5.0, z: 0.0 }, "tree", baseQuery)).toBe(true);
+    expect(shouldHidePropForAim({ x: -5.4, y: 5.0, z: 0.2 }, "landmark", baseQuery)).toBe(true);
+    expect(shouldHidePropForAim({ x: 3.8, y: 5.0, z: -0.2 }, "boulder", baseQuery)).toBe(true);
+
+    // 3. Forward 22m aim corridor
+    expect(shouldHidePropForAim({ x: 1.5, y: 4.0, z: 14 }, "tree", baseQuery)).toBe(true);
+    expect(shouldHidePropForAim({ x: -2.0, y: 4.0, z: 18 }, "landmark", baseQuery)).toBe(true);
+    expect(shouldHidePropForAim({ x: 0.5, y: 5.2, z: 12 }, "boulder", baseQuery)).toBe(true);
+
+    // Just beyond 22m maxRange -> not hidden
+    expect(shouldHidePropForAim({ x: 0, y: 5.0, z: 24.5 }, "tree", baseQuery)).toBe(false);
+  });
+
+  it("returns false for props behind or far off to the side of the aim corridor", () => {
+    // Far behind the camera
+    expect(shouldHidePropForAim({ x: 0, y: 5, z: -15 }, "tree", baseQuery)).toBe(false);
+    expect(shouldHidePropForAim({ x: 0, y: 5, z: -15 }, "landmark", baseQuery)).toBe(false);
+    expect(shouldHidePropForAim({ x: 0, y: 5, z: -15 }, "boulder", baseQuery)).toBe(false);
+
+    // Far off to the side
+    expect(shouldHidePropForAim({ x: 16, y: 5, z: 10 }, "tree", baseQuery)).toBe(false);
+    expect(shouldHidePropForAim({ x: -18, y: 5, z: 10 }, "landmark", baseQuery)).toBe(false);
+    expect(shouldHidePropForAim({ x: 12, y: 5, z: 10 }, "boulder", baseQuery)).toBe(false);
+
+    // Outside vertical shoulder halo band
+    expect(shouldHidePropForAim({ x: 4.5, y: 12.0, z: 0 }, "tree", baseQuery)).toBe(false);
+    expect(shouldHidePropForAim({ x: 3.5, y: 0.5, z: 0 }, "boulder", baseQuery)).toBe(false);
+  });
+
+  it("always returns false for flora even right next to the critter or between camera and critter", () => {
+    expect(shouldHidePropForAim({ x: 0, y: 5, z: 0 }, "flora", baseQuery)).toBe(false);
+    expect(shouldHidePropForAim({ x: 0, y: 5, z: -3 }, "flora", baseQuery)).toBe(false);
+    expect(shouldHidePropForAim({ x: 0, y: 5, z: 8 }, "flora", baseQuery)).toBe(false);
+  });
+
+  it("handles non-finite coordinates and near-zero aimDir safely without throwing", () => {
+    expect(shouldHidePropForAim({ x: Number.NaN, y: 5, z: 5 }, "tree", baseQuery)).toBe(false);
+    expect(
+      shouldHidePropForAim({ x: 0, y: 5, z: 5 }, "tree", {
+        ...baseQuery,
+        cameraPos: { x: Number.POSITIVE_INFINITY, y: 7, z: -6 },
+      }),
+    ).toBe(false);
+    expect(
+      shouldHidePropForAim({ x: 0, y: 5, z: 5 }, "tree", {
+        ...baseQuery,
+        critterPos: { x: 0, y: Number.NEGATIVE_INFINITY, z: 0 },
+      }),
+    ).toBe(false);
+    expect(
+      shouldHidePropForAim({ x: 0, y: 5, z: 5 }, "tree", {
+        ...baseQuery,
+        aimDir: { x: 0, y: Number.NaN, z: 1 },
+      }),
+    ).toBe(false);
+
+    // Near-zero aimDir skips forward corridor, but still evaluates camera segment & shoulder halo
+    const zeroAimQuery: AimOcclusionQuery = {
+      cameraPos: { x: 0, y: 7, z: -6 },
+      critterPos: { x: 0, y: 5, z: 0 },
+      aimDir: { x: 0, y: 0, z: 0 },
+    };
+    expect(shouldHidePropForAim({ x: 0, y: 4.5, z: -3 }, "tree", zeroAimQuery)).toBe(true);
+    expect(shouldHidePropForAim({ x: 0, y: 5.0, z: 12 }, "tree", zeroAimQuery)).toBe(false);
+  });
+
+  it("temporarily hides trees, boulders, and landmarks along aim sightline without changing getPropCounts, restores exact matrices on null/turn-away, and never revives carved props", () => {
+    const world = new SdfWorld(4242, "mountain_spine");
+    const spawns = world.findSpawnPoints(4);
+    const props = new EnvironmentProps(world, 1.5, spawns);
+
+    const initialCounts = props.getPropCounts();
+    const initialVisiblePositions = props.getVisiblePropPositions();
+
+    const sceneryGroup = props.group.getObjectByName("scenery_props");
+    expect(sceneryGroup).toBeInstanceOf(THREE.Group);
+
+    const watchtower = props.group.getObjectByName("watchtower_0");
+    expect(watchtower).toBeInstanceOf(THREE.Group);
+    if (!(watchtower instanceof THREE.Group)) {
+      props.dispose();
+      return;
+    }
+
+    // Snapshot all non-zero instanced matrices before any aim occlusion
+    const instancedMeshes: THREE.InstancedMesh[] = [];
+    if (sceneryGroup) {
+      for (const child of sceneryGroup.children) {
+        if (child instanceof THREE.InstancedMesh) {
+          instancedMeshes.push(child);
+        }
+      }
+    }
+    expect(instancedMeshes.length).toBeGreaterThan(0);
+
+    const isZeroMatrix = (m: THREE.Matrix4): boolean => {
+      const e = m.elements;
+      return (
+        Math.hypot(e[0], e[1], e[2]) < 1e-6 &&
+        Math.hypot(e[4], e[5], e[6]) < 1e-6 &&
+        Math.hypot(e[8], e[9], e[10]) < 1e-6
+      );
+    };
+
+    const snapshotMatrices = (): Map<THREE.InstancedMesh, Float32Array> => {
+      const map = new Map<THREE.InstancedMesh, Float32Array>();
+      for (const mesh of instancedMeshes) {
+        map.set(mesh, new Float32Array(mesh.instanceMatrix.array as Float32Array));
+      }
+      return map;
+    };
+
+    const originalSnapshots = snapshotMatrices();
+
+    // Aim directly through the watchtower from 6m behind it along +Z
+    const aimAtWatchtower: AimOcclusionQuery = {
+      cameraPos: {
+        x: watchtower.position.x,
+        y: watchtower.position.y + 2.0,
+        z: watchtower.position.z - 10.0,
+      },
+      critterPos: {
+        x: watchtower.position.x,
+        y: watchtower.position.y,
+        z: watchtower.position.z - 5.0,
+      },
+      aimDir: { x: 0, y: 0, z: 1 },
+      maxRange: 22,
+    };
+
+    const hiddenCount = props.updateAimOcclusion(aimAtWatchtower);
+    expect(hiddenCount).toBeGreaterThanOrEqual(1);
+    expect(watchtower.visible).toBe(false);
+    // Counts and visible anchor positions must remain strictly unchanged
+    expect(props.getPropCounts()).toEqual(initialCounts);
+    expect(props.getVisiblePropPositions().length).toBe(initialVisiblePositions.length);
+
+    // Also aim through a tree/boulder cluster across the island center to verify instanced matrices become zero-scale
+    const centerQuery: AimOcclusionQuery = {
+      cameraPos: { x: world.centerX - 18, y: 12, z: world.centerZ - 18 },
+      critterPos: { x: world.centerX - 12, y: 10, z: world.centerZ - 12 },
+      aimDir: { x: 0.707, y: 0, z: 0.707 },
+      maxRange: 30,
+    };
+    const centerHidden = props.updateAimOcclusion(centerQuery);
+    expect(centerHidden).toBeGreaterThan(0);
+
+    // Verify at least one previously non-zero instanced binding is now zero-scale
+    let zeroedInstanceCount = 0;
+    const mat = new THREE.Matrix4();
+    const origMat = new THREE.Matrix4();
+    for (const mesh of instancedMeshes) {
+      const origArr = originalSnapshots.get(mesh);
+      if (!origArr) continue;
+      for (let i = 0; i < mesh.count; i++) {
+        mesh.getMatrixAt(i, mat);
+        origMat.fromArray(origArr, i * 16);
+        if (!isZeroMatrix(origMat) && isZeroMatrix(mat)) {
+          zeroedInstanceCount += 1;
+        }
+      }
+    }
+    expect(zeroedInstanceCount).toBeGreaterThan(0);
+
+    // Turning aim away / clearing with null restores all props to their exact original matrices & visibility
+    expect(props.updateAimOcclusion(null)).toBe(0);
+    expect(watchtower.visible).toBe(true);
+    for (const mesh of instancedMeshes) {
+      const origArr = originalSnapshots.get(mesh);
+      if (!origArr) continue;
+      const curArr = mesh.instanceMatrix.array as Float32Array;
+      expect(curArr.length).toBe(origArr.length);
+      for (let i = 0; i < origArr.length; i++) {
+        expect(curArr[i]).toBeCloseTo(origArr[i] ?? 0, 5);
+      }
+    }
+
+    // Re-hide watchtower with aim, then permanently carve under it -> must NEVER be revived by updateAimOcclusion(null)
+    expect(props.updateAimOcclusion(aimAtWatchtower)).toBeGreaterThanOrEqual(1);
+    expect(watchtower.visible).toBe(false);
+
+    world.applyCarve({
+      shape: "sphere",
+      center: {
+        x: watchtower.position.x,
+        y: watchtower.position.y - 0.5,
+        z: watchtower.position.z,
+      },
+      radius: 4.5,
+    });
+    const pruned = props.pruneAfterCarve(world, 1.5);
+    expect(pruned).toBeGreaterThanOrEqual(1);
+    expect(watchtower.visible).toBe(false);
+    expect(watchtower.parent).toBeNull();
+
+    // Clearing aim occlusion must NEVER revive permanently pruned watchtower or pruned instanced props
+    const prunedPositionsCount = props.getVisiblePropPositions().length;
+    expect(prunedPositionsCount).toBe(initialVisiblePositions.length - pruned);
+    expect(props.updateAimOcclusion(null)).toBe(0);
+    expect(watchtower.visible).toBe(false);
+    expect(watchtower.parent).toBeNull();
+    expect(props.getVisiblePropPositions().length).toBe(prunedPositionsCount);
+
+    // Also verify a permanently pruned instanced prop stays zero-matrix after aim hide + null restore
+    const prunedSnapshot = snapshotMatrices();
+    props.updateAimOcclusion(centerQuery);
+    expect(props.updateAimOcclusion(null)).toBe(0);
+    for (const mesh of instancedMeshes) {
+      const afterPruneArr = prunedSnapshot.get(mesh);
+      if (!afterPruneArr) continue;
+      const curArr = mesh.instanceMatrix.array as Float32Array;
+      for (let i = 0; i < afterPruneArr.length; i++) {
+        expect(curArr[i]).toBeCloseTo(afterPruneArr[i] ?? 0, 5);
+      }
+    }
+
+    props.dispose();
   });
 });
