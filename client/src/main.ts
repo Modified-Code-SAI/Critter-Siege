@@ -3,6 +3,7 @@ import {
   GADGET_CATALOG,
   GALE_SCATTER_REACH,
   GRAVITY,
+  SCATTER_BOMB_SPLIT_BASE_SEC,
   SDF_DIMS,
   SPECIES_CATALOG,
   SdfWorld,
@@ -57,7 +58,11 @@ import { CritterRig } from "./scene/critterMesh.js";
 import { EnvironmentProps } from "./scene/environmentProps.js";
 import { preloadAllSpeciesModels } from "./scene/modelLoader.js";
 import { TerrainRenderer } from "./scene/terrainRenderer.js";
-import { VfxSystem, type DroneBeaconInput } from "./scene/vfx.js";
+import {
+  VfxSystem,
+  type DroneBeaconInput,
+  type ScatterBombletPose,
+} from "./scene/vfx.js";
 import { WorldScene, getThemeAtmosphere } from "./scene/worldScene.js";
 import {
   HudController,
@@ -76,7 +81,7 @@ const GADGET_COLORS: Record<GadgetId, number> = {
   gale_mortar: 0xffa73b,
   quake_club: 0xf43f5e,
   vine_grapple: 0x34d399,
-  spore_burst: 0x84cc16,
+  spore_burst: 0xf59e0b,
   burrow_bore: 0xf97316,
   seeker_firefly: 0x38f5ff,
   gravity_mine: 0xa855f7,
@@ -145,6 +150,15 @@ function hasMusicContextChanged(
   );
 }
 
+export interface ScatterPlaybackState {
+  splitSec: number;
+  splitOrigin: Vec3;
+  splitTriggered: boolean;
+  bounceSec: number | null;
+  bouncePos: Vec3 | null;
+  bounceTriggered: boolean;
+}
+
 interface ShotPlayback {
   gadgetId: GadgetId;
   path: Vec3[];
@@ -169,9 +183,99 @@ interface ShotPlayback {
     slicedCount: number;
     lastGrindMs: number;
   } | null;
+  scatterState?: ScatterPlaybackState;
   scatterBlastDone?: boolean;
   preImpactCritters: ReadonlyMap<string, PreImpactCritterSnapshot>;
   impactReleased: boolean;
+}
+
+/** Derive canister bounce & split timing for Scatter Bomb (`spore_burst`) playback. */
+export function buildScatterPlaybackState(
+  path: readonly Vec3[],
+  impacts: readonly ImpactEvent[],
+): ScatterPlaybackState | undefined {
+  const subImpacts = impacts.filter((imp) => imp.isSubSpore);
+  const firstSub = subImpacts[0];
+  if (!firstSub) {
+    return undefined;
+  }
+
+  const minSubTime = Math.min(...subImpacts.map((imp) => imp.time));
+  const splitSec = Math.max(0.08, minSubTime - SCATTER_BOMB_SPLIT_BASE_SEC);
+  const lastPathPt = path[path.length - 1];
+  const splitOrigin: Vec3 = lastPathPt
+    ? { ...lastPathPt }
+    : { ...firstSub.position };
+
+  let bounceSec: number | null = null;
+  let bouncePos: Vec3 | null = null;
+  if (path.length >= 4) {
+    for (let k = 1; k <= path.length - 2; k++) {
+      const pPrev = path[k - 1];
+      const pCurr = path[k];
+      const pNext = path[k + 1];
+      if (!pPrev || !pCurr || !pNext) {
+        continue;
+      }
+      const dyPrev = pCurr.y - pPrev.y;
+      const dyNext = pNext.y - pCurr.y;
+      const dx0 = pCurr.x - pPrev.x;
+      const dz0 = pCurr.z - pPrev.z;
+      const dx1 = pNext.x - pCurr.x;
+      const dz1 = pNext.z - pCurr.z;
+      const len0 = Math.hypot(dx0, dyPrev, dz0);
+      const len1 = Math.hypot(dx1, dyNext, dz1);
+      const dot =
+        len0 > 1e-5 && len1 > 1e-5
+          ? (dx0 * dx1 + dyPrev * dyNext + dz0 * dz1) / (len0 * len1)
+          : 1;
+      if ((dyPrev < -0.02 && dyNext > 0.02) || dot < 0.55) {
+        bounceSec = splitSec * (k / (path.length - 1));
+        bouncePos = { ...pCurr };
+        break;
+      }
+    }
+  }
+
+  return {
+    splitSec,
+    splitOrigin,
+    splitTriggered: false,
+    bounceSec,
+    bouncePos,
+    bounceTriggered: false,
+  };
+}
+
+/** Compute parabolic mini-bomblet poses fanned out from `splitOrigin` to each active sub-impact. */
+export function computeScatterBombletPoses(
+  scatterState: Pick<ScatterPlaybackState, "splitSec" | "splitOrigin">,
+  impacts: readonly Pick<ScheduledImpact, "isSubSpore" | "triggered" | "time" | "position">[],
+  elapsedSec: number,
+): (ScatterBombletPose | null)[] {
+  const subImpacts = impacts.filter((imp) => imp.isSubSpore);
+  const { splitSec, splitOrigin } = scatterState;
+  return subImpacts.map((imp, i) => {
+    if (imp.triggered || elapsedSec >= imp.time) {
+      return null;
+    }
+    const u = Math.max(
+      0,
+      Math.min(1, (elapsedSec - splitSec) / Math.max(0.05, imp.time - splitSec)),
+    );
+    const arcH = 2.6 + (i % 2) * 0.45;
+    return {
+      position: {
+        x: splitOrigin.x + (imp.position.x - splitOrigin.x) * u,
+        y:
+          splitOrigin.y +
+          (imp.position.y - splitOrigin.y) * u +
+          4 * arcH * u * (1 - u),
+        z: splitOrigin.z + (imp.position.z - splitOrigin.z) * u,
+      },
+      spinPhase: elapsedSec * (9 + i * 1.4),
+    };
+  });
 }
 
 /** SessionStorage key preserving ?server= WebSocket URL across page reloads. */
@@ -1004,6 +1108,8 @@ class CritterSiegeApp {
     this.hud.setArmoryOpen(false);
     this.vfx.setDronePing(null);
     this.vfx.syncDronePlayerBeacons([], false, 0);
+    this.vfx.setProjectileVisual(null);
+    this.vfx.clearScatterBomblets();
     this.vfx.syncPrismWalls([], 0);
     this.environmentProps.updateAimOcclusion(null);
     this.shotPlayback = null;
@@ -1046,6 +1152,7 @@ class CritterSiegeApp {
     this.vfx.setDronePing(null);
     this.vfx.syncDronePlayerBeacons([], false, 0);
     this.vfx.setProjectileVisual(null);
+    this.vfx.clearScatterBomblets();
     this.vfx.syncEvoPods([], 0);
     this.vfx.syncPrismWalls([], 0);
     this.environmentProps.updateAimOcclusion(null);
@@ -1181,6 +1288,8 @@ class CritterSiegeApp {
       this.dronePing = null;
       this.dronePingCritterId = null;
       this.vfx.setDronePing(null);
+      this.vfx.setProjectileVisual(null);
+      this.vfx.clearScatterBomblets();
       this.shotPlayback = null;
       this.lastLocalShotAim = null;
       this.clearGrappleGlides();
@@ -1198,6 +1307,8 @@ class CritterSiegeApp {
         this.dronePing = null;
         this.dronePingCritterId = null;
         this.vfx.setDronePing(null);
+        this.vfx.setProjectileVisual(null);
+        this.vfx.clearScatterBomblets();
         this.shotPlayback = null;
         this.lastLocalShotAim = null;
         this.clearGrappleGlides();
@@ -1400,11 +1511,17 @@ class CritterSiegeApp {
               ? (path[path.length - 1] ?? this.dronePing)
               : null;
 
+          const scatterState =
+            ev.gadgetId === "spore_burst"
+              ? buildScatterPlaybackState(path, sim.impacts)
+              : undefined;
+
           const preImpactCritters = capturePreImpactCritters(
             this.matchState?.critters ?? [],
             this.collectLiveCritterPositions(),
           );
 
+          this.vfx.clearScatterBomblets();
           this.shotPlayback = {
             gadgetId: ev.gadgetId,
             path,
@@ -1429,6 +1546,7 @@ class CritterSiegeApp {
               !entersResolving && this.matchState?.phase !== "RESOLVING",
             seekerTargetPos,
             boreCapsule,
+            ...(scatterState ? { scatterState } : {}),
             scatterBlastDone: ev.gadgetId === "quake_club",
             preImpactCritters,
             impactReleased: ev.gadgetId === "quake_club",
@@ -2669,7 +2787,11 @@ class CritterSiegeApp {
       pb.elapsedSec += dtSec;
     }
 
-    const t = Math.max(0, Math.min(1, pb.elapsedSec / pb.durationSec));
+    const pathSpanSec =
+      pb.gadgetId === "spore_burst" && pb.scatterState
+        ? Math.max(0.05, pb.scatterState.splitSec)
+        : pb.durationSec;
+    const t = Math.max(0, Math.min(1, pb.elapsedSec / pathSpanSec));
     const idxFloat = t * Math.max(0, pb.path.length - 1);
     const i0 = Math.floor(idxFloat);
     const i1 = Math.min(pb.path.length - 1, i0 + 1);
@@ -2774,7 +2896,50 @@ class CritterSiegeApp {
       }
     }
 
-    if (pb.gadgetId === "quake_club") {
+    let shotCamTarget: Vec3 | null =
+      pb.gadgetId === "quake_club" ? null : currentPos;
+
+    if (pb.gadgetId === "spore_burst" && pb.scatterState) {
+      const scatter = pb.scatterState;
+      if (pb.elapsedSec < scatter.splitSec) {
+        if (
+          scatter.bounceSec !== null &&
+          scatter.bouncePos !== null &&
+          !scatter.bounceTriggered &&
+          pb.elapsedSec >= scatter.bounceSec
+        ) {
+          scatter.bounceTriggered = true;
+          this.vfx.spawnScatterBounceSpark(scatter.bouncePos);
+          this.audio.playScatterBounce();
+        }
+        this.vfx.setProjectileVisual(currentPos, GADGET_COLORS.spore_burst, {
+          gadgetId: "spore_burst",
+          direction: dir,
+          dtSec,
+        });
+        this.vfx.clearScatterBomblets();
+        shotCamTarget = currentPos;
+      } else {
+        if (!scatter.splitTriggered) {
+          scatter.splitTriggered = true;
+          this.vfx.setProjectileVisual(null);
+          this.vfx.spawnScatterSplit(scatter.splitOrigin);
+          this.audio.playScatterSplit();
+          this.cameraRig.triggerShake(0.24, 0.16);
+        }
+        const bombletPoses = computeScatterBombletPoses(
+          scatter,
+          pb.impacts,
+          pb.elapsedSec,
+        );
+        this.vfx.syncScatterBomblets(bombletPoses, dtSec);
+        shotCamTarget = {
+          x: scatter.splitOrigin.x,
+          y: scatter.splitOrigin.y + 1.8,
+          z: scatter.splitOrigin.z,
+        };
+      }
+    } else if (pb.gadgetId === "quake_club") {
       this.vfx.setProjectileVisual(null);
     } else {
       this.vfx.setProjectileVisual(
@@ -2906,12 +3071,13 @@ class CritterSiegeApp {
       emitHitPopups();
       this.flushPendingCarves(state);
       this.vfx.setProjectileVisual(null);
+      this.vfx.clearScatterBomblets();
       this.shotPlayback = null;
       this.cameraRig.setShotCamActive(false);
       return null;
     }
 
-    return pb.gadgetId === "quake_club" ? null : currentPos;
+    return shotCamTarget;
   }
 
   private stepLocalCritterMovement(

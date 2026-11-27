@@ -17,6 +17,11 @@ export interface ProjectileVisualOptions {
   readonly dtSec?: number;
 }
 
+export interface ScatterBombletPose {
+  readonly position: Vec3;
+  readonly spinPhase?: number;
+}
+
 export interface DroneBeaconInput {
   readonly id: string;
   readonly position: Vec3;
@@ -515,11 +520,19 @@ export class VfxSystem {
   private readonly drillGroup: THREE.Group;
   private readonly drillSpinPivot: THREE.Group;
   private readonly drillThrusterSprite: THREE.Sprite;
+  private readonly scatterCanisterGroup: THREE.Group;
+  private readonly scatterFuseSprite: THREE.Sprite;
+  private readonly scatterFuseCoreSprite: THREE.Sprite;
+  private readonly scatterFuseTipLocal: THREE.Vector3;
+  private readonly scatterBombletGroup: THREE.Group;
+  private readonly scatterBomblets: THREE.Group[];
+  private readonly scatterBombletLastPos: (THREE.Vector3 | null)[];
   private lastProjectilePos: THREE.Vector3 | null = null;
   private readonly lastProjectileDir = new THREE.Vector3(0, 1, 0);
   private trailEmitCounter = 0;
   private drillIsBoring = false;
   private bombRotatedThisTick = false;
+  private scatterCanisterRotatedThisTick = false;
   private drillSpunThisTick = false;
   private flamePhase = 0;
 
@@ -793,7 +806,7 @@ export class VfxSystem {
     this.projectileGroup.add(projCore, projRing, this.projectileHalo);
     this.group.add(this.projectileGroup);
 
-    // Signature 3D Projectile Visuals: Gale Mortar black bomb, Seeker Firefly GPS missile + lock beam, Burrow Bore auger drill
+    // Signature 3D Projectile Visuals: Gale Mortar black bomb, Seeker Firefly GPS missile + lock beam, Burrow Bore auger drill, Scatter Bomb canister + 5 bomblets
     const bombBuilt = this.createBombVisual();
     this.bombGroup = bombBuilt.group;
     this.bombFlameSprite = bombBuilt.flameSprite;
@@ -828,6 +841,20 @@ export class VfxSystem {
     this.drillThrusterSprite = drillBuilt.thrusterSprite;
     this.drillGroup.visible = false;
     this.group.add(this.drillGroup);
+
+    const scatterBuilt = this.createScatterCanisterVisual();
+    this.scatterCanisterGroup = scatterBuilt.group;
+    this.scatterFuseSprite = scatterBuilt.flameSprite;
+    this.scatterFuseCoreSprite = scatterBuilt.flameCoreSprite;
+    this.scatterFuseTipLocal = scatterBuilt.fuseTipLocal;
+    this.scatterCanisterGroup.visible = false;
+    this.group.add(this.scatterCanisterGroup);
+
+    const bombletsBuilt = this.createScatterBombletsVisual();
+    this.scatterBombletGroup = bombletsBuilt.group;
+    this.scatterBomblets = bombletsBuilt.bomblets;
+    this.scatterBombletLastPos = bombletsBuilt.bomblets.map(() => null);
+    this.group.add(this.scatterBombletGroup);
 
     // Glowing cyan drone recon target ping + GPS target-lock crosshair reticle
     this.dronePingGroup = new THREE.Group();
@@ -1898,6 +1925,162 @@ export class VfxSystem {
     }
   }
 
+  /**
+   * Spawn a crisp mid-air canister-split pop burst for the Scatter Bomb:
+   * bright amber flash, expanding amber shockwave ring, 4 dark pop smoke puffs,
+   * and 10 flying brass/amber shrapnel sparks.
+   */
+  public spawnScatterSplit(position: Vec3): void {
+    const px = Number.isFinite(position.x) ? position.x : 0;
+    const py = Number.isFinite(position.y) ? position.y : 0;
+    const pz = Number.isFinite(position.z) ? position.z : 0;
+
+    // Bright amber core flash
+    this.emitSpriteFromPool(this.glowSpritePool, {
+      x: px,
+      y: py + 0.14,
+      z: pz,
+      vx: 0,
+      vy: 0.4,
+      vz: 0,
+      gravity: 0,
+      maxAge: 0.24,
+      startScale: 1.1,
+      endScale: 2.85,
+      colorHex: 0xfbbf24,
+      baseOpacity: 0.96,
+      rotationSpeed: 0,
+    });
+
+    // Expanding crisp amber shockwave ring
+    const ringMat = new THREE.MeshBasicMaterial({
+      color: 0xf59e0b,
+      transparent: true,
+      opacity: 0.94,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    });
+    const ringMesh = new THREE.Mesh(this.sharedGeos.shockRing, ringMat);
+    ringMesh.position.set(px, py + 0.12, pz);
+    ringMesh.rotation.x = Math.PI * 0.5;
+    this.particleGroup.add(ringMesh);
+    this.particles.push({
+      mesh: ringMesh,
+      material: ringMat,
+      velocity: new THREE.Vector3(0, 0.2, 0),
+      spin: new THREE.Vector3(0, 0, 0),
+      gravity: 0,
+      age: 0,
+      maxAge: 0.36,
+      startScale: 0.32,
+      endScale: 2.4,
+      baseScaleVec: new THREE.Vector3(1, 1, 1),
+      baseOpacity: 0.94,
+      kind: "shockwave",
+    });
+
+    // 4 dark pop smoke puffs from the ruptured iron canister
+    for (let i = 0; i < 4; i++) {
+      const angle = (i / 4) * Math.PI * 2 + this.nextRand() * 0.55;
+      const spd = 1.4 + this.nextRand() * 1.1;
+      this.emitSpriteFromPool(this.smokeSpritePool, {
+        x: px + Math.cos(angle) * 0.18,
+        y: py + 0.12 + this.nextRand() * 0.18,
+        z: pz + Math.sin(angle) * 0.18,
+        vx: Math.cos(angle) * spd,
+        vy: 1.2 + this.nextRand() * 1.1,
+        vz: Math.sin(angle) * spd,
+        gravity: -0.35,
+        maxAge: 0.58 + this.nextRand() * 0.25,
+        startScale: 0.62,
+        endScale: 1.85,
+        colorHex: i % 2 === 0 ? 0x3b4252 : 0x525a6b,
+        baseOpacity: 0.58,
+        rotationSpeed: (this.nextRand() - 0.5) * 1.5,
+      });
+    }
+
+    // 10 flying brass/amber shrapnel sparks radiating from the split point
+    for (let i = 0; i < 10; i++) {
+      const angle = (i / 10) * Math.PI * 2 + this.nextRand() * 0.35;
+      const spd = 3.8 + this.nextRand() * 4.6;
+      this.emitInstanceFromPool(this.sparkPool, {
+        x: px,
+        y: py + 0.14,
+        z: pz,
+        vx: Math.cos(angle) * spd,
+        vy: 2.6 + this.nextRand() * 3.8,
+        vz: Math.sin(angle) * spd,
+        spinX: 10,
+        spinY: 12,
+        spinZ: 9,
+        gravity: 11.5,
+        maxAge: 0.34 + this.nextRand() * 0.22,
+        startScale: 1.25,
+        endScale: 0.12,
+        sx: 1,
+        sy: 1,
+        sz: 1,
+        colorHex: i % 3 === 0 ? 0xfde047 : i % 2 === 0 ? 0xf59e0b : 0xd97706,
+      });
+    }
+  }
+
+  /**
+   * Spawn a metallic orange-gold bounce spark burst + light dust puffs
+   * when the Scatter Bomb iron canister skips off terrain.
+   */
+  public spawnScatterBounceSpark(position: Vec3): void {
+    const px = Number.isFinite(position.x) ? position.x : 0;
+    const py = Number.isFinite(position.y) ? position.y : 0;
+    const pz = Number.isFinite(position.z) ? position.z : 0;
+
+    // 6 metallic orange-gold sparks spraying up from the bounce contact
+    for (let i = 0; i < 6; i++) {
+      const angle = (i / 6) * Math.PI * 2 + this.nextRand() * 0.45;
+      const spd = 2.4 + this.nextRand() * 3.2;
+      this.emitInstanceFromPool(this.sparkPool, {
+        x: px,
+        y: py + 0.1,
+        z: pz,
+        vx: Math.cos(angle) * spd,
+        vy: 2.2 + this.nextRand() * 2.6,
+        vz: Math.sin(angle) * spd,
+        spinX: 9,
+        spinY: 11,
+        spinZ: 8,
+        gravity: 12.0,
+        maxAge: 0.24 + this.nextRand() * 0.16,
+        startScale: 1.05,
+        endScale: 0.1,
+        sx: 1,
+        sy: 1,
+        sz: 1,
+        colorHex: i % 2 === 0 ? 0xfbbf24 : 0xf97316,
+      });
+    }
+
+    // 2 light dust puffs kicking up at the bounce point
+    for (let i = 0; i < 2; i++) {
+      const angle = i * Math.PI + this.nextRand() * 0.8;
+      this.emitSpriteFromPool(this.smokeSpritePool, {
+        x: px + Math.cos(angle) * 0.14,
+        y: py + 0.12,
+        z: pz + Math.sin(angle) * 0.14,
+        vx: Math.cos(angle) * 0.9,
+        vy: 0.85 + this.nextRand() * 0.55,
+        vz: Math.sin(angle) * 0.9,
+        gravity: -0.2,
+        maxAge: 0.44 + this.nextRand() * 0.18,
+        startScale: 0.45,
+        endScale: 1.35,
+        colorHex: 0xd6c7b2,
+        baseOpacity: 0.44,
+        rotationSpeed: (this.nextRand() - 0.5) * 1.2,
+      });
+    }
+  }
+
   /** Synchronize color-coded Evo DNA, Med-Berry, and Super Gadget air-drop crates & parachutes. */
   public syncEvoPods(
     pods: readonly EvoPodState[],
@@ -2169,7 +2352,7 @@ export class VfxSystem {
 
   /**
    * Position the active 3D projectile visual (Gale Mortar black bomb, Seeker Firefly GPS missile + lock beam,
-   * Burrow Bore spinning auger drill, or glowing comet orb) and emit gadget-specific trails.
+   * Burrow Bore spinning auger drill, Scatter Bomb iron canister, or glowing comet orb) and emit gadget-specific trails.
    */
   public setProjectileVisual(
     position: Vec3 | null,
@@ -2181,11 +2364,13 @@ export class VfxSystem {
       this.bombGroup.visible = false;
       this.missileGroup.visible = false;
       this.drillGroup.visible = false;
+      this.scatterCanisterGroup.visible = false;
       this.gpsLockBeam.visible = false;
       this.lastProjectilePos = null;
       this.trailEmitCounter = 0;
       this.drillIsBoring = false;
       this.bombRotatedThisTick = false;
+      this.scatterCanisterRotatedThisTick = false;
       this.drillSpunThisTick = false;
       return;
     }
@@ -2222,6 +2407,7 @@ export class VfxSystem {
     this.bombGroup.visible = false;
     this.missileGroup.visible = false;
     this.drillGroup.visible = false;
+    this.scatterCanisterGroup.visible = false;
     this.gpsLockBeam.visible = false;
 
     if (gadgetId === "gale_mortar") {
@@ -2239,6 +2425,26 @@ export class VfxSystem {
 
       if (movedEnough) {
         this.spawnBombTrail(px, py, pz);
+        this.lastProjectilePos = new THREE.Vector3(px, py, pz);
+      }
+      return;
+    }
+
+    if (gadgetId === "spore_burst") {
+      this.scatterCanisterGroup.visible = true;
+      this.scatterCanisterGroup.position.set(px, py, pz);
+      if (safeDt > 0) {
+        this.scatterCanisterGroup.rotation.x += safeDt * 7.2;
+        this.scatterCanisterGroup.rotation.z += safeDt * 4.8;
+        this.flamePhase += safeDt * 24.0;
+        this.scatterCanisterRotatedThisTick = true;
+      }
+      const flicker = 0.54 + Math.sin(this.flamePhase) * 0.14;
+      this.scatterFuseSprite.scale.set(flicker, flicker * 1.12, 1);
+      this.scatterFuseCoreSprite.scale.set(flicker * 0.5, flicker * 0.56, 1);
+
+      if (movedEnough) {
+        this.spawnScatterCanisterTrail(px, py, pz);
         this.lastProjectilePos = new THREE.Vector3(px, py, pz);
       }
       return;
@@ -2326,6 +2532,95 @@ export class VfxSystem {
     if (movedEnough) {
       this.spawnProjectileSpark({ x: px, y: py, z: pz }, color);
       this.lastProjectilePos = new THREE.Vector3(px, py, pz);
+    }
+  }
+
+  /**
+   * Synchronize the 5 pooled 3D iron mini-bomblets fanned out by Scatter Bomb after canister split.
+   * Shows, positions, and tumbles active entries with finite coordinates; hides null or out-of-range slots.
+   */
+  public syncScatterBomblets(
+    poses: readonly (ScatterBombletPose | null)[],
+    dtSec = 0,
+  ): void {
+    const safeDt = Number.isFinite(dtSec) ? Math.max(0, Math.min(dtSec, 0.1)) : 0;
+
+    for (let i = 0; i < this.scatterBomblets.length; i++) {
+      const bomblet = this.scatterBomblets[i];
+      if (!bomblet) continue;
+      const pose = i < poses.length ? poses[i] : null;
+      if (
+        !pose ||
+        !Number.isFinite(pose.position.x) ||
+        !Number.isFinite(pose.position.y) ||
+        !Number.isFinite(pose.position.z)
+      ) {
+        bomblet.visible = false;
+        this.scatterBombletLastPos[i] = null;
+        continue;
+      }
+
+      const px = pose.position.x;
+      const py = pose.position.y;
+      const pz = pose.position.z;
+      bomblet.visible = true;
+      bomblet.position.set(px, py, pz);
+
+      if (pose.spinPhase !== undefined && Number.isFinite(pose.spinPhase)) {
+        bomblet.rotation.set(
+          pose.spinPhase,
+          pose.spinPhase * 0.72,
+          pose.spinPhase * 0.54,
+        );
+      } else if (safeDt > 0) {
+        bomblet.rotation.x += safeDt * 9.5;
+        bomblet.rotation.z += safeDt * 6.4;
+      }
+
+      const lastPos = this.scatterBombletLastPos[i] ?? null;
+      const moved =
+        !lastPos ||
+        lastPos.distanceToSquared(this.tempOrigin.set(px, py, pz)) > 0.08;
+      if (moved) {
+        this.trailEmitCounter += 1;
+        if (this.trailEmitCounter % 2 === 0) {
+          this.emitInstanceFromPool(this.sparkPool, {
+            x: px + (this.nextRand() - 0.5) * 0.06,
+            y: py + 0.12 + (this.nextRand() - 0.5) * 0.06,
+            z: pz + (this.nextRand() - 0.5) * 0.06,
+            vx: (this.nextRand() - 0.5) * 1.6,
+            vy: 0.7 + this.nextRand() * 1.1,
+            vz: (this.nextRand() - 0.5) * 1.6,
+            spinX: 8,
+            spinY: 9,
+            spinZ: 7,
+            gravity: 6.0,
+            maxAge: 0.18 + this.nextRand() * 0.1,
+            startScale: 0.72,
+            endScale: 0.08,
+            sx: 1,
+            sy: 1,
+            sz: 1,
+            colorHex: this.trailEmitCounter % 4 === 0 ? 0xfde047 : 0xf97316,
+          });
+        }
+        if (lastPos) {
+          lastPos.set(px, py, pz);
+        } else {
+          this.scatterBombletLastPos[i] = new THREE.Vector3(px, py, pz);
+        }
+      }
+    }
+  }
+
+  /** Hide all 5 Scatter Bomb mini-bomblets and reset their tracked trail positions. */
+  public clearScatterBomblets(): void {
+    for (let i = 0; i < this.scatterBomblets.length; i++) {
+      const bomblet = this.scatterBomblets[i];
+      if (bomblet) {
+        bomblet.visible = false;
+      }
+      this.scatterBombletLastPos[i] = null;
     }
   }
 
@@ -2570,6 +2865,17 @@ export class VfxSystem {
       this.bombFlameCoreSprite.scale.set(flicker * 0.5, flicker * 0.56, 1);
     }
 
+    if (this.scatterCanisterGroup.visible) {
+      if (!this.scatterCanisterRotatedThisTick) {
+        this.scatterCanisterGroup.rotation.x += safeDt * 7.2;
+        this.scatterCanisterGroup.rotation.z += safeDt * 4.8;
+      }
+      this.scatterCanisterRotatedThisTick = false;
+      const flicker = 0.54 + Math.sin(t * 28.0) * 0.14 + Math.cos(t * 41.0) * 0.06;
+      this.scatterFuseSprite.scale.set(flicker, flicker * 1.15, 1);
+      this.scatterFuseCoreSprite.scale.set(flicker * 0.5, flicker * 0.56, 1);
+    }
+
     if (this.missileGroup.visible) {
       const thrustPulse = 0.74 + Math.sin(t * 26.0) * 0.16;
       this.missileThrusterSprite.scale.set(thrustPulse, thrustPulse, 1);
@@ -2651,10 +2957,13 @@ export class VfxSystem {
     disposeMaterial(this.pollenPoints.material);
     this.group.remove(this.pollenPoints);
 
+    this.clearScatterBomblets();
     disposeObjectTree(this.projectileGroup);
     disposeObjectTree(this.bombGroup);
     disposeObjectTree(this.missileGroup);
     disposeObjectTree(this.drillGroup);
+    disposeObjectTree(this.scatterCanisterGroup);
+    disposeObjectTree(this.scatterBombletGroup);
     disposeObjectTree(this.gpsLockBeam);
     disposeObjectTree(this.dronePingGroup);
 
@@ -3375,6 +3684,269 @@ export class VfxSystem {
     return { group, flameSprite, flameCoreSprite };
   }
 
+  private createScatterCanisterVisual(): {
+    group: THREE.Group;
+    flameSprite: THREE.Sprite;
+    flameCoreSprite: THREE.Sprite;
+    fuseTipLocal: THREE.Vector3;
+  } {
+    const group = new THREE.Group();
+    group.name = "vfx_projectile_scatter_canister";
+
+    const ironMat = new THREE.MeshStandardMaterial({
+      color: 0x1e242d,
+      emissive: 0x11151d,
+      emissiveIntensity: 0.24,
+      roughness: 0.44,
+      metalness: 0.62,
+    });
+    const brassMat = new THREE.MeshStandardMaterial({
+      color: 0xd97706,
+      emissive: 0x451a03,
+      emissiveIntensity: 0.2,
+      roughness: 0.3,
+      metalness: 0.76,
+    });
+    const hazardMat = new THREE.MeshStandardMaterial({
+      color: 0xf59e0b,
+      emissive: 0xd97706,
+      emissiveIntensity: 0.68,
+      roughness: 0.28,
+      metalness: 0.45,
+    });
+
+    // Dark riveted cast-iron cylinder barrel
+    const barrel = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.18, 0.19, 0.54, 16),
+      ironMat,
+    );
+    barrel.name = "scatter_canister_barrel";
+    barrel.castShadow = true;
+    group.add(barrel);
+
+    // Heavy brass top & bottom end-caps with rim collars
+    const topCap = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.174, 0.192, 0.056, 16),
+      brassMat,
+    );
+    topCap.name = "scatter_canister_top_cap";
+    topCap.position.y = 0.276;
+    group.add(topCap);
+
+    const topRim = new THREE.Mesh(
+      new THREE.TorusGeometry(0.188, 0.02, 8, 20),
+      brassMat,
+    );
+    topRim.rotation.x = Math.PI * 0.5;
+    topRim.position.y = 0.255;
+    group.add(topRim);
+
+    const bottomCap = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.196, 0.178, 0.056, 16),
+      brassMat,
+    );
+    bottomCap.name = "scatter_canister_bottom_cap";
+    bottomCap.position.y = -0.276;
+    group.add(bottomCap);
+
+    const bottomRim = new THREE.Mesh(
+      new THREE.TorusGeometry(0.194, 0.02, 8, 20),
+      brassMat,
+    );
+    bottomRim.rotation.x = Math.PI * 0.5;
+    bottomRim.position.y = -0.255;
+    group.add(bottomRim);
+
+    // Two amber/gold hazard bands
+    const upperBand = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.188, 0.19, 0.062, 16),
+      hazardMat,
+    );
+    upperBand.name = "scatter_canister_band_upper";
+    upperBand.position.y = 0.13;
+    group.add(upperBand);
+
+    const lowerBand = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.192, 0.194, 0.062, 16),
+      hazardMat,
+    );
+    lowerBand.name = "scatter_canister_band_lower";
+    lowerBand.position.y = -0.13;
+    group.add(lowerBand);
+
+    // 4 brass pressure-vent studs around the midsection
+    const studGeo = new THREE.CylinderGeometry(0.03, 0.036, 0.055, 10);
+    for (let i = 0; i < 4; i++) {
+      const a = (i * Math.PI) / 2;
+      const nx = Math.cos(a);
+      const nz = Math.sin(a);
+      const stud = new THREE.Mesh(studGeo, brassMat);
+      stud.name = `scatter_canister_vent_${i}`;
+      stud.position.set(nx * 0.194, 0, nz * 0.194);
+      stud.quaternion.setFromUnitVectors(UP_Y, new THREE.Vector3(nx, 0, nz));
+      group.add(stud);
+    }
+
+    // Brass fuse collar
+    const fuseCollar = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.068, 0.088, 0.072, 12),
+      brassMat,
+    );
+    fuseCollar.name = "scatter_canister_fuse_collar";
+    fuseCollar.position.y = 0.32;
+    group.add(fuseCollar);
+
+    // Curved rope wick + glowing orange ember tip
+    const fuseTipLocal = new THREE.Vector3(0.14, 0.45, 0.06);
+    const wickCurve = new THREE.CatmullRomCurve3([
+      new THREE.Vector3(0, 0.34, 0),
+      new THREE.Vector3(0.03, 0.41, 0.015),
+      new THREE.Vector3(0.09, 0.46, 0.04),
+      fuseTipLocal.clone(),
+    ]);
+    const wickMesh = new THREE.Mesh(
+      new THREE.TubeGeometry(wickCurve, 12, 0.022, 6, false),
+      new THREE.MeshStandardMaterial({
+        color: 0xa38255,
+        roughness: 0.9,
+        metalness: 0.02,
+      }),
+    );
+    wickMesh.name = "scatter_canister_wick";
+    group.add(wickMesh);
+
+    const emberTip = new THREE.Mesh(
+      new THREE.SphereGeometry(0.03, 8, 6),
+      new THREE.MeshStandardMaterial({
+        color: 0xff6b1a,
+        emissive: 0xff4500,
+        emissiveIntensity: 1.9,
+        roughness: 0.2,
+      }),
+    );
+    emberTip.name = "scatter_canister_ember";
+    emberTip.position.copy(fuseTipLocal);
+    group.add(emberTip);
+
+    // Flickering additive outer + core flame sprites
+    const flameSprite = new THREE.Sprite(
+      new THREE.SpriteMaterial({
+        map: this.glowTexture,
+        color: 0xff9922,
+        transparent: true,
+        opacity: 0.95,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+      }),
+    );
+    flameSprite.name = "scatter_canister_flame";
+    flameSprite.position.set(
+      fuseTipLocal.x,
+      fuseTipLocal.y + 0.02,
+      fuseTipLocal.z,
+    );
+    flameSprite.scale.set(0.56, 0.62, 1);
+    group.add(flameSprite);
+
+    const flameCoreSprite = new THREE.Sprite(
+      new THREE.SpriteMaterial({
+        map: this.glowTexture,
+        color: 0xfde047,
+        transparent: true,
+        opacity: 0.98,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+      }),
+    );
+    flameCoreSprite.name = "scatter_canister_flame_core";
+    flameCoreSprite.position.copy(flameSprite.position);
+    flameCoreSprite.scale.set(0.28, 0.32, 1);
+    group.add(flameCoreSprite);
+
+    return { group, flameSprite, flameCoreSprite, fuseTipLocal };
+  }
+
+  private createScatterBombletsVisual(): {
+    group: THREE.Group;
+    bomblets: THREE.Group[];
+  } {
+    const group = new THREE.Group();
+    group.name = "vfx_scatter_bomblets";
+
+    const sphereGeo = new THREE.SphereGeometry(0.145, 12, 10);
+    const ironMat = new THREE.MeshStandardMaterial({
+      color: 0x1e242d,
+      emissive: 0x12161f,
+      emissiveIntensity: 0.26,
+      roughness: 0.42,
+      metalness: 0.62,
+    });
+    const bandGeo = new THREE.TorusGeometry(0.148, 0.018, 6, 16);
+    const bandMat = new THREE.MeshStandardMaterial({
+      color: 0xf59e0b,
+      emissive: 0xd97706,
+      emissiveIntensity: 0.85,
+      roughness: 0.26,
+      metalness: 0.48,
+    });
+    const capGeo = new THREE.CylinderGeometry(0.044, 0.056, 0.05, 10);
+    const brassMat = new THREE.MeshStandardMaterial({
+      color: 0xd97706,
+      emissive: 0x451a03,
+      emissiveIntensity: 0.22,
+      roughness: 0.3,
+      metalness: 0.75,
+    });
+    const emberGeo = new THREE.SphereGeometry(0.026, 8, 6);
+    const emberMat = new THREE.MeshStandardMaterial({
+      color: 0xff7b1a,
+      emissive: 0xff4500,
+      emissiveIntensity: 2.0,
+      roughness: 0.18,
+    });
+    const glowMat = new THREE.SpriteMaterial({
+      map: this.glowTexture,
+      color: 0xffa73b,
+      transparent: true,
+      opacity: 0.92,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    });
+
+    const bomblets: THREE.Group[] = [];
+    for (let i = 0; i < 5; i++) {
+      const bomblet = new THREE.Group();
+      bomblet.name = `vfx_scatter_bomblet_${i}`;
+      bomblet.visible = false;
+
+      const body = new THREE.Mesh(sphereGeo, ironMat);
+      body.castShadow = true;
+      bomblet.add(body);
+
+      const band = new THREE.Mesh(bandGeo, bandMat);
+      band.rotation.x = Math.PI * 0.5;
+      bomblet.add(band);
+
+      const cap = new THREE.Mesh(capGeo, brassMat);
+      cap.position.y = 0.145;
+      bomblet.add(cap);
+
+      const ember = new THREE.Mesh(emberGeo, emberMat);
+      ember.position.y = 0.182;
+      bomblet.add(ember);
+
+      const glow = new THREE.Sprite(glowMat);
+      glow.position.y = 0.195;
+      glow.scale.set(0.38, 0.38, 1);
+      bomblet.add(glow);
+
+      group.add(bomblet);
+      bomblets.push(bomblet);
+    }
+
+    return { group, bomblets };
+  }
+
   private createMissileVisual(): {
     group: THREE.Group;
     thrusterSprite: THREE.Sprite;
@@ -3756,6 +4328,56 @@ export class VfxSystem {
         endScale: 1.05,
         colorHex: 0x646b78,
         baseOpacity: 0.36,
+        rotationSpeed: (this.nextRand() - 0.5) * 1.2,
+      });
+    }
+  }
+
+  private spawnScatterCanisterTrail(px: number, py: number, pz: number): void {
+    this.trailEmitCounter += 1;
+
+    // Emit artillery fuse ember sparks from rotated canister fuse tip
+    this.tempVec
+      .copy(this.scatterFuseTipLocal)
+      .applyEuler(this.scatterCanisterGroup.rotation)
+      .add(this.tempOrigin.set(px, py, pz));
+
+    for (let i = 0; i < 2; i++) {
+      this.emitInstanceFromPool(this.sparkPool, {
+        x: this.tempVec.x + (this.nextRand() - 0.5) * 0.08,
+        y: this.tempVec.y + (this.nextRand() - 0.5) * 0.08,
+        z: this.tempVec.z + (this.nextRand() - 0.5) * 0.08,
+        vx: (this.nextRand() - 0.5) * 2.4,
+        vy: 0.8 + this.nextRand() * 1.4,
+        vz: (this.nextRand() - 0.5) * 2.4,
+        spinX: 9,
+        spinY: 10,
+        spinZ: 8,
+        gravity: 5.8,
+        maxAge: 0.24 + this.nextRand() * 0.14,
+        startScale: 0.95,
+        endScale: 0.1,
+        sx: 1,
+        sy: 1,
+        sz: 1,
+        colorHex: i === 0 ? 0xfbbf24 : 0xf97316,
+      });
+    }
+
+    if (this.trailEmitCounter % 2 === 0) {
+      this.emitSpriteFromPool(this.smokeSpritePool, {
+        x: this.tempVec.x,
+        y: this.tempVec.y,
+        z: this.tempVec.z,
+        vx: (this.nextRand() - 0.5) * 0.45,
+        vy: 0.55 + this.nextRand() * 0.35,
+        vz: (this.nextRand() - 0.5) * 0.45,
+        gravity: -0.22,
+        maxAge: 0.48,
+        startScale: 0.38,
+        endScale: 1.12,
+        colorHex: 0x5c6470,
+        baseOpacity: 0.38,
         rotationSpeed: (this.nextRand() - 0.5) * 1.2,
       });
     }
