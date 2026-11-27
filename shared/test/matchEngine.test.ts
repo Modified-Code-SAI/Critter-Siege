@@ -895,17 +895,8 @@ describe("Authoritative MatchEngine turn state machine & review edge cases", () 
         podsCollectedThisRound >= 2 &&
         snap.round < 3
       ) {
-        // KO p2 via purely vertical drops (0 moveStamina spent) to enter ROUND_DRAFT
-        const p2 = snap.critters.find((c) => c.id === "p2");
-        if (p2) {
-          const base = { ...p2.position };
-          for (let d = 0; d < 16; d++) {
-            const cur = fullEngine.getSnapshot().critters.find((c) => c.id === "p2");
-            if (!cur || !cur.alive) break;
-            fullEngine.applyMove("p2", { x: base.x, y: base.y + 15.0, z: base.z }, 0, 0);
-            fullEngine.applyMove("p2", base, 0, 0);
-          }
-        }
+        // Expire round clock cleanly to enter ROUND_DRAFT without ending the match by elimination
+        fullEngine.tick(3600);
         continue;
       }
       fullEngine.tick(29);
@@ -913,6 +904,91 @@ describe("Authoritative MatchEngine turn state machine & review edge cases", () 
 
     expect(equippedSlots).toBe(4);
     expect(sawSwapDraft).toBe(true);
+
+    // Verify trailing player free draft reroll in ROUND_DRAFT (3p FFA: p1 KOs p3 -> p1 leads 1-0 over p2 -> time-up ROUND_DRAFT!)
+    const rerollEngine = new MatchEngine(
+      makeBaseConfig({
+        seed: 556,
+        mapScale: "duel",
+        roundDurationSec: 3600,
+        players: [
+          { id: "p1", name: "Milo", species: "mole", color: "#e67e22" },
+          { id: "p2", name: "Remy", species: "badger", color: "#3498db" },
+          { id: "p3", name: "Pip", species: "norway_rat", color: "#2ecc71" },
+        ],
+      }),
+    );
+    // Chip p3 low via vertical fall drops, then have p1 KO p3 with quake_club for +1 KO score
+    for (let g = 0; g < 6 && rerollEngine.getSnapshot().activePlayerId !== "p3"; g++) {
+      rerollEngine.tick(29);
+    }
+    const p3Target = rerollEngine.getSnapshot().critters.find((c) => c.id === "p3");
+    expect(p3Target).toBeDefined();
+    if (p3Target) {
+      const p3Base = { ...p3Target.position };
+      for (let d = 0; d < 12; d++) {
+        const cur = rerollEngine.getSnapshot().critters.find((c) => c.id === "p3");
+        if (!cur || !cur.alive || cur.hp <= 15) break;
+        rerollEngine.applyMove("p3", { x: p3Base.x, y: p3Base.y + 15.0, z: p3Base.z }, 0, 0);
+        rerollEngine.applyMove("p3", p3Base, 0, 0);
+      }
+      const inwardSign = p3Target.position.x < rerollEngine.world.centerX ? 1 : -1;
+      advanceAndWalkTo(
+        rerollEngine,
+        "p1",
+        {
+          x: p3Target.position.x + inwardSign * 1.3,
+          y: p3Target.position.y,
+          z: p3Target.position.z,
+        },
+        24,
+      );
+      for (let g = 0; g < 6 && rerollEngine.getSnapshot().activePlayerId !== "p1"; g++) {
+        rerollEngine.tick(29);
+      }
+      const p1Att = rerollEngine.getSnapshot().critters.find((c) => c.id === "p1");
+      const p3Def = rerollEngine.getSnapshot().critters.find((c) => c.id === "p3");
+      if (p1Att && p3Def) {
+        rerollEngine.applyFire("p1", {
+          gadgetId: "quake_club",
+          direction: {
+            x: p3Def.position.x - p1Att.position.x || 1,
+            y: 0.05,
+            z: p3Def.position.z - p1Att.position.z,
+          },
+          power: 1.0,
+        });
+        rerollEngine.completeResolving();
+        if (rerollEngine.getSnapshot().phase === "RETREAT") {
+          rerollEngine.tick(6.1);
+        }
+        if (rerollEngine.getSnapshot().phase === "DRAFT_IF_READY") {
+          completeAllPendingDrafts(rerollEngine);
+        }
+      }
+    }
+    expect(rerollEngine.getSnapshot().critters.find((c) => c.id === "p3")?.alive).toBe(false);
+    expect(rerollEngine.getSnapshot().scores.p1).toBe(1);
+    expect(rerollEngine.getSnapshot().scores.p2).toBe(0);
+
+    const p1CoinsBefore = rerollEngine.getSnapshot().critters.find((c) => c.id === "p1")?.coins ?? 0;
+    const p2CoinsBefore = rerollEngine.getSnapshot().critters.find((c) => c.id === "p2")?.coins ?? 0;
+
+    rerollEngine.tick(3600);
+    const rerollDraftSnap = rerollEngine.getSnapshot();
+    expect(rerollDraftSnap.phase).toBe("ROUND_DRAFT");
+    expect(rerollDraftSnap.pendingDrafts.map((d) => d.playerId)).toEqual(["p1", "p2"]);
+    expect(rerollDraftSnap.critters.find((c) => c.id === "p1")?.coins).toBe(p1CoinsBefore + 35);
+    expect(rerollDraftSnap.critters.find((c) => c.id === "p2")?.coins).toBe(p2CoinsBefore + 50);
+
+    const p2Draft = rerollDraftSnap.pendingDrafts.find((d) => d.playerId === "p2");
+    expect(p2Draft?.rerollsRemaining).toBe(1);
+    rerollEngine.applyRerollDraft("p2");
+    const afterReroll = rerollEngine
+      .getSnapshot()
+      .pendingDrafts.find((d) => d.playerId === "p2");
+    expect(afterReroll?.rerollsRemaining).toBe(0);
+    sawTrailingReroll = true;
     expect(sawTrailingReroll).toBe(true);
   });
 
@@ -1938,9 +2014,10 @@ function eliminateCritterByVerticalDrops(
 }
 
 describe("Phase 1 Overhaul: 5-Round Persistent Map, Two-Stage Tide & Siege Coin Economy", () => {
-  it("defaults to 5 rounds x 300s, always plays all 5 rounds despite 3-0 lead, resolves R1-4 time-up draws with stipends, and breaks R5 ties via Score -> Kills -> DamageDealt", () => {
+  it("defaults to 5 rounds x 300s and ends the match immediately on true elimination victory (FFA R1, 2v2 R2, and R1-4 mutual KO)", () => {
+    // Part A: FFA Round 1 immediate elimination victory
     const engine = new MatchEngine({
-      roomCode: "FIVE",
+      roomCode: "ELIM",
       mode: "ffa",
       theme: "emerald_spire",
       seed: 9101,
@@ -1956,142 +2033,355 @@ describe("Phase 1 Overhaul: 5-Round Persistent Map, Two-Stage Tide & Siege Coin 
     expect(init.roundTimeRemainingSec).toBe(300);
     expect(init.round).toBe(1);
 
-    // p1 wins Rounds 1, 2, and 3 (3-0 lead) -> match MUST NOT end early!
-    for (let r = 1; r <= 3; r++) {
-      expect(engine.getSnapshot().round).toBe(r);
-      eliminateCritterByVerticalDrops(engine, "p2");
-      const draftSnap = engine.getSnapshot();
-      expect(draftSnap.phase).toBe("ROUND_DRAFT");
-      expect(draftSnap.roundWinners).toHaveLength(r);
-      expect(draftSnap.roundWinners[r - 1]).toBe("p1");
-      completeAllPendingDrafts(engine);
+    // Advance to p2's turn and eliminate p2 -> match ends IMMEDIATELY in Round 1!
+    for (let g = 0; g < 6 && engine.getSnapshot().activePlayerId !== "p2"; g++) {
+      engine.tick(29);
+    }
+    const p2Start = engine.getSnapshot().critters.find((c) => c.id === "p2");
+    expect(p2Start).toBeDefined();
+    if (!p2Start) return;
+
+    const baseP2 = { ...p2Start.position };
+    const elimEvents: ReturnType<MatchEngine["applyMove"]> = [];
+    for (let drop = 0; drop < 45; drop++) {
+      const cur = engine.getSnapshot().critters.find((c) => c.id === "p2");
+      if (!cur || !cur.alive || engine.getSnapshot().phase !== "ACTIVE") {
+        break;
+      }
+      elimEvents.push(
+        ...engine.applyMove("p2", { x: baseP2.x, y: baseP2.y + 15.0, z: baseP2.z }, 0, 0),
+      );
+      elimEvents.push(...engine.applyMove("p2", baseP2, 0, 0));
     }
 
-    const r4Start = engine.getSnapshot();
-    expect(r4Start.round).toBe(4);
-    expect(r4Start.phase).toBe("ACTIVE");
-    expect(r4Start.roundTimeRemainingSec).toBe(300);
-
-    // Round 4 hits 0:00 -> Round Draw + Siege Coin stipends (trailing p2 gets +50 comeback stipend, leader p1 gets +35)
-    const p1CoinsBeforeR4Draw =
-      r4Start.critters.find((c) => c.id === "p1")?.coins ?? 0;
-    const p2CoinsBeforeR4Draw =
-      r4Start.critters.find((c) => c.id === "p2")?.coins ?? 0;
-
-    const r4TimeUpEvs = engine.tick(300);
     expect(
-      r4TimeUpEvs.some(
-        (e) =>
-          e.type === "ROUND_ENDED" && e.round === 4 && e.winnerLabel === "Draw",
+      elimEvents.some(
+        (e) => e.type === "ROUND_ENDED" && e.round === 1 && e.winnerLabel === "Milo",
       ),
     ).toBe(true);
-    const r4Draft = engine.getSnapshot();
-    expect(r4Draft.phase).toBe("ROUND_DRAFT");
-    expect(r4Draft.roundWinners[3]).toBeNull();
-    expect(r4Draft.critters.find((c) => c.id === "p1")?.coins).toBe(
-      p1CoinsBeforeR4Draw + 35,
-    );
-    expect(r4Draft.critters.find((c) => c.id === "p2")?.coins).toBe(
-      p2CoinsBeforeR4Draw + 50,
-    );
+    expect(
+      elimEvents.some(
+        (e) => e.type === "MATCH_ENDED" && e.winnerLabel === "Milo",
+      ),
+    ).toBe(true);
+    expect(
+      elimEvents.some(
+        (e) => e.type === "PHASE_CHANGED" && e.phase === "MATCH_OVER" && e.activePlayerId === null,
+      ),
+    ).toBe(true);
 
-    completeAllPendingDrafts(engine);
-    expect(engine.getSnapshot().round).toBe(5);
-    expect(engine.getSnapshot().phase).toBe("ACTIVE");
-
-    // Round 5 elimination before 0:00 -> MATCH_OVER (no Round 6)
-    eliminateCritterByVerticalDrops(engine, "p2");
     const finalSnap = engine.getSnapshot();
     expect(finalSnap.phase).toBe("MATCH_OVER");
-    expect(finalSnap.round).toBe(5);
+    expect(finalSnap.round).toBe(1);
+    expect(finalSnap.activePlayerId).toBeNull();
+    expect(finalSnap.phaseTimeRemainingSec).toBe(0);
     expect(finalSnap.winnerId).toBe("p1");
-    expect(finalSnap.matchEndReason).toBe("score");
-    expect(finalSnap.roundWinners).toEqual(["p1", "p1", "p1", null, "p1"]);
+    expect(finalSnap.winnerTeam).toBeNull();
+    expect(finalSnap.matchEndReason).toBe("elimination");
+    expect(finalSnap.roundWinners).toEqual(["p1"]);
 
-    // Tiebreaker verification: Tied Total Score (2 vs 2) and Tied Kills (0 vs 0) -> DamageDealt breaks tie on Round 5 elimination!
-    const tieEngine = new MatchEngine({
-      roomCode: "TIEB",
-      mode: "ffa",
+    // Part B: 2v2 Round 2 immediate elimination victory (after Round 1 time-up draw)
+    const teamEngine = new MatchEngine({
+      roomCode: "TWOV",
+      mode: "2v2",
       theme: "emerald_spire",
       seed: 9102,
+      mapScale: "duel",
+      roundDurationSec: 300,
+      players: [
+        { id: "a1", name: "Alpha", species: "mole", team: "A", color: "#e67e22" },
+        { id: "b1", name: "Bravo", species: "norway_rat", team: "B", color: "#3498db" },
+        { id: "a2", name: "Atlas", species: "badger", team: "A", color: "#f39c12" },
+        { id: "b2", name: "Bolt", species: "glider_squirrel", team: "B", color: "#2980b9" },
+      ],
+    });
+
+    // Round 1 clock expires -> ROUND_DRAFT -> Round 2
+    teamEngine.tick(300);
+    expect(teamEngine.getSnapshot().phase).toBe("ROUND_DRAFT");
+    completeAllPendingDrafts(teamEngine, true);
+    expect(teamEngine.getSnapshot().round).toBe(2);
+    expect(teamEngine.getSnapshot().phase).toBe("ACTIVE");
+
+    // Eliminate both Team B critters in Round 2 -> immediate Team A elimination victory!
+    eliminateCritterByVerticalDrops(teamEngine, "b1");
+    expect(teamEngine.getSnapshot().phase).toBe("ACTIVE");
+    eliminateCritterByVerticalDrops(teamEngine, "b2");
+    const teamFinal = teamEngine.getSnapshot();
+    expect(teamFinal.phase).toBe("MATCH_OVER");
+    expect(teamFinal.round).toBe(2);
+    expect(teamFinal.activePlayerId).toBeNull();
+    expect(teamFinal.winnerId).toBeNull();
+    expect(teamFinal.winnerTeam).toBe("A");
+    expect(teamFinal.matchEndReason).toBe("elimination");
+
+    // Part C: Round 1 simultaneous 0-survivor KO ends cleanly in MATCH_OVER (never empty round)
+    const mutualEngine = new MatchEngine({
+      roomCode: "MKO1",
+      mode: "ffa",
+      theme: "emerald_spire",
+      seed: 9502,
+      maxRounds: 5,
       roundDurationSec: 3600,
       players: [
         { id: "p1", name: "Milo", species: "mole", color: "#e67e22" },
         { id: "p2", name: "Remy", species: "norway_rat", color: "#3498db" },
       ],
     });
-
-    // Round 1: p1 self-falls -> p2 wins Round 1 (score: p1=0, p2=2, kills 0-0, dmg 0-0)
-    eliminateCritterByVerticalDrops(tieEngine, "p1");
-    completeAllPendingDrafts(tieEngine, true);
-
-    // Rounds 2, 3, 4: time-up draws
-    for (let r = 2; r <= 4; r++) {
-      tieEngine.tick(3600);
-      completeAllPendingDrafts(tieEngine, true);
-    }
-    expect(tieEngine.getSnapshot().round).toBe(5);
-
-    // Round 5: p1 walks close to p2 and lands 1 Quake Club strike (dealing > 0 damage without KO),
-    // then p2 self-falls -> p1 wins Round 5 (+2 score -> tied 2-2, kills 0-0, p1.damageDealt > p2.damageDealt)!
-    const p2StartR5 = tieEngine
-      .getSnapshot()
-      .critters.find((c) => c.id === "p2");
-    expect(p2StartR5).toBeDefined();
-    if (p2StartR5) {
-      const inwardSign = p2StartR5.position.x < tieEngine.world.centerX ? 1 : -1;
-      const strikeSpot = {
-        x: p2StartR5.position.x + inwardSign * 1.4,
-        y: p2StartR5.position.y,
-        z: p2StartR5.position.z,
-      };
-      advanceAndWalkTo(tieEngine, "p1", strikeSpot, 20);
-      for (
-        let guard = 0;
-        guard < 6 && tieEngine.getSnapshot().activePlayerId !== "p1";
-        guard++
-      ) {
-        tieEngine.tick(29);
+    const chipLow = (eng: MatchEngine, id: string): void => {
+      for (let g = 0; g < 6 && eng.getSnapshot().activePlayerId !== id; g++) {
+        eng.tick(29);
       }
-      const p1Now = tieEngine
-        .getSnapshot()
-        .critters.find((c) => c.id === "p1");
-      const p2Now = tieEngine
-        .getSnapshot()
-        .critters.find((c) => c.id === "p2");
-      if (p1Now && p2Now) {
-        const dx = p2Now.position.x - p1Now.position.x;
-        const dz = p2Now.position.z - p1Now.position.z;
-        tieEngine.applyFire("p1", {
-          gadgetId: "quake_club",
-          direction: { x: dx || 1, y: 0.1, z: dz },
-          power: 1.0,
-        });
-        tieEngine.completeResolving();
-        if (tieEngine.getSnapshot().phase === "RETREAT") {
-          tieEngine.tick(6.1);
-        }
+      const c = eng.getSnapshot().critters.find((x) => x.id === id);
+      if (!c) return;
+      const base = { ...c.position };
+      for (let d = 0; d < 12; d++) {
+        const cur = eng.getSnapshot().critters.find((x) => x.id === id);
+        if (!cur || !cur.alive || cur.hp <= 20) break;
+        eng.applyMove(id, { x: base.x, y: base.y + 15.0, z: base.z }, 0, 0);
+        eng.applyMove(id, base, 0, 0);
       }
+    };
+    const p2MutRef = mutualEngine.getSnapshot().critters.find((c) => c.id === "p2");
+    expect(p2MutRef).toBeDefined();
+    if (p2MutRef) {
+      const inwardSign = p2MutRef.position.x < mutualEngine.world.centerX ? 1 : -1;
+      advanceAndWalkTo(
+        mutualEngine,
+        "p1",
+        {
+          x: p2MutRef.position.x + inwardSign * 1.2,
+          y: p2MutRef.position.y,
+          z: p2MutRef.position.z,
+        },
+        12,
+      );
     }
-
-    const midR5 = tieEngine.getSnapshot();
-    expect(midR5.critters.find((c) => c.id === "p1")?.damageDealt).toBeGreaterThan(
-      0,
-    );
-    expect(midR5.critters.find((c) => c.id === "p2")?.alive).toBe(true);
-
-    eliminateCritterByVerticalDrops(tieEngine, "p2");
-    const tieFinal = tieEngine.getSnapshot();
-    expect(tieFinal.phase).toBe("MATCH_OVER");
-    expect(tieFinal.scores.p1).toBe(2);
-    expect(tieFinal.scores.p2).toBe(2);
-    expect(tieFinal.critters.find((c) => c.id === "p1")?.kills).toBe(0);
-    expect(tieFinal.critters.find((c) => c.id === "p2")?.kills).toBe(0);
-    expect(tieFinal.winnerId).toBe("p1");
-    expect(tieFinal.matchEndReason).toBe("score");
+    chipLow(mutualEngine, "p1");
+    chipLow(mutualEngine, "p2");
+    for (let g = 0; g < 6 && mutualEngine.getSnapshot().activePlayerId !== "p1"; g++) {
+      mutualEngine.tick(29);
+    }
+    mutualEngine.applyFire("p1", {
+      gadgetId: "gale_mortar",
+      direction: { x: 0, y: -1, z: 0 },
+      power: 0.25,
+    });
+    mutualEngine.completeResolving();
+    const mutualSnap = mutualEngine.getSnapshot();
+    expect(mutualSnap.phase).toBe("MATCH_OVER");
+    expect(mutualSnap.round).toBe(1);
+    expect(mutualSnap.matchEndReason).toBe("elimination");
+    expect(mutualSnap.critters.every((c) => !c.alive && c.hp === 0)).toBe(true);
   });
 
-  it("persists carved craters and cumulative carveLog across rounds while respawning critters and fresh hazards on dry ground", () => {
+  it("persists exact critter HP across Rounds 1 -> 2 -> 3 on time-up draws, heals carried damage with mend_brew, and keeps eliminated critters out of drafts & turns", () => {
+    const engine = new MatchEngine({
+      roomCode: "PHPR",
+      mode: "ffa",
+      theme: "emerald_spire",
+      seed: 9108,
+      mapScale: "duel",
+      roundDurationSec: 300,
+      players: [
+        {
+          id: "p1",
+          name: "Milo",
+          species: "mole",
+          color: "#e67e22",
+          startingLoadout: ["gale_mortar", "quake_club", "vine_grapple"],
+        },
+        {
+          id: "p2",
+          name: "Remy",
+          species: "norway_rat",
+          color: "#3498db",
+          startingLoadout: ["gale_mortar", "mend_brew"],
+        },
+        {
+          id: "p3",
+          name: "Bram",
+          species: "badger",
+          color: "#2ecc71",
+        },
+      ],
+    });
+
+    // Damage p1 by 50 HP via 2 vertical fall drops
+    const p1Start = engine.getSnapshot().critters.find((c) => c.id === "p1");
+    expect(p1Start).toBeDefined();
+    if (!p1Start) return;
+    const p1Base = { ...p1Start.position };
+    for (let d = 0; d < 2; d++) {
+      engine.applyMove("p1", { x: p1Base.x, y: p1Base.y + 15.0, z: p1Base.z }, 0, 0);
+      engine.applyMove("p1", p1Base, 0, 0);
+    }
+    const p1DamagedHp = engine.getSnapshot().critters.find((c) => c.id === "p1")?.hp ?? 0;
+    expect(p1DamagedHp).toBe(p1Start.maxHp - 50);
+
+    // Advance to p2 and damage p2 by 75 HP via 3 vertical fall drops
+    for (let g = 0; g < 6 && engine.getSnapshot().activePlayerId !== "p2"; g++) {
+      engine.tick(29);
+    }
+    const p2Start = engine.getSnapshot().critters.find((c) => c.id === "p2");
+    expect(p2Start).toBeDefined();
+    if (!p2Start) return;
+    const p2Base = { ...p2Start.position };
+    for (let d = 0; d < 3; d++) {
+      engine.applyMove("p2", { x: p2Base.x, y: p2Base.y + 15.0, z: p2Base.z }, 0, 0);
+      engine.applyMove("p2", p2Base, 0, 0);
+    }
+    const p2DamagedHp = engine.getSnapshot().critters.find((c) => c.id === "p2")?.hp ?? 0;
+    expect(p2DamagedHp).toBe(p2Start.maxHp - 75);
+
+    // Eliminate p3 in Round 1 -> 2 critters remain alive, so Round 1 continues
+    eliminateCritterByVerticalDrops(engine, "p3");
+    const preR1End = engine.getSnapshot();
+    expect(preR1End.phase).toBe("ACTIVE");
+    expect(preR1End.round).toBe(1);
+    const p3ElimPos = preR1End.critters.find((c) => c.id === "p3")?.position;
+    expect(preR1End.critters.find((c) => c.id === "p3")?.alive).toBe(false);
+    expect(preR1End.critters.find((c) => c.id === "p3")?.hp).toBe(0);
+
+    // Expire Round 1 clock -> ROUND_DRAFT only for alive critters (p1 & p2, NEVER p3!)
+    const r1TimeUpEvs = engine.tick(300);
+    expect(
+      r1TimeUpEvs.some(
+        (e) => e.type === "ROUND_ENDED" && e.round === 1 && e.winnerLabel === "Draw",
+      ),
+    ).toBe(true);
+    const r1DraftSnap = engine.getSnapshot();
+    expect(r1DraftSnap.phase).toBe("ROUND_DRAFT");
+    expect(r1DraftSnap.pendingDrafts.map((d) => d.playerId)).toEqual(["p1", "p2"]);
+
+    // Record HP & maxHp before mutation picks, then pick mutations cleanly
+    const p1BeforePick = r1DraftSnap.critters.find((c) => c.id === "p1");
+    const p2BeforePick = r1DraftSnap.critters.find((c) => c.id === "p2");
+    expect(p1BeforePick?.hp).toBe(p1DamagedHp);
+    expect(p2BeforePick?.hp).toBe(p2DamagedHp);
+    if (!p1BeforePick || !p2BeforePick) return;
+
+    const p1Draft = r1DraftSnap.pendingDrafts.find((d) => d.playerId === "p1");
+    const p2Draft = r1DraftSnap.pendingDrafts.find((d) => d.playerId === "p2");
+    expect(p1Draft?.options[0]).toBeDefined();
+    expect(p2Draft?.options[0]).toBeDefined();
+    if (!p1Draft?.options[0] || !p2Draft?.options[0]) return;
+
+    engine.applyMutationPick("p1", p1Draft.options[0]);
+    const p1AfterPick = engine.getSnapshot().critters.find((c) => c.id === "p1");
+    const expectedP1R2Hp = p1AfterPick?.hp ?? 0;
+    expect(expectedP1R2Hp).toBeLessThan(p1AfterPick?.maxHp ?? 0);
+
+    engine.applyMutationPick("p2", p2Draft.options[0]);
+    const r2Snap = engine.getSnapshot();
+    expect(r2Snap.round).toBe(2);
+    expect(r2Snap.phase).toBe("ACTIVE");
+
+    const p1R2 = r2Snap.critters.find((c) => c.id === "p1");
+    const p2R2 = r2Snap.critters.find((c) => c.id === "p2");
+    const p3R2 = r2Snap.critters.find((c) => c.id === "p3");
+    expect(p1R2).toBeDefined();
+    expect(p2R2).toBeDefined();
+    expect(p3R2).toBeDefined();
+    if (!p1R2 || !p2R2 || !p3R2) return;
+
+    // Surviving critters keep exact battle-damaged HP (+ any maxHp mutation delta), refreshed stamina & charges!
+    expect(p1R2.alive).toBe(true);
+    expect(p1R2.hp).toBe(expectedP1R2Hp);
+    expect(p1R2.hp).toBeLessThan(p1R2.maxHp);
+    expect(p1R2.moveStamina).toBe(100);
+    expect(p1R2.position.y).toBeGreaterThan(r2Snap.waterLevel + 0.5);
+
+    const p2DeltaMax = p2R2.maxHp - p2BeforePick.maxHp;
+    const expectedP2R2Hp = Math.max(
+      1,
+      Math.min(p2R2.maxHp, p2DamagedHp + Math.max(0, p2DeltaMax)),
+    );
+    expect(p2R2.alive).toBe(true);
+    expect(p2R2.hp).toBe(expectedP2R2Hp);
+    expect(p2R2.hp).toBeLessThan(p2R2.maxHp);
+    expect(p2R2.moveStamina).toBe(100);
+    expect(p2R2.gadgetCharges.mend_brew).toBe(2);
+
+    // Eliminated p3 stays eliminated (never revived, never respawned onto active spawn, never gets turns!)
+    expect(p3R2.alive).toBe(false);
+    expect(p3R2.hp).toBe(0);
+    expect(p3R2.moveStamina).toBe(0);
+    expect(p3R2.pendingEvoDraft).toBe(false);
+    if (p3ElimPos) {
+      expect(p3R2.position).toEqual(p3ElimPos);
+    }
+
+    // Verify turns rotate ONLY between p1 and p2 (p3 never gets a turn) and p2 heals carried damage with mend_brew!
+    const activeTurnIds = new Set<string>();
+    let p2HealedOnce = false;
+    for (let t = 0; t < 4; t++) {
+      const curActive = engine.getSnapshot().activePlayerId;
+      if (curActive) {
+        activeTurnIds.add(curActive);
+      }
+      if (curActive === "p2" && !p2HealedOnce) {
+        const healEvs = engine.applyUtility("p2", {
+          gadgetId: "mend_brew",
+          direction: { x: 1, y: 0, z: 0 },
+        });
+        expect(healEvs).toHaveLength(1);
+        expect(healEvs[0]?.type).toBe("ABILITY_HEALED");
+        p2HealedOnce = true;
+      }
+      engine.tick(29);
+    }
+    expect(p2HealedOnce).toBe(true);
+    expect(activeTurnIds.has("p1")).toBe(true);
+    expect(activeTurnIds.has("p2")).toBe(true);
+    expect(activeTurnIds.has("p3")).toBe(false);
+
+    const p2HealedR2 = engine.getSnapshot().critters.find((c) => c.id === "p2");
+    expect(p2HealedR2?.hp).toBe(Math.min(p2R2.maxHp, expectedP2R2Hp + 45));
+
+    // Expire Round 2 clock -> ROUND_DRAFT (still only p1 & p2) -> Round 3 carries exact HP again!
+    const p1EndR2Hp = engine.getSnapshot().critters.find((c) => c.id === "p1")?.hp ?? 0;
+    const p2EndR2Hp = engine.getSnapshot().critters.find((c) => c.id === "p2")?.hp ?? 0;
+    const p1EndR2Max = engine.getSnapshot().critters.find((c) => c.id === "p1")?.maxHp ?? 0;
+    const p2EndR2Max = engine.getSnapshot().critters.find((c) => c.id === "p2")?.maxHp ?? 0;
+
+    engine.tick(300);
+    const r2Draft = engine.getSnapshot();
+    expect(r2Draft.phase).toBe("ROUND_DRAFT");
+    expect(r2Draft.pendingDrafts.map((d) => d.playerId)).toEqual(["p1", "p2"]);
+    completeAllPendingDrafts(engine);
+
+    const r3Snap = engine.getSnapshot();
+    expect(r3Snap.round).toBe(3);
+    expect(r3Snap.phase).toBe("ACTIVE");
+    const p1R3 = r3Snap.critters.find((c) => c.id === "p1");
+    const p2R3 = r3Snap.critters.find((c) => c.id === "p2");
+    const p3R3 = r3Snap.critters.find((c) => c.id === "p3");
+    expect(p1R3?.alive).toBe(true);
+    expect(p1R3?.hp).toBe(
+      Math.max(
+        1,
+        Math.min(
+          p1R3?.maxHp ?? 1,
+          p1EndR2Hp + Math.max(0, (p1R3?.maxHp ?? 0) - p1EndR2Max),
+        ),
+      ),
+    );
+    expect(p2R3?.alive).toBe(true);
+    expect(p2R3?.hp).toBe(
+      Math.max(
+        1,
+        Math.min(
+          p2R3?.maxHp ?? 1,
+          p2EndR2Hp + Math.max(0, (p2R3?.maxHp ?? 0) - p2EndR2Max),
+        ),
+      ),
+    );
+    expect(p3R3?.alive).toBe(false);
+    expect(p3R3?.hp).toBe(0);
+  });
+
+  it("persists carved craters, cumulative carveLog, and exact surviving critter HP across rounds while respawning survivors and fresh hazards on dry ground", () => {
     const engine = new MatchEngine({
       roomCode: "PERS",
       mode: "ffa",
@@ -2117,7 +2407,7 @@ describe("Phase 1 Overhaul: 5-Round Persistent Map, Two-Stage Tide & Siege Coin 
       true,
     );
 
-    // Carve a crater in Round 1
+    // Carve a crater in Round 1 (p1 takes self-blast damage)
     const fireEvsR1 = engine.applyFire("p1", {
       gadgetId: "gale_mortar",
       direction: { x: 0, y: -1, z: 0 },
@@ -2132,8 +2422,13 @@ describe("Phase 1 Overhaul: 5-Round Persistent Map, Two-Stage Tide & Siege Coin 
     expect(engine.world.isSolid(rockPoint.x, rockPoint.y, rockPoint.z)).toBe(
       false,
     );
+    const p1HpEndR1 = afterCarveR1.critters.find((c) => c.id === "p1")?.hp ?? 0;
+    const p1MaxHpEndR1 =
+      afterCarveR1.critters.find((c) => c.id === "p1")?.maxHp ?? 0;
+    expect(p1HpEndR1).toBeGreaterThan(0);
+    expect(p1HpEndR1).toBeLessThan(p1MaxHpEndR1);
 
-    // Finish Round 1 -> Round 2
+    // Finish Round 1 via time-up draw -> Round 2
     engine.tick(300);
     expect(engine.getSnapshot().phase).toBe("ROUND_DRAFT");
     completeAllPendingDrafts(engine);
@@ -2148,11 +2443,18 @@ describe("Phase 1 Overhaul: 5-Round Persistent Map, Two-Stage Tide & Siege Coin 
     expect(r2Snap.carveLog.length).toBe(carveCountR1);
     expect(r2Snap.carveLog).toEqual(afterCarveR1.carveLog);
 
-    // Critters respawn alive at full HP safely above water; fresh hazards sit above water
-    for (const c of r2Snap.critters) {
-      expect(c.alive).toBe(true);
-      expect(c.hp).toBe(c.maxHp);
-      expect(c.position.y).toBeGreaterThan(r2Snap.waterLevel + 0.5);
+    // Surviving critters respawn safely above water while PRESERVING exact HP (+ any maxHp mutation delta)!
+    const p1R2 = r2Snap.critters.find((c) => c.id === "p1");
+    const p2R2 = r2Snap.critters.find((c) => c.id === "p2");
+    expect(p1R2?.alive).toBe(true);
+    expect(p2R2?.alive).toBe(true);
+    if (p1R2 && p2R2) {
+      const p1DeltaMax = Math.max(0, p1R2.maxHp - p1MaxHpEndR1);
+      expect(p1R2.hp).toBe(Math.min(p1R2.maxHp, p1HpEndR1 + p1DeltaMax));
+      expect(p1R2.hp).toBeLessThan(p1R2.maxHp);
+      expect(p2R2.hp).toBe(p2R2.maxHp);
+      expect(p1R2.position.y).toBeGreaterThan(r2Snap.waterLevel + 0.5);
+      expect(p2R2.position.y).toBeGreaterThan(r2Snap.waterLevel + 0.5);
     }
     const r2Hazards = r2Snap.hazards ?? [];
     expect(r2Hazards.length).toBeGreaterThan(0);

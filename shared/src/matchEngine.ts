@@ -1289,6 +1289,10 @@ export class MatchEngine {
 
       // Round Clock Hit 0:00
       if (this.roundTimeRemainingSec <= 0) {
+        if (this.checkRoundEnded()) {
+          events.push(...this.finishRound());
+          return events;
+        }
         if (this.round >= this.maxRounds) {
           this.roundWinners.push(null);
           events.push({
@@ -2002,12 +2006,14 @@ export class MatchEngine {
     this.thornTriggeredThisTurn.clear();
 
     for (const c of this.critters) {
-      c.moveStamina = 100;
+      c.moveStamina = c.alive ? 100 : 0;
       c.grappleUsedThisTurn = false;
       c.droneNudgeUsedThisTurn = false;
       c.retreatBurrowUsedThisTurn = false;
       c.skyBomberDropUsedThisTurn = false;
-      this.fallPeakY.set(c.id, c.position.y);
+      if (c.alive) {
+        this.fallPeakY.set(c.id, c.position.y);
+      }
     }
 
     // Decay temporary prism walls & land parachuting pods
@@ -2141,6 +2147,7 @@ export class MatchEngine {
   private awardEndOfRoundStipends(trailingIds: ReadonlySet<string>): EngineEvent[] {
     const events: EngineEvent[] = [];
     for (const c of this.critters) {
+      if (!c.alive || c.hp <= 0) continue;
       const isTrailing = trailingIds.has(c.id);
       const amount = isTrailing
         ? COINS_ROUND_STIPEND + COINS_TRAILING_BONUS
@@ -2160,9 +2167,29 @@ export class MatchEngine {
     const events: EngineEvent[] = [];
     const trailingIds = this.getTrailingPlayerIds();
     events.push(...this.awardEndOfRoundStipends(trailingIds));
-    this.pendingDrafts = this.critters.map((c) =>
+    const aliveCritters = this.critters.filter((c) => c.alive && c.hp > 0);
+    this.pendingDrafts = aliveCritters.map((c) =>
       this.buildDraftForPlayer(c, trailingIds.has(c.id) ? 1 : 0),
     );
+    if (this.pendingDrafts.length === 0) {
+      const matchDecision = this.evaluateMatchWinner();
+      this.phase = "MATCH_OVER";
+      this.activePlayerId = null;
+      this.phaseTimeRemainingSec = 0;
+      this.winnerId = matchDecision.winnerId;
+      this.winnerTeam = matchDecision.winnerTeam;
+      this.matchEndReason = "elimination";
+      events.push({
+        type: "MATCH_ENDED",
+        winnerLabel: matchDecision.label,
+      });
+      events.push({
+        type: "PHASE_CHANGED",
+        phase: "MATCH_OVER",
+        activePlayerId: null,
+      });
+      return events;
+    }
     this.phase = "ROUND_DRAFT";
     this.activePlayerId = null;
     this.phaseTimeRemainingSec = DEFAULT_DRAFT_DURATION_SEC;
@@ -2190,6 +2217,8 @@ export class MatchEngine {
     const events: EngineEvent[] = [];
     let winnerLabel = "Draw";
     let roundWasDraw = false;
+    let eliminationWinnerId: string | null = null;
+    let eliminationWinnerTeam: TeamId | null = null;
 
     if (this.config.mode === "2v2") {
       const aliveA = this.critters.some((c) => c.team === "A" && c.alive);
@@ -2198,10 +2227,12 @@ export class MatchEngine {
         winnerLabel = "Team A";
         this.teamScores.A += 2;
         this.roundWinners.push("A");
+        eliminationWinnerTeam = "A";
       } else if (aliveB && !aliveA) {
         winnerLabel = "Team B";
         this.teamScores.B += 2;
         this.roundWinners.push("B");
+        eliminationWinnerTeam = "B";
       } else {
         roundWasDraw = true;
         this.roundWinners.push(null);
@@ -2212,6 +2243,7 @@ export class MatchEngine {
         winnerLabel = survivor.name;
         survivor.score += 2;
         this.roundWinners.push(survivor.id);
+        eliminationWinnerId = survivor.id;
       } else {
         roundWasDraw = true;
         this.roundWinners.push(null);
@@ -2224,24 +2256,17 @@ export class MatchEngine {
       winnerLabel,
     });
 
-    // Always play all rounds through maxRounds (default 5)
-    if (this.round >= this.maxRounds) {
-      // Round 5 simultaneous KO / draw triggers Stage 2 Ocean Deluge!
-      if (roundWasDraw) {
-        events.push(...this.startFinalFlood());
-        return events;
-      }
-
-      const matchDecision = this.evaluateMatchWinner();
+    // True Elimination Victory: sole surviving critter (FFA) or team (2v2) wins immediately!
+    if (!roundWasDraw) {
       this.phase = "MATCH_OVER";
       this.activePlayerId = null;
       this.phaseTimeRemainingSec = 0;
-      this.winnerId = matchDecision.winnerId;
-      this.winnerTeam = matchDecision.winnerTeam;
-      this.matchEndReason = "score";
+      this.winnerId = eliminationWinnerId;
+      this.winnerTeam = eliminationWinnerTeam;
+      this.matchEndReason = "elimination";
       events.push({
         type: "MATCH_ENDED",
-        winnerLabel: matchDecision.label,
+        winnerLabel,
       });
       events.push({
         type: "PHASE_CHANGED",
@@ -2251,7 +2276,29 @@ export class MatchEngine {
       return events;
     }
 
-    events.push(...this.enterRoundDraft());
+    // Round 5 simultaneous 0-survivor KO preserves Stage 2 Ocean Deluge tiebreaker!
+    if (this.round >= this.maxRounds) {
+      events.push(...this.startFinalFlood());
+      return events;
+    }
+
+    // Rounds 1-4 simultaneous 0-survivor KO: conclude cleanly rather than entering an empty round
+    const matchDecision = this.evaluateMatchWinner();
+    this.phase = "MATCH_OVER";
+    this.activePlayerId = null;
+    this.phaseTimeRemainingSec = 0;
+    this.winnerId = matchDecision.winnerId;
+    this.winnerTeam = matchDecision.winnerTeam;
+    this.matchEndReason = "elimination";
+    events.push({
+      type: "MATCH_ENDED",
+      winnerLabel: matchDecision.label,
+    });
+    events.push({
+      type: "PHASE_CHANGED",
+      phase: "MATCH_OVER",
+      activePlayerId: null,
+    });
     return events;
   }
 
@@ -2447,36 +2494,49 @@ export class MatchEngine {
     this.pendingDrafts = [];
 
     // Keep the persistent carved SDF world & cumulative carveLog intact across all rounds!
+    const aliveCritters = this.critters.filter((c) => c.alive && c.hp > 0);
     const spawns = this._world.findPersistentRoundSpawnPoints(
-      this.critters.length,
+      Math.max(1, aliveCritters.length),
       this.waterLevel,
     );
     const centerX = this._world.centerX;
     const centerZ = this._world.centerZ;
     this.fallPeakY.clear();
-    for (let i = 0; i < this.critters.length; i++) {
-      const c = this.critters[i];
-      if (!c) continue;
-      const spawn = spawns[i] ?? {
-        x: centerX + i,
-        y: this.waterLevel + 2.0,
-        z: centerZ,
-      };
+
+    let aliveSpawnIdx = 0;
+    for (const c of this.critters) {
       const stats = computeCritterStats(c.species, c.equipped);
-      c.position = { ...spawn };
       c.velocity = { x: 0, y: 0, z: 0 };
-      c.alive = true;
       c.maxHp = stats.maxHp;
-      c.hp = stats.maxHp;
-      c.moveStamina = 100;
       c.maxMoveDistance = this.computeMaxMoveDistance(c.species, c.equipped);
-      c.roundShieldRemaining = stats.roundShieldHits;
-      // Persistent Build: KEEP loadout & unspent coins; refill all owned abilities free!
-      c.gadgetCharges = createRoundLoadoutCharges(c.loadout);
       c.droneNudgeUsedThisTurn = false;
       c.retreatBurrowUsedThisTurn = false;
       c.skyBomberDropUsedThisTurn = false;
       c.grappleUsedThisTurn = false;
+
+      if (!c.alive || c.hp <= 0) {
+        c.alive = false;
+        c.hp = 0;
+        c.moveStamina = 0;
+        c.roundShieldRemaining = 0;
+        c.pendingEvoDraft = false;
+        continue;
+      }
+
+      const spawn = spawns[aliveSpawnIdx] ?? {
+        x: centerX + aliveSpawnIdx,
+        y: this.waterLevel + 2.0,
+        z: centerZ,
+      };
+      aliveSpawnIdx += 1;
+      c.position = { ...spawn };
+      c.alive = true;
+      // Persist exact battle-damaged HP (+ any newly drafted maxHp mutation delta) across rounds!
+      c.hp = Math.max(1, Math.min(stats.maxHp, c.hp));
+      c.moveStamina = 100;
+      c.roundShieldRemaining = stats.roundShieldHits;
+      // Persistent Build: KEEP loadout & unspent coins; refill all owned abilities free!
+      c.gadgetCharges = createRoundLoadoutCharges(c.loadout);
       c.pendingEvoDraft = c.evoCharge >= 100;
       this.fallPeakY.set(c.id, spawn.y);
     }
@@ -2491,6 +2551,9 @@ export class MatchEngine {
 
     this.rollWind();
     this.activePlayerId = this.selectInitialActiveCritter();
+    if (!this.activePlayerId) {
+      return this.finishRound();
+    }
     this.phase = "ACTIVE";
     this.phaseTimeRemainingSec = this.turnDurationSec;
 
