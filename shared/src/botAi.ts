@@ -1,3 +1,9 @@
+import {
+  DEFAULT_STARTING_COINS,
+  GADGET_CATALOG,
+  MAX_LOADOUT_SLOTS,
+  validateAndBuildStartingLoadout,
+} from "./catalog.js";
 import { GRAVITY, safeNormalizeVec3 } from "./physics.js";
 import type { SdfWorld } from "./sdf.js";
 import type {
@@ -5,16 +11,94 @@ import type {
   GadgetId,
   HazardState,
   MatchState,
+  SpeciesId,
   Vec3,
 } from "./types.js";
 
-/** Tactical move and firing plan computed for an AI bot critter's turn. */
+/** Tactical move, pre-shot utility, and firing plan computed for an AI bot critter's turn. */
 export interface BotPlan {
   moveTarget: Vec3;
+  preUtilities?: Array<{
+    gadgetId: "mend_brew" | "prism_wall";
+    direction: Vec3;
+  }>;
   gadgetId: GadgetId;
   direction: Vec3;
   power: number;
   droneTarget?: Vec3;
+}
+
+const BOT_SPECIES_LOADOUTS: Readonly<Record<SpeciesId, readonly GadgetId[]>> = {
+  mole: ["gale_mortar", "burrow_bore", "vine_grapple"],
+  norway_rat: ["gale_mortar", "spore_burst", "vine_grapple"],
+  badger: ["gale_mortar", "quake_club", "mend_brew", "prism_wall"],
+  glider_squirrel: ["gale_mortar", "vine_grapple", "seeker_firefly"],
+  hedgehog: ["gale_mortar", "quake_club", "gravity_mine"],
+  armadillo: ["gale_mortar", "shock_magnet", "mend_brew"],
+};
+
+const BOT_SHOP_PRIORITY: readonly GadgetId[] = [
+  "spore_burst",
+  "burrow_bore",
+  "mend_brew",
+  "seeker_firefly",
+  "vine_grapple",
+  "quake_club",
+  "gravity_mine",
+  "shock_magnet",
+  "prism_wall",
+];
+
+/**
+ * Choose a varied species-themed starting ability loadout for an AI bot
+ * validated strictly within the starting Siege Coin budget (default 100).
+ */
+export function chooseBotStartingLoadout(
+  species: SpeciesId,
+  budget: number = DEFAULT_STARTING_COINS,
+): GadgetId[] {
+  const preferred = BOT_SPECIES_LOADOUTS[species] ?? [
+    "gale_mortar",
+    "quake_club",
+    "vine_grapple",
+  ];
+  return validateAndBuildStartingLoadout(preferred, budget).loadout;
+}
+
+/**
+ * Decide an AI bot's next Armory purchase or refill given its current Siege Coins and loadout.
+ * Buys high-impact unowned abilities into open slots first, or refills depleted owned abilities.
+ */
+export function chooseBotShopPurchase(
+  critter: CritterState,
+): { gadgetId: GadgetId; replaceGadgetId?: GadgetId } | null {
+  if (critter.loadout.length < MAX_LOADOUT_SLOTS) {
+    for (const candidate of BOT_SHOP_PRIORITY) {
+      if (critter.loadout.includes(candidate)) {
+        continue;
+      }
+      const def = GADGET_CATALOG[candidate];
+      if (critter.coins >= def.shopCost) {
+        return { gadgetId: candidate };
+      }
+    }
+  }
+
+  for (const ownedId of critter.loadout) {
+    const def = GADGET_CATALOG[ownedId];
+    const charges = critter.gadgetCharges[ownedId];
+    if (
+      def.startingCharges !== null &&
+      def.refillCost > 0 &&
+      charges !== null &&
+      charges <= 0 &&
+      critter.coins >= def.refillCost
+    ) {
+      return { gadgetId: ownedId };
+    }
+  }
+
+  return null;
 }
 
 const MIN_BOT_POWER = 0.25;
@@ -475,12 +559,38 @@ function findTacticalBarrelTarget(
   return bestBarrelPos;
 }
 
+function isTargetNearDropoff(
+  world: SdfWorld,
+  targetPos: Vec3,
+  waterLevel: number,
+): boolean {
+  if (targetPos.y <= waterLevel + 4.5) {
+    return true;
+  }
+  const probes: ReadonlyArray<readonly [number, number]> = [
+    [3.5, 0],
+    [-3.5, 0],
+    [0, 3.5],
+    [0, -3.5],
+    [2.5, 2.5],
+    [-2.5, 2.5],
+    [2.5, -2.5],
+    [-2.5, -2.5],
+  ];
+  for (const [dx, dz] of probes) {
+    const sy = world.getSurfaceY(targetPos.x + dx, targetPos.z + dz);
+    if (sy === null || sy <= targetPos.y - 3.0) {
+      return true;
+    }
+  }
+  return false;
+}
+
 /**
  * Plan a deterministic tactical turn for an AI bot critter across both 60m Duel
  * and 144m Grand islands: picks nearest/weakest enemy (never own teammate in 2v2),
- * advances safely toward passes/geysers while avoiding Spark Mines & thorns, and
- * when obstructed by dividing walls smartly blasts wall Blast Barrels, drills with
- * Burrow Bore, launches Seeker Firefly, or lobs high wall-clearing mortar arcs.
+ * advances safely toward passes/geysers while avoiding Spark Mines & thorns, queues
+ * tactical Mend Brew heals and Prism Wall cover, and leverages all 10 loadout gadgets.
  */
 export function planBotTurn(
   state: MatchState,
@@ -558,8 +668,56 @@ export function planBotTurn(
     targetAimPos.z - origin.z,
   );
 
-  // Close-range knockback slam
-  if (dist <= 2.6) {
+  const hasCharge = (id: GadgetId): boolean => {
+    if (!bot.loadout.includes(id)) {
+      return false;
+    }
+    const c = bot.gadgetCharges[id];
+    return c === null || c > 0;
+  };
+
+  const obstructed = !world.hasDirectLineOfSight(
+    moveTarget,
+    target.position,
+    1.1,
+  );
+
+  // Queue non-turn-ending defensive pre-utilities when owned with charges
+  const preUtilities: Array<{
+    gadgetId: "mend_brew" | "prism_wall";
+    direction: Vec3;
+  }> = [];
+  if (
+    bot.loadout.includes("mend_brew") &&
+    (bot.gadgetCharges.mend_brew ?? 0) > 0 &&
+    bot.hp <= bot.maxHp * 0.65
+  ) {
+    preUtilities.push({
+      gadgetId: "mend_brew",
+      direction: { x: 0, y: 1, z: 0 },
+    });
+  }
+  if (
+    bot.loadout.includes("prism_wall") &&
+    (bot.gadgetCharges.prism_wall ?? 0) > 0 &&
+    !obstructed &&
+    bot.hp <= bot.maxHp * 0.8
+  ) {
+    const dirTowardTarget = safeNormalizeVec3({
+      x: target.position.x - moveTarget.x,
+      y: 0,
+      z: target.position.z - moveTarget.z,
+    }) ?? { x: 0, y: 0, z: 1 };
+    preUtilities.push({
+      gadgetId: "prism_wall",
+      direction: dirTowardTarget,
+    });
+  }
+  const withPreUtilities =
+    preUtilities.length > 0 ? { preUtilities } : {};
+
+  // Close-range knockback slam (only when bot owns Quake Club)
+  if (dist <= 2.6 && hasCharge("quake_club")) {
     const meleeDir =
       safeNormalizeVec3({
         x: targetAimPos.x - origin.x,
@@ -568,6 +726,7 @@ export function planBotTurn(
       }) ?? FALLBACK_DIR;
     return {
       moveTarget,
+      ...withPreUtilities,
       gadgetId: "quake_club",
       direction: meleeDir,
       power: 0.85,
@@ -579,16 +738,6 @@ export function planBotTurn(
   const mortarSpeedRange = isGrand ? 31.0 : 18.5;
   const boreSpeedMin = isGrand ? 20.0 : 15.0;
   const boreSpeedRange = isGrand ? 20.0 : 14.0;
-
-  const obstructed = !world.hasDirectLineOfSight(
-    moveTarget,
-    target.position,
-    1.1,
-  );
-  const hasCharge = (id: GadgetId): boolean => {
-    const c = bot.gadgetCharges[id];
-    return c === null || c > 0;
-  };
 
   // 1. If obstructed, check for a Blast Barrel along the dividing wall or beside an enemy!
   if (obstructed) {
@@ -613,6 +762,7 @@ export function planBotTurn(
       );
       return {
         moveTarget,
+        ...withPreUtilities,
         gadgetId: "gale_mortar",
         direction: solvedBarrel.direction,
         power: solvedBarrel.power,
@@ -636,6 +786,7 @@ export function planBotTurn(
     );
     return {
       moveTarget,
+      ...withPreUtilities,
       gadgetId: "burrow_bore",
       direction: solved.direction,
       power: solved.power,
@@ -652,6 +803,7 @@ export function planBotTurn(
       }) ?? FALLBACK_DIR;
     return {
       moveTarget,
+      ...withPreUtilities,
       gadgetId: "seeker_firefly",
       direction: fireflyDir,
       power: 0.78,
@@ -659,7 +811,66 @@ export function planBotTurn(
     };
   }
 
-  // 4. Fire wall-clearing high mortar arc (or Spore Burst cluster) over dividing barriers
+  // 4. Tactically displace targets near dropoffs or low ledges with Shock Magnet / Gravity Mine
+  const nearDropoff = isTargetNearDropoff(
+    world,
+    target.position,
+    state.waterLevel,
+  );
+  if (nearDropoff) {
+    if (
+      bot.loadout.includes("shock_magnet") &&
+      hasCharge("shock_magnet") &&
+      !obstructed &&
+      dist <= (isGrand ? 62 : 30)
+    ) {
+      const solved = solveBallisticAim(
+        world,
+        origin,
+        targetAimPos,
+        state.wind,
+        false,
+        1.0,
+        mortarSpeedMin,
+        mortarSpeedRange,
+        false,
+      );
+      return {
+        moveTarget,
+        ...withPreUtilities,
+        gadgetId: "shock_magnet",
+        direction: solved.direction,
+        power: solved.power,
+      };
+    }
+    if (
+      bot.loadout.includes("gravity_mine") &&
+      hasCharge("gravity_mine") &&
+      dist >= 8 &&
+      dist <= (isGrand ? 66 : 32)
+    ) {
+      const solved = solveBallisticAim(
+        world,
+        origin,
+        targetAimPos,
+        state.wind,
+        true,
+        1.0,
+        mortarSpeedMin,
+        mortarSpeedRange,
+        obstructed,
+      );
+      return {
+        moveTarget,
+        ...withPreUtilities,
+        gadgetId: "gravity_mine",
+        direction: solved.direction,
+        power: solved.power,
+      };
+    }
+  }
+
+  // 5. Fire wall-clearing high mortar arc (or Spore Burst cluster) over dividing barriers
   const gadgetId: GadgetId =
     dist >= 10.0 && hasCharge("spore_burst") ? "spore_burst" : "gale_mortar";
 
@@ -677,6 +888,7 @@ export function planBotTurn(
 
   return {
     moveTarget,
+    ...withPreUtilities,
     gadgetId,
     direction: solved.direction,
     power: solved.power,

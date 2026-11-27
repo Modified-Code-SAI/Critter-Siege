@@ -46,7 +46,8 @@ export type GadgetId =
   | "seeker_firefly"
   | "gravity_mine"
   | "prism_wall"
-  | "shock_magnet";
+  | "shock_magnet"
+  | "mend_brew";
 
 /** Sculpted SDF island biome themes. */
 export type ThemeId =
@@ -69,6 +70,7 @@ export type TurnPhase =
   | "RETREAT"
   | "DRAFT_IF_READY"
   | "ROUND_DRAFT"
+  | "FINAL_FLOOD"
   | "MATCH_OVER";
 
 /** Deterministic terrain subtraction operation applied to the SDF grid. */
@@ -110,6 +112,7 @@ export interface ShotSimulationResult {
   impacts: ImpactEvent[];
   carveOps: CarveOp[];
   hits: CritterHitResult[];
+  shatteredPrismWallIds?: string[];
 }
 
 /** Static species definition and passive baseline attributes. */
@@ -167,6 +170,11 @@ export interface GadgetDefinition {
   bonusLobbyOnly: boolean;
   unlockCost: number;
   chargesPerRound: number | null;
+  startingCharges: number | null;
+  shopCost: number;
+  refillCost: number;
+  freeStarter?: boolean;
+  healAmount?: number;
   turnEnding: boolean;
   windAffected: boolean;
   baseDamage: number;
@@ -224,6 +232,8 @@ export interface CritterState {
   pendingEvoDraft: boolean;
   equipped: Partial<Record<HardpointSlot, MutationId>>;
   apex: ApexId | null;
+  coins: number;
+  loadout: GadgetId[];
   gadgetCharges: Record<GadgetId, number | null>;
   roundShieldRemaining: number;
   kills: number;
@@ -309,6 +319,7 @@ export interface LobbyConfigMessage {
   species?: SpeciesId;
   team?: TeamId;
   bonusGadget?: GadgetId | null;
+  startingLoadout?: GadgetId[];
 }
 
 /** Lobby participant configuration before match start. */
@@ -320,6 +331,7 @@ export interface LobbyPlayer {
   isBot: boolean;
   connected: boolean;
   bonusGadget?: GadgetId | null;
+  startingLoadout?: GadgetId[];
 }
 
 /** Serializable pre-match room lobby state. */
@@ -344,6 +356,7 @@ export interface MatchPlayerSeed {
   color?: string;
   bonusGadget?: GadgetId | null;
   unlockedBonusGadgets?: GadgetId[];
+  startingLoadout?: GadgetId[];
 }
 
 /** Alias preserving compatibility with earlier MatchPlayerConfig name. */
@@ -359,9 +372,27 @@ export interface MatchConfig {
   mapScale?: MapScaleChoice;
   maxRounds?: number;
   roundCount?: number;
+  roundDurationSec?: number;
+  startingCoins?: number;
+  floodDurationSec?: number;
   turnDurationMs?: number;
   retreatDurationMs?: number;
   players: MatchPlayerSeed[];
+}
+
+/** Terminal reason explaining how the match concluded. */
+export type MatchEndReason = "elimination" | "score" | "flood_draw";
+
+/** Authoritative runtime state for a deployed temporary crystal Prism Wall barrier. */
+export interface PrismWallState {
+  id: string;
+  ownerId: string;
+  position: Vec3;
+  normal: Vec3;
+  width: number;
+  height: number;
+  turnsLeft: number;
+  active: boolean;
 }
 
 /** Complete authoritative match state snapshot. */
@@ -380,11 +411,16 @@ export interface MatchState {
   activePlayerId: string | null;
   phaseTimerMs: number;
   phaseTimeRemainingSec: number;
+  roundTimeRemainingSec: number;
+  roundDurationSec: number;
   waterLevel: number;
+  floodTargetWaterLevel: number | null;
+  matchEndReason: MatchEndReason | null;
   wind: Vec3;
   critters: CritterState[];
   evoPods: EvoPodState[];
   hazards?: HazardState[];
+  prismWalls?: PrismWallState[];
   pendingDrafts: PendingDraftState[];
   carveLog: CarveOp[];
   scores: Record<string, number>;
@@ -420,6 +456,15 @@ export type EngineEvent =
       affectedCritterIds: string[];
     }
   | {
+      type: "PRISM_WALL_DEPLOYED";
+      wall: PrismWallState;
+    }
+  | {
+      type: "PRISM_WALL_SHATTERED";
+      wallId: string;
+      position: Vec3;
+    }
+  | {
       type: "EVO_POD_SPAWNED";
       pod: EvoPodState;
     }
@@ -439,6 +484,29 @@ export type EngineEvent =
       apex: ApexId | null;
     }
   | {
+      type: "COINS_EARNED";
+      playerId: string;
+      amount: number;
+      reason: string;
+      newBalance: number;
+    }
+  | {
+      type: "ABILITY_PURCHASED";
+      playerId: string;
+      gadgetId: GadgetId;
+      isRefill: boolean;
+      replacedGadgetId: GadgetId | null;
+      cost: number;
+      refund: number;
+      newBalance: number;
+    }
+  | {
+      type: "ABILITY_HEALED";
+      playerId: string;
+      amount: number;
+      newHp: number;
+    }
+  | {
       type: "WATER_ROSE";
       waterLevel: number;
     }
@@ -447,6 +515,17 @@ export type EngineEvent =
       playerId: string;
       position: Vec3;
       damage: number;
+    }
+  | {
+      type: "FINAL_FLOOD_STARTED";
+      targetWaterLevel: number;
+      durationSec: number;
+    }
+  | {
+      type: "CRITTER_ENGULFED";
+      playerId: string;
+      position: Vec3;
+      waterLevel: number;
     }
   | {
       type: "VINE_GRAPPLED";

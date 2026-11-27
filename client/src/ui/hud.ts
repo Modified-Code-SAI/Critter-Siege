@@ -1,11 +1,16 @@
 import {
   APEX_CATALOG,
+  DEFAULT_STARTING_COINS,
   GADGET_CATALOG,
+  GADGET_IDS,
   GAME_TITLE,
   HARDPOINT_SLOTS,
+  MAX_LOADOUT_SLOTS,
   MUTATION_CATALOG,
+  PLAYER_COLOR_PALETTE,
   SPECIES_CATALOG,
   SPECIES_IDS,
+  validateAndBuildStartingLoadout,
   type CritterState,
   type GadgetId,
   type GameMode,
@@ -19,7 +24,17 @@ import {
 } from "@critter/shared";
 import type { CameraMode } from "../game/cameraRig.js";
 import type { LobbyViewState } from "../net/gameClient.js";
-import type { PlayerProfile } from "../profile/progression.js";
+import {
+  COSMETIC_ACCENT_CATALOG,
+  type PlayerProfile,
+} from "../profile/progression.js";
+
+/** Default balanced starting 3-ability kit (cost 55, 45 Siege Coins remaining). */
+export const DEFAULT_STARTING_LOADOUT: readonly GadgetId[] = [
+  "gale_mortar",
+  "quake_club",
+  "vine_grapple",
+];
 
 /** Resolve the crisp 256px 3D rendered portrait URL for any playable Critter Siege species. */
 export function getSpeciesPortraitUrl(
@@ -69,8 +84,10 @@ export interface HudCallbacks {
   onColorChange: (color: string) => void;
   onSelectSpecies: (species: SpeciesId) => void;
   onUnlockSpecies: (species: SpeciesId) => void;
-  onSelectBonusGadget: (gadget: GadgetId | null) => void;
-  onUnlockBonusGadget: (gadget: GadgetId) => void;
+  onUnlockCosmetic?: (cosmeticId: string) => void;
+  onSelectBonusGadget?: (gadget: GadgetId | null) => void;
+  onUnlockBonusGadget?: (gadget: GadgetId) => void;
+  onStartingLoadoutChange: (loadout: GadgetId[]) => void;
   onThemeChange: (theme: ThemeId) => void;
   onGameModeChange: (mode: GameMode) => void;
   onMapScaleChange?: (mapScale: MapScaleChoice) => void;
@@ -82,9 +99,12 @@ export interface HudCallbacks {
   onLeaveRoom: () => void;
   onCopyInviteLink: () => void;
   onSelectGadget: (gadgetId: GadgetId) => void;
+  onBuyAbility: (gadgetId: GadgetId, replaceGadgetId?: GadgetId) => void;
   onPickMutation: (mutationId: MutationId, replaceSlot?: HardpointSlot) => void;
   onRerollDraft: () => void;
   onToggleMute: () => void;
+  onToggleMusicMute: () => void;
+  onArmoryOpenChange?: (open: boolean) => void;
   onPlayAgain: () => void;
   onBackToLobby: () => void;
   onSelectCameraMode?: (mode: SelectableCameraMode) => void;
@@ -102,6 +122,8 @@ export interface HudFrameState {
   charging: boolean;
   chargePower: number;
   muted: boolean;
+  musicMuted: boolean;
+  armoryOpen?: boolean;
   dronePingActive: boolean;
   essenceBreakdown: MatchEssenceBreakdown | null;
   showQuickStartHint?: boolean;
@@ -118,23 +140,9 @@ export interface LobbySelectionState {
   mapScale?: MapScaleChoice;
   botCount: number;
   bonusGadget: GadgetId | null;
+  startingLoadout: GadgetId[];
   joinCodeInput: string;
 }
-
-const STANDARD_GADGETS: readonly GadgetId[] = [
-  "gale_mortar",
-  "quake_club",
-  "vine_grapple",
-  "spore_burst",
-  "burrow_bore",
-  "seeker_firefly",
-];
-
-const BONUS_GADGETS: readonly GadgetId[] = [
-  "gravity_mine",
-  "prism_wall",
-  "shock_magnet",
-];
 
 const THEME_META: ReadonlyArray<{ id: ThemeId; shortLabel: string; label: string }> = [
   { id: "emerald_spire", shortLabel: "Emerald", label: "Emerald Spire" },
@@ -147,15 +155,6 @@ const MAP_SCALE_META: ReadonlyArray<{ id: MapScaleChoice; label: string; title: 
   { id: "auto", label: "Auto", title: "2p = 60m Duel · 3–4p = 144m Grand" },
   { id: "duel", label: "2p 60m", title: "Compact 60m Duel Island" },
   { id: "grand", label: "4p 144m", title: "Massive 144m Grand Archipelago" },
-];
-
-const COLOR_SWATCHES: readonly string[] = [
-  "#f97316",
-  "#38bdf8",
-  "#22c55e",
-  "#f43f5e",
-  "#a855f7",
-  "#eab308",
 ];
 
 const SLOT_LABELS: Record<HardpointSlot, string> = {
@@ -192,12 +191,26 @@ const GADGET_SHORT_TOOLTIP: Record<GadgetId, string> = {
   gale_mortar: "Gale Mortar — Wind-curved explosive crater shell",
   quake_club: "Quake Club — Close-range knockback smash",
   vine_grapple: "Vine Grapple — Climb cliffs or rappel safely down (6/rd, 1/turn)",
-  spore_burst: "Spore Burst — Triple cluster blast pods",
+  spore_burst: "Spore Burst — Splits into 5 buoyant cluster sub-spores",
   burrow_bore: "Burrow Bore — Drills straight through rock walls",
   seeker_firefly: "Seeker Firefly — Homes onto your Drone Ping target",
   gravity_mine: "Gravity Mine — Pulls rivals inward before blast",
-  prism_wall: "Prism Wall — Raises sculpted cover shelter",
-  shock_magnet: "Shock Magnet — Yanks rivals off cliff ledges",
+  prism_wall: "Prism Wall — Raises sculpted cover shelter (non-turn-ending)",
+  shock_magnet: "Shock Magnet — Snaps onto rock and jolts rivals away",
+  mend_brew: "Mend Brew — Herbal tonic that heals +45 HP without ending your turn",
+};
+
+const GADGET_CONCISE_EFFECT: Record<GadgetId, string> = {
+  gale_mortar: "Wind-curved explosive mortar · ∞",
+  quake_club: "Heavy close knockback slam · ∞",
+  vine_grapple: "Free-action cliff zip & rappel",
+  spore_burst: "Splits into 5 fungal sub-spores",
+  burrow_bore: "Drills 0.6s through solid rock",
+  seeker_firefly: "Guided homing shell to Drone Ping",
+  gravity_mine: "Vortex implosion yanks rivals",
+  prism_wall: "Free-action crystal cover wall",
+  shock_magnet: "Electrified ledge-jolt beacon",
+  mend_brew: "Free-action +45 HP herbal heal",
 };
 
 function escapeHtml(text: string): string {
@@ -207,6 +220,13 @@ function escapeHtml(text: string): string {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#39;");
+}
+
+function formatRoundClock(seconds: number): string {
+  const clamped = Math.max(0, Math.ceil(Number.isFinite(seconds) ? seconds : 0));
+  const mins = Math.floor(clamped / 60);
+  const secs = clamped % 60;
+  return `${mins}:${secs < 10 ? "0" : ""}${secs}`;
 }
 
 function getWindCompassLabel(vx: number, vz: number): string {
@@ -273,6 +293,11 @@ function getGadgetSvgIcon(gadget: GadgetId): string {
         <path d="M6 5v7a6 6 0 0 0 12 0V5"/>
         <path d="M5 9h3M16 9h3"/>
       </svg>`;
+    case "mend_brew":
+      return `<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M9 3h6M10 3v4l-5 8a4 4 0 0 0 3.4 6h7.2a4 4 0 0 0 3.4-6l-5-8V3"/>
+        <path d="M12 12v5M9.5 14.5h5"/>
+      </svg>`;
   }
 }
 
@@ -320,9 +345,10 @@ function getMutationSvgIcon(mutId: MutationId): string {
 
 /**
  * Ultra-modern grandma-friendly DOM Lobby and In-Game HUD controller for Critter Siege.
- * Displays crisp 3D character portraits, Lobby Map Size selector (Auto · 2p 60m · 4p 144m),
- * clickable camera pills, unmistakable glowing Power Bar, accessible HOLD TO FIRE button,
- * subtle Pointer-Lock free-look indicator, and a sleek `?` Controls quick-reference card.
+ * Displays crisp 3D character portraits, 10-ability Lobby Loadout Customizer,
+ * 5-round clock + Final Deluge alert, Anytime Siege Coin Armory modal (`B`),
+ * independent Music (`N`) and Audio (`M`) toggles, clickable camera pills,
+ * glowing Power Bar, accessible HOLD TO FIRE button, and `?` Quick Controls.
  */
 export class HudController {
   private readonly root: HTMLElement;
@@ -333,11 +359,13 @@ export class HudController {
   private readonly visorOverlay: HTMLDivElement;
   private readonly droneOverlay: HTMLDivElement;
   private readonly draftModal: HTMLDivElement;
+  private readonly armoryModal: HTMLDivElement;
   private readonly matchOverModal: HTMLDivElement;
   private readonly toastEl: HTMLDivElement;
 
   // Fast-updated In-Game HUD references
   private readonly topRoundEl: HTMLSpanElement;
+  private readonly topRoundTimerEl: HTMLSpanElement;
   private readonly topPhaseEl: HTMLSpanElement;
   private readonly topTimerEl: HTMLSpanElement;
   private readonly topActiveEl: HTMLSpanElement;
@@ -353,7 +381,13 @@ export class HudController {
   private readonly camDroneBtn: HTMLButtonElement;
   private readonly helpBtnEl: HTMLButtonElement;
   private readonly helpCardEl: HTMLDivElement;
+  private readonly standingsPanelEl: HTMLDivElement;
+  private readonly standingsTitleEl: HTMLSpanElement;
+  private readonly standingsChevronEl: HTMLSpanElement;
+  private readonly standingsBodyEl: HTMLDivElement;
+  private readonly musicMuteBtnEl: HTMLButtonElement;
   private readonly muteBtnEl: HTMLButtonElement;
+  private readonly floodAlertEl: HTMLDivElement;
 
   private readonly turnBannerEl: HTMLDivElement;
   private readonly turnBannerAvatarEl: HTMLImageElement;
@@ -381,6 +415,7 @@ export class HudController {
   private readonly powerBarPctEl: HTMLSpanElement;
   private readonly quickStartEl: HTMLDivElement;
   private readonly hotbarListEl: HTMLDivElement;
+  private readonly armoryBtnEl: HTMLButtonElement;
   private readonly holdFireBtnEl: HTMLButtonElement;
 
   private readonly droneBadgeEl: HTMLDivElement;
@@ -388,17 +423,25 @@ export class HudController {
 
   private toastTimer: ReturnType<typeof setTimeout> | null = null;
   private bannerTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly popupTimers = new Set<ReturnType<typeof setTimeout>>();
 
   private multiplayerOpen = false;
   private shopOpen = false;
+  private loadoutOpen = false;
   private helpOpen = false;
+  private standingsOpen = true;
+  private armoryOpen = false;
+  private pendingSwapTarget: GadgetId | null = null;
   private uiFireActive = false;
 
   private lastHudAvatarSpecies: SpeciesId | null = null;
   private lastPointerLocked: boolean | null = null;
+  private lastMuted: boolean | null = null;
   private lastHardpointSig = "";
   private lastHotbarSig = "";
+  private lastStandingsSig = "";
   private lastDraftSig = "";
+  private lastArmorySig = "";
   private lastMatchOverSig = "";
   private lastLobbySig = "";
 
@@ -418,13 +461,14 @@ export class HudController {
     this.gameLayer.className = "cs-game-layer cs-hidden";
     this.root.appendChild(this.gameLayer);
 
-    // Top-center compact telemetry pill + compass pips + top-right camera switcher + ? help
+    // Top-center compact telemetry pill + compass pips + top-right camera switcher + ? help + Music + SFX
     const topBar = document.createElement("div");
     topBar.className = "cs-top-bar";
     topBar.innerHTML = `
       <div class="cs-top-center-stack">
         <div class="cs-glass cs-turn-pill">
-          <span class="cs-round-badge" data-ref="round">R1/3</span>
+          <span class="cs-round-badge" data-ref="round">R1/5</span>
+          <span class="cs-round-timer" data-ref="round-timer" title="Round Clock">5:00</span>
           <span class="cs-phase-badge" data-ref="phase">YOUR TURN</span>
           <span class="cs-timer-readout" data-ref="timer">28s</span>
           <span class="cs-divider"></span>
@@ -462,7 +506,8 @@ export class HudController {
             <kbd>Tab</kbd>
           </button>
         </div>
-        <button type="button" class="cs-glass cs-mini-icon-btn cs-help-btn" data-ref="help-toggle" title="Controls Quick Guide" aria-label="Controls Quick Guide">?</button>
+        <button type="button" class="cs-glass cs-mini-icon-btn cs-help-btn" data-ref="help-toggle" title="Controls Quick Guide (?)" aria-label="Controls Quick Guide">?</button>
+        <button type="button" class="cs-glass cs-mini-icon-btn cs-music-btn" data-ref="music-mute" title="Toggle Music (N)" aria-label="Toggle Music">♪</button>
         <button type="button" class="cs-glass cs-mini-icon-btn" data-ref="mute" title="Toggle Audio (M)" aria-label="Toggle Audio"></button>
         <button type="button" class="cs-glass cs-mini-icon-btn" data-ref="exit-lobby" title="Return to Lobby" aria-label="Return to Lobby">
           <svg viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 9.5L10 3l7 6.5"/><path d="M5.5 8.5V17h9V8.5"/></svg>
@@ -472,6 +517,7 @@ export class HudController {
     this.gameLayer.appendChild(topBar);
 
     this.topRoundEl = topBar.querySelector('[data-ref="round"]') as HTMLSpanElement;
+    this.topRoundTimerEl = topBar.querySelector('[data-ref="round-timer"]') as HTMLSpanElement;
     this.topPhaseEl = topBar.querySelector('[data-ref="phase"]') as HTMLSpanElement;
     this.topTimerEl = topBar.querySelector('[data-ref="timer"]') as HTMLSpanElement;
     this.topActiveEl = topBar.querySelector('[data-ref="active"]') as HTMLSpanElement;
@@ -485,9 +531,16 @@ export class HudController {
     this.camVisorBtn = topBar.querySelector('[data-cam="first_person"]') as HTMLButtonElement;
     this.camDroneBtn = topBar.querySelector('[data-cam="drone_recon"]') as HTMLButtonElement;
     this.helpBtnEl = topBar.querySelector('[data-ref="help-toggle"]') as HTMLButtonElement;
+    this.musicMuteBtnEl = topBar.querySelector('[data-ref="music-mute"]') as HTMLButtonElement;
     this.muteBtnEl = topBar.querySelector('[data-ref="mute"]') as HTMLButtonElement;
 
-    // Sleek 3-icon Quick-Reference Controls Card toggled by `?`
+    // Non-blocking Round 5 Cataclysm Flood Alert Banner
+    this.floodAlertEl = document.createElement("div");
+    this.floodAlertEl.className = "cs-flood-alert cs-hidden";
+    this.floodAlertEl.textContent = "🌊 CATACLYSM DELUGE — THE OCEAN IS RISING!";
+    this.gameLayer.appendChild(this.floodAlertEl);
+
+    // Sleek Quick-Reference Controls Card toggled by `?`
     this.helpCardEl = document.createElement("div");
     this.helpCardEl.className = "cs-help-card cs-glass cs-hidden";
     this.helpCardEl.innerHTML = `
@@ -519,11 +572,51 @@ export class HudController {
         </div>
         <div class="cs-help-text">
           <strong>Charge &amp; Shoot</strong>
-          <span><kbd>Hold Click</kbd>, <kbd>Hold Enter</kbd>, or <b>HOLD TO FIRE</b> · <kbd>RMB</kbd> Cancel · <kbd>1–7</kbd> Gear</span>
+          <span><kbd>Hold Click</kbd>, <kbd>Hold Enter</kbd>, or <b>HOLD TO FIRE</b> · <kbd>RMB</kbd> Cancel · <kbd>1–6</kbd> Gear</span>
+        </div>
+      </div>
+      <div class="cs-help-row">
+        <div class="cs-help-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8"/><path d="M12 7v10M9 10h6M9 14h6"/></svg>
+        </div>
+        <div class="cs-help-text">
+          <strong>Specials, Armory &amp; Audio</strong>
+          <span><kbd>F</kbd> Special (Sky Bomber / Burrow) · <kbd>L</kbd> Standings · <kbd>B</kbd> Armory · <kbd>N</kbd> Music · <kbd>M</kbd> Mute</span>
         </div>
       </div>
     `;
     this.gameLayer.appendChild(this.helpCardEl);
+
+    // Collapsible Live 5-Round Standings Panel (top-right below camera pills, toggled by [L])
+    this.standingsPanelEl = document.createElement("div");
+    this.standingsPanelEl.className = "cs-standings-panel cs-glass";
+    this.standingsPanelEl.innerHTML = `
+      <div class="cs-standings-head" data-ref="standings-head">
+        <span class="cs-standings-title" data-ref="standings-title">STANDINGS · R1/5</span>
+        <button type="button" class="cs-standings-toggle" data-ref="standings-toggle" title="Toggle Standings (L)" aria-label="Toggle Standings">
+          <kbd>L</kbd>
+          <span data-ref="standings-chevron">▾</span>
+        </button>
+      </div>
+      <div class="cs-standings-body" data-ref="standings-body"></div>
+    `;
+    this.gameLayer.appendChild(this.standingsPanelEl);
+    this.standingsTitleEl = this.standingsPanelEl.querySelector(
+      '[data-ref="standings-title"]',
+    ) as HTMLSpanElement;
+    this.standingsChevronEl = this.standingsPanelEl.querySelector(
+      '[data-ref="standings-chevron"]',
+    ) as HTMLSpanElement;
+    this.standingsBodyEl = this.standingsPanelEl.querySelector(
+      '[data-ref="standings-body"]',
+    ) as HTMLDivElement;
+    const standingsHeadEl = this.standingsPanelEl.querySelector(
+      '[data-ref="standings-head"]',
+    ) as HTMLDivElement | null;
+    standingsHeadEl?.addEventListener("click", (e) => {
+      e.stopPropagation();
+      this.toggleStandings();
+    });
 
     this.camShoulderBtn.addEventListener("click", () =>
       this.callbacks.onSelectCameraMode?.("over_shoulder"),
@@ -539,6 +632,9 @@ export class HudController {
       '[data-ref="help-close"]',
     ) as HTMLButtonElement | null;
     helpCloseBtn?.addEventListener("click", () => this.setHelpCardOpen(false));
+    this.musicMuteBtnEl.addEventListener("click", () =>
+      this.callbacks.onToggleMusicMute?.(),
+    );
     this.muteBtnEl.addEventListener("click", () => this.callbacks.onToggleMute());
     const exitBtn = topBar.querySelector('[data-ref="exit-lobby"]') as HTMLButtonElement;
     exitBtn.addEventListener("click", () => this.callbacks.onBackToLobby());
@@ -643,7 +739,7 @@ export class HudController {
     ) as HTMLDivElement;
     this.blApexEl = bottomLeft.querySelector('[data-ref="bl-apex"]') as HTMLDivElement;
 
-    // Bottom-center: Pointer-Lock hint + Big Glowing Power Bar + Quick-Start Pill + Gadget Dock + HOLD TO FIRE
+    // Bottom-center: Pointer-Lock hint + Big Glowing Power Bar + Quick-Start Pill + Gadget Dock + Armory Pill + HOLD TO FIRE
     const bottomCenter = document.createElement("div");
     bottomCenter.className = "cs-bottom-center";
     bottomCenter.innerHTML = `
@@ -666,10 +762,13 @@ export class HudController {
         <span class="cs-qs-dot"></span>
         <span><kbd>Click</kbd> Look · <kbd>Q</kbd>/<kbd>E</kbd> Turn</span>
         <span class="cs-qs-dot"></span>
-        <span><kbd>Hold Click</kbd> / <kbd>Enter</kbd> Fire</span>
+        <span><kbd>B</kbd> Armory · <kbd>Hold Click</kbd> / <kbd>Enter</kbd> Fire</span>
       </div>
       <div class="cs-dock-row">
         <div class="cs-gadget-dock cs-glass" data-ref="hotbar"></div>
+        <button type="button" class="cs-armory-pill-btn cs-glass" data-ref="armory-btn" title="Open Tactical Armory (B)">
+          🪙 0 · Armory [B]
+        </button>
         <button type="button" class="cs-hold-fire-btn cs-hidden" data-ref="hold-fire" title="Hold to charge shot power, release to fire">
           HOLD TO FIRE
         </button>
@@ -694,9 +793,17 @@ export class HudController {
     this.hotbarListEl = bottomCenter.querySelector(
       '[data-ref="hotbar"]',
     ) as HTMLDivElement;
+    this.armoryBtnEl = bottomCenter.querySelector(
+      '[data-ref="armory-btn"]',
+    ) as HTMLButtonElement;
     this.holdFireBtnEl = bottomCenter.querySelector(
       '[data-ref="hold-fire"]',
     ) as HTMLButtonElement;
+
+    this.armoryBtnEl.addEventListener("click", (e) => {
+      e.stopPropagation();
+      this.toggleArmory();
+    });
 
     this.holdFireBtnEl.addEventListener("pointerdown", (e) => {
       e.stopPropagation();
@@ -769,17 +876,29 @@ export class HudController {
     this.draftModal.className = "cs-modal-backdrop cs-hidden";
     this.root.appendChild(this.draftModal);
 
-    // 6. Match Over Summary Modal
+    // 6. Anytime Tactical Armory Modal (sits cleanly above Draft Modal when toggled between rounds)
+    this.armoryModal = document.createElement("div");
+    this.armoryModal.className = "cs-modal-backdrop cs-hidden";
+    this.armoryModal.style.zIndex = "35";
+    this.armoryModal.addEventListener("click", (e) => {
+      if (e.target === this.armoryModal) {
+        this.setArmoryOpen(false);
+      }
+    });
+    this.root.appendChild(this.armoryModal);
+
+    // 7. Match Over Summary Modal
     this.matchOverModal = document.createElement("div");
     this.matchOverModal.className = "cs-modal-backdrop cs-hidden";
     this.root.appendChild(this.matchOverModal);
 
-    // 7. Floating Toast Notification
+    // 8. Floating Toast Notification
     this.toastEl = document.createElement("div");
     this.toastEl.className = "cs-toast cs-hidden";
     this.root.appendChild(this.toastEl);
 
     this.updateMuteIcon(false);
+    this.updateMusicMuteIcon(false);
   }
 
   /** Toggle the `?` quick-reference controls overlay card. */
@@ -792,6 +911,50 @@ export class HudController {
     this.helpOpen = open;
     this.helpCardEl.classList.toggle("cs-hidden", !open);
     this.helpBtnEl.classList.toggle("cs-cam-active", open);
+    this.standingsPanelEl.classList.toggle("cs-standings-obscured", open);
+  }
+
+  /** Toggle the collapsible live 5-round standings panel (`L` key). */
+  public toggleStandings(): void {
+    this.setStandingsOpen(!this.standingsOpen);
+  }
+
+  /** Explicitly expand or collapse the live 5-round standings panel. */
+  public setStandingsOpen(open: boolean): void {
+    this.standingsOpen = open;
+    this.standingsBodyEl.classList.toggle("cs-hidden", !open);
+    this.standingsPanelEl.classList.toggle("cs-standings-collapsed", !open);
+    this.standingsChevronEl.textContent = open ? "▾" : "▸";
+  }
+
+  /** Return whether the live 5-round standings panel is currently expanded. */
+  public isStandingsOpen(): boolean {
+    return this.standingsOpen;
+  }
+
+  /** Toggle the in-match Anytime Armory modal (`B` key). */
+  public toggleArmory(): void {
+    this.setArmoryOpen(!this.armoryOpen);
+  }
+
+  /** Explicitly open or close the in-match Anytime Armory modal. */
+  public setArmoryOpen(open: boolean): void {
+    const changed = this.armoryOpen !== open;
+    this.armoryOpen = open;
+    if (!open) {
+      this.pendingSwapTarget = null;
+      this.armoryModal.classList.add("cs-hidden");
+    }
+    this.armoryBtnEl.classList.toggle("cs-active", open);
+    this.lastArmorySig = "";
+    if (changed) {
+      this.callbacks.onArmoryOpenChange?.(open);
+    }
+  }
+
+  /** Return whether the in-match Anytime Armory modal is currently open. */
+  public isArmoryOpen(): boolean {
+    return this.armoryOpen;
   }
 
   /** Display a short translucent toast notification. */
@@ -832,9 +995,11 @@ export class HudController {
     popup.style.left = `${Math.round(screenX)}px`;
     popup.style.top = `${Math.round(screenY)}px`;
     layer.appendChild(popup);
-    setTimeout(() => {
+    const timer = setTimeout(() => {
+      this.popupTimers.delete(timer);
       popup.remove();
     }, 1250);
+    this.popupTimers.add(timer);
   }
 
   /** Show a brief bold animated center turn/event banner with optional 3D species portrait. */
@@ -881,7 +1046,13 @@ export class HudController {
     this.droneOverlay.classList.add("cs-hidden");
     this.draftModal.classList.add("cs-hidden");
     this.matchOverModal.classList.add("cs-hidden");
+    this.floodAlertEl.classList.add("cs-hidden");
     this.setHelpCardOpen(false);
+    if (this.armoryOpen) {
+      this.setArmoryOpen(false);
+    } else {
+      this.armoryModal.classList.add("cs-hidden");
+    }
 
     const isOnlineRoom =
       onlineLobby !== null &&
@@ -897,6 +1068,7 @@ export class HudController {
       onlineLobby,
       multiplayerOpen: this.multiplayerOpen,
       shopOpen: this.shopOpen,
+      loadoutOpen: this.loadoutOpen,
     });
     if (sig === this.lastLobbySig) {
       return;
@@ -905,7 +1077,7 @@ export class HudController {
     this.renderLobbyDom(profile, selection, onlineLobby);
   }
 
-  /** Update the live in-game HUD, camera pills, glowing Power Bar, HOLD TO FIRE button, compass, and modals. */
+  /** Update the live in-game HUD, round clock, camera pills, Armory, glowing Power Bar, HOLD TO FIRE button, compass, and modals. */
   public updateGameHud(frame: HudFrameState): void {
     this.lobbyLayer.classList.add("cs-hidden");
     this.gameLayer.classList.remove("cs-hidden");
@@ -920,8 +1092,36 @@ export class HudController {
       matchState.critters[0] ??
       null;
 
-    // Top telemetry pill
+    if (
+      frame.armoryOpen !== undefined &&
+      frame.armoryOpen !== this.armoryOpen
+    ) {
+      this.setArmoryOpen(frame.armoryOpen);
+    }
+
+    const armoryLockedOut =
+      matchState.phase === "FINAL_FLOOD" || matchState.phase === "MATCH_OVER";
+    if (armoryLockedOut && this.armoryOpen) {
+      this.setArmoryOpen(false);
+    }
+
+    // Top telemetry pill: Round badge + 5-minute Round Clock + Phase badge + Turn timer
     this.topRoundEl.textContent = `R${matchState.round}/${matchState.maxRounds}`;
+    const isFinalFlood = matchState.phase === "FINAL_FLOOD";
+    const roundSec = Math.max(0, Math.ceil(matchState.roundTimeRemainingSec));
+    this.topRoundTimerEl.textContent = isFinalFlood
+      ? "FLOOD!"
+      : formatRoundClock(roundSec);
+    this.topRoundTimerEl.classList.toggle("cs-rt-flood", isFinalFlood);
+    this.topRoundTimerEl.classList.toggle(
+      "cs-rt-urgent",
+      !isFinalFlood && roundSec <= 20,
+    );
+    this.topRoundTimerEl.classList.toggle(
+      "cs-rt-warn",
+      !isFinalFlood && roundSec > 20 && roundSec <= 60,
+    );
+
     const isMyTurn =
       localPlayerId !== null && matchState.activePlayerId === localPlayerId;
     const phaseLabel =
@@ -934,24 +1134,29 @@ export class HudController {
           : matchState.phase === "ROUND_DRAFT" ||
               matchState.phase === "DRAFT_IF_READY"
             ? "EVO DRAFT"
-            : matchState.phase === "MATCH_OVER"
-              ? "FINISH"
-              : isMyTurn
-                ? "YOUR TURN"
-                : "RIVAL";
+            : matchState.phase === "FINAL_FLOOD"
+              ? "FINAL FLOOD"
+              : matchState.phase === "MATCH_OVER"
+                ? "FINISH"
+                : isMyTurn
+                  ? "YOUR TURN"
+                  : "RIVAL";
     this.topPhaseEl.textContent = phaseLabel;
     this.topPhaseEl.dataset.tone =
-      matchState.phase === "RETREAT"
-        ? "retreat"
-        : isMyTurn && matchState.phase === "ACTIVE"
-          ? "mine"
-          : "neutral";
+      matchState.phase === "FINAL_FLOOD"
+        ? "flood"
+        : matchState.phase === "RETREAT"
+          ? "retreat"
+          : isMyTurn && matchState.phase === "ACTIVE"
+            ? "mine"
+            : "neutral";
 
     const secs = Math.max(0, Math.ceil(matchState.phaseTimeRemainingSec));
-    this.topTimerEl.textContent = `${secs}s`;
+    this.topTimerEl.textContent = isFinalFlood ? "🌊" : `${secs}s`;
     this.topTimerEl.classList.toggle(
       "cs-timer-urgent",
-      secs <= 4 &&
+      !isFinalFlood &&
+        secs <= 4 &&
         (matchState.phase === "ACTIVE" || matchState.phase === "RETREAT"),
     );
 
@@ -963,6 +1168,9 @@ export class HudController {
     this.windArrowEl.style.transform = `rotate(${windAngleDeg.toFixed(1)}deg)`;
     this.windArrowEl.style.opacity = windSpeed < 0.15 ? "0.35" : "1";
     this.windSpeedEl.textContent = `${windSpeed.toFixed(1)}`;
+
+    // Non-blocking top-center Flood Alert overlay during Round 5 FINAL_FLOOD
+    this.floodAlertEl.classList.toggle("cs-hidden", !isFinalFlood);
 
     // Camera switcher active highlight
     this.camShoulderBtn.classList.toggle(
@@ -979,6 +1187,7 @@ export class HudController {
     );
 
     this.updateMuteIcon(frame.muted);
+    this.updateMusicMuteIcon(Boolean(frame.musicMuted));
 
     // Top compass pips (Rival + Evo Pod)
     this.syncCompassStrip(frame.compass);
@@ -1003,15 +1212,17 @@ export class HudController {
       Boolean(localCritter?.alive) &&
       (matchState.phase === "ACTIVE" || matchState.phase === "RETREAT") &&
       !isDrone &&
-      cameraMode !== "shot_cam";
+      cameraMode !== "shot_cam" &&
+      !this.armoryOpen;
     const canFireNow =
-      frame.canFire !== undefined
+      !this.armoryOpen &&
+      (frame.canFire !== undefined
         ? frame.canFire && !isDrone && cameraMode !== "shot_cam"
         : isMyTurn &&
           Boolean(localCritter?.alive) &&
           matchState.phase === "ACTIVE" &&
           !isDrone &&
-          cameraMode !== "shot_cam";
+          cameraMode !== "shot_cam");
 
     // Subtle Pointer-Lock free-look indicator pill (cached to avoid 60Hz DOM churn)
     const showLookHint = canInteract && !frame.charging;
@@ -1030,11 +1241,19 @@ export class HudController {
       }
     }
 
+    // Glowing Armory Pill Button beside the Hotbar
+    const coinCount = localCritter ? Math.floor(localCritter.coins) : 0;
+    this.armoryBtnEl.textContent = `🪙 ${coinCount} · Armory [B]`;
+    this.armoryBtnEl.disabled = armoryLockedOut;
+    this.armoryBtnEl.classList.toggle("cs-active", this.armoryOpen);
+
     // Accessible tactile HOLD TO FIRE button next to Gadget Dock
     this.holdFireBtnEl.classList.toggle("cs-hidden", !canFireNow);
     if (canFireNow) {
       const isUtility =
-        selectedGadget === "vine_grapple" || selectedGadget === "prism_wall";
+        selectedGadget === "vine_grapple" ||
+        selectedGadget === "prism_wall" ||
+        selectedGadget === "mend_brew";
       this.holdFireBtnEl.classList.toggle("cs-charging", frame.charging);
       this.holdFireBtnEl.textContent = isUtility
         ? "USE GADGET"
@@ -1051,7 +1270,8 @@ export class HudController {
       !frame.showQuickStartHint ||
         frame.charging ||
         isDrone ||
-        cameraMode === "shot_cam",
+        cameraMode === "shot_cam" ||
+        this.armoryOpen,
     );
 
     // Minimal Bottom-Left Status Cluster with real 3D character portrait
@@ -1126,8 +1346,12 @@ export class HudController {
       this.droneCompassEl.textContent = `WIND ${compass} · ${windSpeed.toFixed(1)} m/s`;
     }
 
-    // Mutation Draft Modal & Match Over Summary Modal
+    // Live Collapsible 5-Round Standings Panel
+    this.syncStandingsDom(matchState, localPlayerId);
+
+    // Mutation Draft Modal, Anytime Armory Modal & Match Over Summary Modal
     this.syncDraftModal(matchState, localPlayerId);
+    this.syncArmoryModal(matchState, localCritter);
     this.syncMatchOverModal(matchState, localPlayerId, frame.essenceBreakdown);
   }
 
@@ -1141,14 +1365,86 @@ export class HudController {
       clearTimeout(this.bannerTimer);
       this.bannerTimer = null;
     }
+    for (const timer of this.popupTimers) {
+      clearTimeout(timer);
+    }
+    this.popupTimers.clear();
     this.root.innerHTML = "";
   }
 
+  private syncStandingsDom(
+    state: MatchState,
+    localPlayerId: string | null,
+  ): void {
+    let sig = `${state.round}/${state.maxRounds}|${state.mode}|${state.activePlayerId ?? ""}|${localPlayerId ?? ""}`;
+    for (let i = 0; i < state.critters.length; i++) {
+      const c = state.critters[i];
+      if (!c) continue;
+      sig += `|${c.id}:${c.score}:${c.kills}:${Math.round(c.damageDealt)}:${Math.ceil(c.hp)}/${c.maxHp}:${c.alive ? 1 : 0}:${c.color}`;
+    }
+    if (sig === this.lastStandingsSig) {
+      return;
+    }
+    this.lastStandingsSig = sig;
+    this.standingsTitleEl.textContent = `STANDINGS · R${state.round}/${state.maxRounds}`;
+
+    const sorted = [...state.critters].sort(
+      (a, b) =>
+        b.score - a.score ||
+        b.kills - a.kills ||
+        b.damageDealt - a.damageDealt,
+    );
+
+    this.standingsBodyEl.innerHTML = sorted
+      .map((c) => {
+        const isActive = c.id === state.activePlayerId;
+        const isLocal = localPlayerId !== null && c.id === localPlayerId;
+        const hpPct = c.alive
+          ? Math.max(0, Math.min(100, (c.hp / Math.max(1, c.maxHp)) * 100))
+          : 0;
+        const tier = hpPct > 55 ? "high" : hpPct > 25 ? "mid" : "low";
+        const teamChip =
+          state.mode === "2v2" && c.team
+            ? `<span class="cs-st-team">T${escapeHtml(c.team)}</span>`
+            : "";
+        return `
+          <div class="cs-standings-row ${isActive ? "cs-st-active" : ""} ${isLocal ? "cs-st-local" : ""} ${c.alive ? "" : "cs-st-ko"}">
+            <span class="cs-st-pip" style="background:${escapeHtml(c.color)}"></span>
+            <div class="cs-st-main">
+              <div class="cs-st-name-line">
+                <span class="cs-st-name">${escapeHtml(c.name)}</span>
+                ${isLocal ? `<span class="cs-st-you">YOU</span>` : ""}
+                ${teamChip}
+              </div>
+              <div class="cs-standings-hp">
+                ${
+                  c.alive
+                    ? `<div class="cs-standings-hp-fill" data-tier="${tier}" style="width:${hpPct.toFixed(0)}%"></div>`
+                    : `<span class="cs-st-ko-tag">KO</span>`
+                }
+              </div>
+            </div>
+            <span class="cs-st-kills" title="Kills">${c.kills}K</span>
+            <strong class="cs-st-score" title="Match Points">${c.score}</strong>
+          </div>
+        `;
+      })
+      .join("");
+  }
+
   private updateMuteIcon(muted: boolean): void {
+    if (muted === this.lastMuted) {
+      return;
+    }
+    this.lastMuted = muted;
     this.muteBtnEl.dataset.muted = muted ? "1" : "0";
     this.muteBtnEl.innerHTML = muted
       ? `<svg viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 8h3l4-3.5v11L6 12H3z"/><path d="M13.5 7.5l4 5M17.5 7.5l-4 5"/></svg>`
       : `<svg viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 8h3l4-3.5v11L6 12H3z"/><path d="M13.5 7.2a4.2 4.2 0 0 1 0 5.6M15.8 4.8a7.4 7.4 0 0 1 0 10.4"/></svg>`;
+  }
+
+  private updateMusicMuteIcon(muted: boolean): void {
+    this.musicMuteBtnEl.dataset.muted = muted ? "1" : "0";
   }
 
   private syncCompassStrip(compass?: HudCompassState): void {
@@ -1206,16 +1502,23 @@ export class HudController {
       onlineLobby.roomCode !== null;
     const isHost = !isOnlineRoom || onlineLobby.hostId === onlineLobby.playerId;
 
+    const validatedLoadout = validateAndBuildStartingLoadout(
+      selection.startingLoadout ?? DEFAULT_STARTING_LOADOUT,
+      DEFAULT_STARTING_COINS,
+    );
+    const activeLoadout = validatedLoadout.loadout;
+    const remainingStartCoins = validatedLoadout.remainingCoins;
+
     const canAffordAnything =
       SPECIES_IDS.some(
         (id) =>
           !profile.unlockedSpecies.includes(id) &&
           profile.essence >= SPECIES_CATALOG[id].unlockCost,
       ) ||
-      BONUS_GADGETS.some(
-        (id) =>
-          !profile.unlockedBonusGadgets.includes(id) &&
-          profile.essence >= GADGET_CATALOG[id].unlockCost,
+      COSMETIC_ACCENT_CATALOG.some(
+        (c) =>
+          !profile.unlockedCosmetics.includes(c.id) &&
+          profile.essence >= c.cost,
       );
 
     const speciesTilesHtml = SPECIES_IDS.map((id) => {
@@ -1271,11 +1574,75 @@ export class HudController {
       )
       .join("");
 
-    const colorSwatchesHtml = COLOR_SWATCHES.map(
+    const colorSwatchesHtml = PLAYER_COLOR_PALETTE.map(
       (hex) => `
-        <button type="button" class="cs-swatch ${profile.selectedColor === hex ? "cs-selected" : ""}" data-color="${hex}" style="background:${hex}" aria-label="Color ${hex}"></button>
+        <button type="button" class="cs-swatch ${profile.selectedColor.toLowerCase() === hex.toLowerCase() ? "cs-selected" : ""}" data-color="${hex}" style="background:${hex}" aria-label="Color ${hex}"></button>
       `,
     ).join("");
+
+    const loadoutBarIconsHtml = activeLoadout
+      .map(
+        (gid) => `
+        <span class="cs-loadout-icon-chip" title="${escapeHtml(GADGET_CATALOG[gid].name)}">
+          ${getGadgetSvgIcon(gid)}
+        </span>
+      `,
+      )
+      .join("");
+
+    const loadoutCardsHtml = GADGET_IDS.map((gid) => {
+      const def = GADGET_CATALOG[gid];
+      const isStarter = gid === "gale_mortar";
+      const isSelected = activeLoadout.includes(gid);
+      const canAdd =
+        !isSelected &&
+        activeLoadout.length < MAX_LOADOUT_SLOTS &&
+        def.shopCost <= remainingStartCoins;
+      const disabled = isStarter || (!isSelected && !canAdd);
+      const chargeLabel =
+        def.startingCharges === null ? "∞" : `×${def.startingCharges}`;
+      const priceLabel = isStarter
+        ? "FREE"
+        : isSelected
+          ? `✓ ${def.shopCost} 🪙`
+          : `${def.shopCost} 🪙`;
+
+      return `
+        <button
+          type="button"
+          class="cs-loadout-card ${isSelected ? "cs-selected" : ""} ${isStarter ? "cs-starter" : ""}"
+          data-loadout-gadget="${gid}"
+          ${disabled ? "disabled" : ""}
+        >
+          <div class="cs-loadout-card-top">
+            <span class="cs-loadout-card-icon">${getGadgetSvgIcon(gid)}</span>
+            <span class="cs-loadout-card-name">${escapeHtml(def.name)}</span>
+          </div>
+          <div class="cs-loadout-card-desc">${escapeHtml(GADGET_CONCISE_EFFECT[gid])}</div>
+          <div class="cs-loadout-card-foot">
+            <span class="cs-loadout-charges">${chargeLabel}</span>
+            <span class="cs-loadout-price">${priceLabel}</span>
+          </div>
+        </button>
+      `;
+    }).join("");
+
+    const loadoutDrawerHtml = this.loadoutOpen
+      ? `
+        <aside class="cs-loadout-drawer cs-glass">
+          <div class="cs-loadout-head">
+            <span class="cs-loadout-title">Starting Loadout (${MAX_LOADOUT_SLOTS} Slots)</span>
+            <div class="cs-loadout-head-right">
+              <span class="cs-coin-badge">🪙 ${remainingStartCoins} / ${DEFAULT_STARTING_COINS}</span>
+              <button type="button" class="cs-mini-pill-btn" data-action="reset-loadout">Reset</button>
+              <button type="button" class="cs-close-btn" data-action="close-loadout" aria-label="Close Loadout Customizer">×</button>
+            </div>
+          </div>
+          <div class="cs-shop-sub">Unspent Siege Coins carry straight into Round 1! Click equipped abilities to refund.</div>
+          <div class="cs-loadout-grid">${loadoutCardsHtml}</div>
+        </aside>
+      `
+      : "";
 
     const multiplayerDrawerHtml = isOnlineRoom
       ? `
@@ -1320,22 +1687,48 @@ export class HudController {
       `
         : "";
 
-    const bonusCardsHtml = BONUS_GADGETS.map((id) => {
-      const def = GADGET_CATALOG[id];
-      const unlocked = profile.unlockedBonusGadgets.includes(id);
-      const equipped = selection.bonusGadget === id;
-      const canAfford = profile.essence >= def.unlockCost;
+    const unlockableSpeciesHtml = SPECIES_IDS.filter(
+      (id) => !SPECIES_CATALOG[id].starter,
+    )
+      .map((id) => {
+        const def = SPECIES_CATALOG[id];
+        const meta = SPECIES_BADGE_META[id];
+        const unlocked = profile.unlockedSpecies.includes(id);
+        const selected = profile.selectedSpecies === id;
+        const canAfford = profile.essence >= def.unlockCost;
+        return `
+          <div class="cs-shop-item ${selected ? "cs-selected" : ""}" data-species-card="${id}" title="${escapeHtml(def.description)}">
+            <img class="cs-roster-avatar" src="${getSpeciesPortraitUrl(id)}" alt="${escapeHtml(def.name)}" style="border-color:${meta.accent}" />
+            <div class="cs-shop-info">
+              <strong>${escapeHtml(def.name)}</strong>
+              <span>${def.baseHp} HP · ${escapeHtml(meta.chip)}</span>
+            </div>
+            ${
+              unlocked
+                ? `<span class="cs-shop-tag">${selected ? "Selected" : "Select"}</span>`
+                : `<button type="button" class="cs-sp-unlock" data-unlock-species="${id}" ${canAfford ? "" : "disabled"}>${def.unlockCost}✦</button>`
+            }
+          </div>
+        `;
+      })
+      .join("");
+
+    const cosmeticCardsHtml = COSMETIC_ACCENT_CATALOG.map((cosmetic) => {
+      const unlocked = profile.unlockedCosmetics.includes(cosmetic.id);
+      const equipped =
+        profile.selectedColor.toLowerCase() === cosmetic.hex.toLowerCase();
+      const canAfford = profile.essence >= cosmetic.cost;
       return `
-        <div class="cs-shop-item ${equipped ? "cs-selected" : ""}" data-bonus-card="${id}">
-          <div class="cs-shop-icon">${getGadgetSvgIcon(id)}</div>
+        <div class="cs-shop-item ${equipped ? "cs-selected" : ""}" data-cosmetic-card="${cosmetic.id}" title="${escapeHtml(cosmetic.description)}">
+          <span class="cs-cosmetic-swatch" style="background:${escapeHtml(cosmetic.hex)};box-shadow:0 0 12px ${escapeHtml(cosmetic.hex)}88"></span>
           <div class="cs-shop-info">
-            <strong>${escapeHtml(def.name)}</strong>
-            <span>${escapeHtml(GADGET_SHORT_TOOLTIP[id].split("—")[1]?.trim() ?? def.name)}</span>
+            <strong>${escapeHtml(cosmetic.name)}</strong>
+            <span>${escapeHtml(cosmetic.description)}</span>
           </div>
           ${
             unlocked
               ? `<span class="cs-shop-tag">${equipped ? "Equipped" : "Equip"}</span>`
-              : `<button type="button" class="cs-sp-unlock" data-unlock-gadget="${id}" ${canAfford ? "" : "disabled"}>${def.unlockCost}✦</button>`
+              : `<button type="button" class="cs-sp-unlock" data-unlock-cosmetic="${cosmetic.id}" ${canAfford ? "" : "disabled"}>${cosmetic.cost}✦</button>`
           }
         </div>
       `;
@@ -1348,8 +1741,10 @@ export class HudController {
             <span>✦ Essence Shop</span>
             <button type="button" class="cs-close-btn" data-action="close-shop" aria-label="Close Shop">×</button>
           </div>
-          <div class="cs-shop-sub">Bonus Round Gadget (1/Round)</div>
-          <div class="cs-shop-list">${bonusCardsHtml}</div>
+          <div class="cs-shop-sub">Unlockable Critters</div>
+          <div class="cs-shop-list">${unlockableSpeciesHtml}</div>
+          <div class="cs-shop-sub">Cosmetic Collar Accents</div>
+          <div class="cs-shop-list">${cosmeticCardsHtml}</div>
         </aside>
       `
       : "";
@@ -1418,6 +1813,19 @@ export class HudController {
             </div>
           </div>
 
+          <div class="cs-loadout-bar">
+            <div class="cs-loadout-bar-top">
+              <div class="cs-loadout-icons">
+                ${loadoutBarIconsHtml}
+                <span class="cs-loadout-count">${activeLoadout.length}/${MAX_LOADOUT_SLOTS}</span>
+              </div>
+              <span class="cs-loadout-coins">🪙 ${remainingStartCoins} left</span>
+            </div>
+            <button type="button" class="cs-loadout-toggle ${this.loadoutOpen ? "cs-active" : ""}" data-action="toggle-loadout">
+              ⚔ Customize Abilities (10 Arsenal)
+            </button>
+          </div>
+
           <footer class="cs-dock-footer">
             <div class="cs-id-row">
               <input type="text" maxlength="18" class="cs-input cs-name-input" data-ref="player-name" value="${escapeHtml(profile.displayName)}" placeholder="Name" aria-label="Player Name" />
@@ -1429,6 +1837,7 @@ export class HudController {
           </footer>
         </div>
 
+        ${loadoutDrawerHtml}
         ${shopDrawerHtml}
       </div>
 
@@ -1441,13 +1850,15 @@ export class HudController {
       </div>
     `;
 
-    this.bindLobbyEvents(profile, selection, onlineLobby);
+    this.bindLobbyEvents(profile, selection, onlineLobby, activeLoadout, remainingStartCoins);
   }
 
   private bindLobbyEvents(
     profile: PlayerProfile,
     selection: LobbySelectionState,
     onlineLobby: LobbyViewState | null,
+    activeLoadout: readonly GadgetId[],
+    remainingStartCoins: number,
   ): void {
     const nameInput = this.lobbyLayer.querySelector(
       '[data-ref="player-name"]',
@@ -1535,26 +1946,81 @@ export class HudController {
       });
 
     this.lobbyLayer
-      .querySelectorAll<HTMLButtonElement>("[data-unlock-gadget]")
+      .querySelectorAll<HTMLButtonElement>("[data-unlock-cosmetic]")
       .forEach((btn) => {
         btn.addEventListener("click", (e) => {
           e.stopPropagation();
-          const gid = btn.dataset.unlockGadget as GadgetId | undefined;
-          if (gid) this.callbacks.onUnlockBonusGadget(gid);
+          const cid = btn.dataset.unlockCosmetic;
+          if (cid) this.callbacks.onUnlockCosmetic?.(cid);
         });
       });
 
     this.lobbyLayer
-      .querySelectorAll<HTMLDivElement>("[data-bonus-card]")
+      .querySelectorAll<HTMLDivElement>("[data-cosmetic-card]")
       .forEach((card) => {
         card.addEventListener("click", () => {
-          const gid = card.dataset.bonusCard as GadgetId | undefined;
-          if (gid && profile.unlockedBonusGadgets.includes(gid)) {
-            const next = selection.bonusGadget === gid ? null : gid;
-            this.callbacks.onSelectBonusGadget(next);
+          const cid = card.dataset.cosmeticCard;
+          if (!cid || !profile.unlockedCosmetics.includes(cid)) {
+            return;
+          }
+          const def = COSMETIC_ACCENT_CATALOG.find((c) => c.id === cid);
+          if (def) {
+            this.callbacks.onColorChange(def.hex);
           }
         });
       });
+
+    this.lobbyLayer
+      .querySelectorAll<HTMLButtonElement>("[data-loadout-gadget]")
+      .forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const gid = btn.dataset.loadoutGadget as GadgetId | undefined;
+          if (!gid || gid === "gale_mortar") {
+            return;
+          }
+          if (activeLoadout.includes(gid)) {
+            const nextLoadout = activeLoadout.filter((id) => id !== gid);
+            this.callbacks.onStartingLoadoutChange?.(nextLoadout);
+          } else {
+            const def = GADGET_CATALOG[gid];
+            if (
+              activeLoadout.length < MAX_LOADOUT_SLOTS &&
+              def.shopCost <= remainingStartCoins
+            ) {
+              const nextLoadout = [...activeLoadout, gid];
+              this.callbacks.onStartingLoadoutChange?.(nextLoadout);
+            }
+          }
+        });
+      });
+
+    const toggleLoadoutBtn = this.lobbyLayer.querySelector(
+      '[data-action="toggle-loadout"]',
+    );
+    toggleLoadoutBtn?.addEventListener("click", () => {
+      this.loadoutOpen = !this.loadoutOpen;
+      if (this.loadoutOpen) {
+        this.shopOpen = false;
+      }
+      this.lastLobbySig = "";
+      this.showLobby(profile, selection, onlineLobby);
+    });
+
+    const closeLoadoutBtn = this.lobbyLayer.querySelector(
+      '[data-action="close-loadout"]',
+    );
+    closeLoadoutBtn?.addEventListener("click", () => {
+      this.loadoutOpen = false;
+      this.lastLobbySig = "";
+      this.showLobby(profile, selection, onlineLobby);
+    });
+
+    const resetLoadoutBtn = this.lobbyLayer.querySelector(
+      '[data-action="reset-loadout"]',
+    );
+    resetLoadoutBtn?.addEventListener("click", () => {
+      this.callbacks.onStartingLoadoutChange?.([...DEFAULT_STARTING_LOADOUT]);
+    });
 
     const toggleMpBtn = this.lobbyLayer.querySelector('[data-action="toggle-mp"]');
     toggleMpBtn?.addEventListener("click", () => {
@@ -1568,6 +2034,9 @@ export class HudController {
     );
     toggleShopBtn?.addEventListener("click", () => {
       this.shopOpen = !this.shopOpen;
+      if (this.shopOpen) {
+        this.loadoutOpen = false;
+      }
       this.lastLobbySig = "";
       this.showLobby(profile, selection, onlineLobby);
     });
@@ -1606,10 +2075,7 @@ export class HudController {
   }
 
   private syncHardpointsDom(critter: CritterState): void {
-    const sig = JSON.stringify({
-      equipped: critter.equipped,
-      apex: critter.apex,
-    });
+    const sig = `${critter.equipped.back ?? ""}|${critter.equipped.legs ?? ""}|${critter.equipped.offense ?? ""}|${critter.equipped.crest ?? ""}|${critter.apex ?? ""}`;
     if (sig === this.lastHardpointSig) {
       return;
     }
@@ -1642,26 +2108,22 @@ export class HudController {
     selectedGadget: GadgetId,
     dronePingActive: boolean,
   ): void {
-    const visibleGadgets: GadgetId[] = [...STANDARD_GADGETS];
-    for (const bonusId of BONUS_GADGETS) {
-      const count = critter.gadgetCharges[bonusId];
-      if (count !== null && count > 0) {
-        visibleGadgets.push(bonusId);
-      }
-    }
+    const ownedLoadout: GadgetId[] =
+      critter.loadout.length > 0 ? critter.loadout : ["gale_mortar"];
 
-    const sig = JSON.stringify({
-      visibleGadgets,
-      charges: visibleGadgets.map((g) => critter.gadgetCharges[g]),
-      selectedGadget,
-      dronePingActive,
-    });
+    let sig = `${selectedGadget}|${dronePingActive ? 1 : 0}`;
+    for (let i = 0; i < ownedLoadout.length; i++) {
+      const gid = ownedLoadout[i];
+      if (!gid) continue;
+      const ch = critter.gadgetCharges[gid];
+      sig += `|${gid}:${ch === null ? "i" : ch}`;
+    }
     if (sig === this.lastHotbarSig) {
       return;
     }
     this.lastHotbarSig = sig;
 
-    this.hotbarListEl.innerHTML = visibleGadgets
+    const equippedHtml = ownedLoadout
       .map((gid, idx) => {
         const def = GADGET_CATALOG[gid];
         const charges = critter.gadgetCharges[gid];
@@ -1686,6 +2148,22 @@ export class HudController {
       })
       .join("");
 
+    const openSlotCount = Math.max(0, MAX_LOADOUT_SLOTS - ownedLoadout.length);
+    const openSlotsHtml = Array.from({ length: openSlotCount }, () => `
+      <button
+        type="button"
+        class="cs-dock-slot cs-slot-open"
+        data-open-armory="1"
+        data-tooltip="Empty Ability Slot — Open Armory [B]"
+        aria-label="Open Armory"
+      >
+        <span class="cs-slot-open-plus">+</span>
+        <span class="cs-slot-open-key">[B]</span>
+      </button>
+    `).join("");
+
+    this.hotbarListEl.innerHTML = `${equippedHtml}${openSlotsHtml}`;
+
     this.hotbarListEl
       .querySelectorAll<HTMLButtonElement>("[data-gadget]")
       .forEach((btn) => {
@@ -1693,6 +2171,237 @@ export class HudController {
           const gid = btn.dataset.gadget as GadgetId | undefined;
           if (gid) {
             this.callbacks.onSelectGadget(gid);
+          }
+        });
+      });
+
+    this.hotbarListEl
+      .querySelectorAll<HTMLButtonElement>("[data-open-armory]")
+      .forEach((btn) => {
+        btn.addEventListener("click", (e) => {
+          e.stopPropagation();
+          this.setArmoryOpen(true);
+        });
+      });
+  }
+
+  private syncArmoryModal(
+    state: MatchState,
+    localCritter: CritterState | null,
+  ): void {
+    if (!this.armoryOpen || !localCritter) {
+      this.armoryModal.classList.add("cs-hidden");
+      this.lastArmorySig = "";
+      return;
+    }
+
+    const purchasingDisabled =
+      state.phase === "FINAL_FLOOD" || state.phase === "MATCH_OVER";
+    const coins = Math.floor(localCritter.coins);
+    const ownedCount = localCritter.loadout.length;
+
+    if (
+      this.pendingSwapTarget !== null &&
+      (localCritter.loadout.includes(this.pendingSwapTarget) ||
+        ownedCount < MAX_LOADOUT_SLOTS)
+    ) {
+      this.pendingSwapTarget = null;
+    }
+
+    let sig = `${state.phase}|${coins}|${this.pendingSwapTarget ?? ""}`;
+    for (let i = 0; i < localCritter.loadout.length; i++) {
+      const g = localCritter.loadout[i];
+      if (!g) continue;
+      sig += `,${g}`;
+    }
+    for (let i = 0; i < GADGET_IDS.length; i++) {
+      const g = GADGET_IDS[i];
+      if (!g) continue;
+      const ch = localCritter.gadgetCharges[g];
+      sig += `|${ch === null ? "i" : ch}`;
+    }
+    if (sig === this.lastArmorySig) {
+      return;
+    }
+    this.lastArmorySig = sig;
+    this.armoryModal.classList.remove("cs-hidden");
+
+    const swapTarget = this.pendingSwapTarget;
+    const swapBarHtml =
+      swapTarget !== null
+        ? (() => {
+            const targetDef = GADGET_CATALOG[swapTarget];
+            const swappable = localCritter.loadout.filter(
+              (id) => id !== "gale_mortar",
+            );
+            const buttonsHtml = swappable
+              .map((oldId) => {
+                const oldDef = GADGET_CATALOG[oldId];
+                const refund = Math.floor(oldDef.shopCost * 0.5);
+                const netCost = targetDef.shopCost - refund;
+                const canAffordSwap = !purchasingDisabled && coins >= netCost;
+                const netLabel =
+                  netCost > 0
+                    ? `Net ${netCost} 🪙`
+                    : netCost === 0
+                      ? "FREE SWAP"
+                      : `+${Math.abs(netCost)} 🪙 back`;
+                return `
+                  <button
+                    type="button"
+                    class="cs-swap-btn"
+                    data-confirm-swap="${oldId}"
+                    ${canAffordSwap ? "" : "disabled"}
+                  >
+                    Replace ${escapeHtml(oldDef.name)} (+${refund} 🪙 → ${netLabel})
+                  </button>
+                `;
+              })
+              .join("");
+
+            return `
+              <div class="cs-swap-bar">
+                <div class="cs-swap-head">
+                  <span>⇄ Trade-In Swap (50% Refund) — Equip ${escapeHtml(targetDef.name)} (${targetDef.shopCost} 🪙)</span>
+                  <button type="button" class="cs-mini-pill-btn" data-action="cancel-swap">Cancel</button>
+                </div>
+                <div class="cs-swap-options">${buttonsHtml}</div>
+              </div>
+            `;
+          })()
+        : "";
+
+    const cardsHtml = GADGET_IDS.map((gid) => {
+      const def = GADGET_CATALOG[gid];
+      const owned = localCritter.loadout.includes(gid);
+      const curCharges = localCritter.gadgetCharges[gid];
+      const chargeMeta =
+        def.startingCharges === null
+          ? "Unlimited · ∞"
+          : `×${def.startingCharges} charges / rd`;
+
+      let footerHtml = "";
+      if (owned) {
+        if (def.startingCharges === null || def.refillCost <= 0) {
+          footerHtml = `<span class="cs-armory-badge">EQUIPPED · ∞</span>`;
+        } else {
+          const canRefill = !purchasingDisabled && coins >= def.refillCost;
+          footerHtml = `
+            <span class="cs-armory-badge">Owned (${curCharges ?? 0} left)</span>
+            <button
+              type="button"
+              class="cs-armory-action"
+              data-armory-buy="${gid}"
+              ${canRefill ? "" : "disabled"}
+            >
+              Refill +${def.startingCharges} (${def.refillCost} 🪙)
+            </button>
+          `;
+        }
+      } else if (ownedCount < MAX_LOADOUT_SLOTS) {
+        const canBuy = !purchasingDisabled && coins >= def.shopCost;
+        footerHtml = `
+          <button
+            type="button"
+            class="cs-armory-action"
+            data-armory-buy="${gid}"
+            ${canBuy ? "" : "disabled"}
+          >
+            Buy (${def.shopCost} 🪙)
+          </button>
+        `;
+      } else {
+        footerHtml = `
+          <button
+            type="button"
+            class="cs-armory-action"
+            data-armory-swap="${gid}"
+            ${purchasingDisabled ? "disabled" : ""}
+          >
+            Swap In (${def.shopCost} 🪙)
+          </button>
+        `;
+      }
+
+      return `
+        <div class="cs-armory-card ${owned ? "cs-owned" : ""}">
+          <div class="cs-armory-card-head">
+            <span class="cs-armory-card-icon">${getGadgetSvgIcon(gid)}</span>
+            <div class="cs-armory-card-titles">
+              <strong>${escapeHtml(def.name)}</strong>
+              <span>${chargeMeta}</span>
+            </div>
+          </div>
+          <div class="cs-armory-card-desc">${escapeHtml(def.description)}</div>
+          <div class="cs-armory-card-foot">${footerHtml}</div>
+        </div>
+      `;
+    }).join("");
+
+    this.armoryModal.innerHTML = `
+      <div class="cs-modal-card cs-glass cs-armory-modal">
+        <div class="cs-armory-head">
+          <div class="cs-armory-head-left">
+            <div class="cs-kicker">ARMORY · SIEGE COINS</div>
+            <h2>Tactical Arsenal</h2>
+          </div>
+          <div class="cs-armory-meta">
+            <span class="cs-coin-badge">🪙 ${coins}</span>
+            <span class="cs-armory-slots">${ownedCount}/${MAX_LOADOUT_SLOTS} Slots</span>
+            <span class="cs-armory-hint">Press <kbd>B</kbd> or <kbd>ESC</kbd> to close</span>
+            <button type="button" class="cs-close-btn" data-action="close-armory" aria-label="Close Armory">×</button>
+          </div>
+        </div>
+        ${swapBarHtml}
+        <div class="cs-armory-grid">${cardsHtml}</div>
+      </div>
+    `;
+
+    this.armoryModal
+      .querySelector('[data-action="close-armory"]')
+      ?.addEventListener("click", () => this.setArmoryOpen(false));
+
+    this.armoryModal
+      .querySelector('[data-action="cancel-swap"]')
+      ?.addEventListener("click", () => {
+        this.pendingSwapTarget = null;
+        this.lastArmorySig = "";
+        this.syncArmoryModal(state, localCritter);
+      });
+
+    this.armoryModal
+      .querySelectorAll<HTMLButtonElement>("[data-armory-buy]")
+      .forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const gid = btn.dataset.armoryBuy as GadgetId | undefined;
+          if (gid) {
+            this.callbacks.onBuyAbility?.(gid);
+          }
+        });
+      });
+
+    this.armoryModal
+      .querySelectorAll<HTMLButtonElement>("[data-armory-swap]")
+      .forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const gid = btn.dataset.armorySwap as GadgetId | undefined;
+          if (gid) {
+            this.pendingSwapTarget = gid;
+            this.lastArmorySig = "";
+            this.syncArmoryModal(state, localCritter);
+          }
+        });
+      });
+
+    this.armoryModal
+      .querySelectorAll<HTMLButtonElement>("[data-confirm-swap]")
+      .forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const oldId = btn.dataset.confirmSwap as GadgetId | undefined;
+          const target = this.pendingSwapTarget;
+          if (oldId && target) {
+            this.pendingSwapTarget = null;
+            this.callbacks.onBuyAbility?.(target, oldId);
           }
         });
       });
@@ -1710,12 +2419,15 @@ export class HudController {
       return;
     }
 
+    const localCritter = state.critters.find((c) => c.id === localPlayerId);
+    const localCoins = localCritter ? Math.floor(localCritter.coins) : 0;
+
     const myDraft: PendingDraftState | undefined = state.pendingDrafts.find(
       (d) => d.playerId === localPlayerId,
     );
 
     if (!myDraft) {
-      const waitSig = `WAIT:${state.phase}:${state.pendingDrafts.length}`;
+      const waitSig = `WAIT:${state.phase}:${state.pendingDrafts.length}:${localCoins}`;
       if (waitSig !== this.lastDraftSig) {
         this.lastDraftSig = waitSig;
         this.draftModal.classList.remove("cs-hidden");
@@ -1723,13 +2435,26 @@ export class HudController {
           <div class="cs-modal-card cs-glass cs-modal-sm">
             <div class="cs-kicker">EVOLUTION</div>
             <h2>Waiting for rivals...</h2>
+            ${
+              state.phase === "ROUND_DRAFT"
+                ? `<div class="cs-draft-footer"><button type="button" class="cs-btn cs-btn-secondary cs-draft-armory-btn" data-action="open-draft-armory">🪙 Spend Siege Coins in Armory (${localCoins})</button></div>`
+                : ""
+            }
           </div>
         `;
+        this.draftModal
+          .querySelector('[data-action="open-draft-armory"]')
+          ?.addEventListener("click", () => this.setArmoryOpen(true));
       }
       return;
     }
 
-    const sig = JSON.stringify(myDraft);
+    let sig = `${state.phase}|${localCoins}|${myDraft.playerId}|${myDraft.rerollsRemaining}|${myDraft.requiresSlotSwap ? 1 : 0}`;
+    for (let i = 0; i < myDraft.cards.length; i++) {
+      const card = myDraft.cards[i];
+      if (!card) continue;
+      sig += `|${card.mutationId}:${card.slot}:${card.replacesMutationId ?? ""}`;
+    }
     if (sig === this.lastDraftSig) {
       return;
     }
@@ -1764,14 +2489,27 @@ export class HudController {
       })
       .join("");
 
+    const showArmoryBtn = state.phase === "ROUND_DRAFT";
+    const footerParts: string[] = [];
+    if (myDraft.rerollsRemaining > 0) {
+      footerParts.push(
+        `<button type="button" class="cs-btn cs-btn-secondary" data-action="reroll-draft">↻ Reroll (${myDraft.rerollsRemaining})</button>`,
+      );
+    }
+    if (showArmoryBtn) {
+      footerParts.push(
+        `<button type="button" class="cs-btn cs-btn-secondary cs-draft-armory-btn" data-action="open-draft-armory">🪙 Spend Siege Coins in Armory (${localCoins})</button>`,
+      );
+    }
+
     this.draftModal.innerHTML = `
       <div class="cs-modal-card cs-glass">
-        <div class="cs-kicker">${state.phase === "ROUND_DRAFT" ? "ROUND EVOLUTION" : "EVO POD"}</div>
+        <div class="cs-kicker">${state.phase === "ROUND_DRAFT" ? "ROUND INTERMISSION · EVOLUTION & ARMORY" : "EVO POD"}</div>
         <h2>Pick 1 Mutation</h2>
         <div class="cs-draft-grid">${cardsHtml}</div>
         ${
-          myDraft.rerollsRemaining > 0
-            ? `<div class="cs-draft-footer"><button type="button" class="cs-btn cs-btn-secondary" data-action="reroll-draft">↻ Reroll (${myDraft.rerollsRemaining})</button></div>`
+          footerParts.length > 0
+            ? `<div class="cs-draft-footer">${footerParts.join("")}</div>`
             : ""
         }
       </div>
@@ -1794,6 +2532,11 @@ export class HudController {
 
     const rerollBtn = this.draftModal.querySelector('[data-action="reroll-draft"]');
     rerollBtn?.addEventListener("click", () => this.callbacks.onRerollDraft());
+
+    const armoryBtn = this.draftModal.querySelector(
+      '[data-action="open-draft-armory"]',
+    );
+    armoryBtn?.addEventListener("click", () => this.setArmoryOpen(true));
   }
 
   private syncMatchOverModal(
@@ -1807,20 +2550,22 @@ export class HudController {
       return;
     }
 
-    const sig = JSON.stringify({
-      winnerId: state.winnerId,
-      winnerTeam: state.winnerTeam,
-      scores: state.scores,
-      breakdown,
-    });
+    let sig = `${state.winnerId ?? ""}|${state.winnerTeam ?? ""}|${state.matchEndReason ?? ""}|${breakdown ? `${breakdown.totalEarned}:${breakdown.newBalance}` : ""}`;
+    for (let i = 0; i < state.critters.length; i++) {
+      const c = state.critters[i];
+      if (!c) continue;
+      sig += `|${c.id}:${c.score}:${c.kills}:${Math.round(c.damageDealt)}:${c.podsCollected}`;
+    }
     if (sig === this.lastMatchOverSig) {
       return;
     }
     this.lastMatchOverSig = sig;
     this.matchOverModal.classList.remove("cs-hidden");
 
+    const isFloodDraw = state.matchEndReason === "flood_draw";
     const localCritter = state.critters.find((c) => c.id === localPlayerId);
     const localWon =
+      !isFloodDraw &&
       localCritter !== undefined &&
       ((state.mode === "2v2" &&
         state.winnerTeam !== null &&
@@ -1828,15 +2573,23 @@ export class HudController {
         (state.mode === "ffa" && state.winnerId === localCritter.id));
 
     const winnerCritter = state.critters.find((c) => c.id === state.winnerId);
-    const headline = localWon
-      ? "VICTORY!"
-      : state.mode === "2v2" && state.winnerTeam
-        ? `TEAM ${state.winnerTeam} WINS!`
-        : winnerCritter
-          ? `${winnerCritter.name} WINS!`
-          : "MATCH COMPLETE";
+    const kicker = isFloodDraw ? "ROUND 5 CATACLYSM" : "SIEGE COMPLETE";
+    const headline = isFloodDraw
+      ? "ISLAND ENGULFED — NO WINNER!"
+      : localWon
+        ? "VICTORY!"
+        : state.mode === "2v2" && state.winnerTeam
+          ? `TEAM ${state.winnerTeam} WINS!`
+          : winnerCritter
+            ? `${winnerCritter.name} WINS!`
+            : "MATCH COMPLETE";
 
-    const sorted = [...state.critters].sort((a, b) => b.score - a.score);
+    const sorted = [...state.critters].sort(
+      (a, b) =>
+        b.score - a.score ||
+        b.kills - a.kills ||
+        b.damageDealt - a.damageDealt,
+    );
     const rowsHtml = sorted
       .map(
         (c) => `
@@ -1870,7 +2623,7 @@ export class HudController {
 
     this.matchOverModal.innerHTML = `
       <div class="cs-modal-card cs-glass">
-        <div class="cs-kicker">SIEGE COMPLETE</div>
+        <div class="cs-kicker">${escapeHtml(kicker)}</div>
         <h2 class="cs-winner-title">${escapeHtml(headline)}</h2>
         <table class="cs-scoreboard">
           <thead>

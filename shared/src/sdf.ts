@@ -2184,21 +2184,52 @@ export class SdfWorld {
 
   /**
    * Scan top-down at (x, z) for the highest air-to-solid crossing and refine
-   * with 4 binary search steps. Returns null if the column is all air.
+   * with 4 binary search steps. Uses a fast direct voxel-layer bracket to skip
+   * open-air trilinear samples while returning mathematically identical heights.
+   * Returns null if the column is all air.
    */
   public getSurfaceY(x: number, z: number): number | null {
     if (!Number.isFinite(x) || !Number.isFinite(z)) {
       return null;
     }
-    const { ny, voxelSize: vs } = this.dims;
+    const { nx, ny, nz, voxelSize: vs } = this.dims;
+    const maxX = (nx - 1) * vs;
+    const maxZ = (nz - 1) * vs;
+    if (x < 0 || x > maxX || z < 0 || z > maxZ) {
+      return null;
+    }
+
+    const ix = Math.max(0, Math.min(nx - 2, Math.floor(x / vs)));
+    const iz = Math.max(0, Math.min(nz - 2, Math.floor(z / vs)));
+    const baseZ0 = ix + nx * ny * iz;
+    const baseZ1 = baseZ0 + nx * ny;
+
+    let firstNegIy = -1;
+    for (let iy = ny - 2; iy >= 1; iy--) {
+      const yOff = iy * nx;
+      const v00 = this.values[baseZ0 + yOff] ?? OUTSIDE_AIR_VALUE;
+      const v10 = this.values[baseZ0 + yOff + 1] ?? OUTSIDE_AIR_VALUE;
+      const v01 = this.values[baseZ1 + yOff] ?? OUTSIDE_AIR_VALUE;
+      const v11 = this.values[baseZ1 + yOff + 1] ?? OUTSIDE_AIR_VALUE;
+      if (v00 < 0 || v10 < 0 || v01 < 0 || v11 < 0) {
+        firstNegIy = iy;
+        break;
+      }
+    }
+
+    if (firstNegIy < 0) {
+      return null;
+    }
+
     const step = vs * 0.5;
     const maxY = (ny - 2) * vs;
     const minY = vs;
+    const startY = Math.min(maxY, (firstNegIy + 1) * vs);
 
-    let prevY = maxY;
+    let prevY = startY;
     let prevVal = this.sample(x, prevY, z);
 
-    for (let y = maxY - step; y >= minY; y -= step) {
+    for (let y = startY - step; y >= minY; y -= step) {
       const currVal = this.sample(x, y, z);
       if (prevVal >= 0 && currVal < 0) {
         let lo = y;
@@ -2419,6 +2450,154 @@ export class SdfWorld {
     }
 
     return selected;
+  }
+
+  /**
+   * Scan the current SDF density grid to find the tallest remaining solid surface height (in meters).
+   * Used by Round 5's Stage 2 Ocean Deluge to guarantee water submerges every surviving peak.
+   */
+  public getHighestSolidY(): number {
+    const { nx, ny, nz, voxelSize: vs } = this.dims;
+    let highest = 0;
+
+    for (let iy = ny - 2; iy >= 1; iy--) {
+      let foundAtLayer = false;
+      for (let iz = 1; iz < nz - 1; iz++) {
+        const rowBase = nx * (iy + ny * iz);
+        for (let ix = 1; ix < nx - 1; ix++) {
+          const v = this.values[ix + rowBase] ?? OUTSIDE_AIR_VALUE;
+          if (v < 0) {
+            foundAtLayer = true;
+            const above = this.values[ix + nx * (iy + 1 + ny * iz)] ?? OUTSIDE_AIR_VALUE;
+            const denom = above - v;
+            const frac = denom > 1e-6 ? Math.max(0, Math.min(1, -v / denom)) : 0;
+            const y = (iy + frac) * vs;
+            if (y > highest) {
+              highest = y;
+            }
+          }
+        }
+      }
+      if (foundAtLayer) {
+        return Number(highest.toFixed(4));
+      }
+    }
+
+    return 0;
+  }
+
+  /**
+   * Find dry spawn points across a persistently carved multi-round island.
+   * Starts with standard `findSpawnPoints(count)` above `waterLevel + 0.8`,
+   * then progressively relaxes slope/clearance (`normal.y >= 0.35`), then picks
+   * highest remaining solid terrain above `waterLevel + 0.3`, with an emergency fallback.
+   */
+  public findPersistentRoundSpawnPoints(
+    count: number,
+    waterLevel: number,
+  ): Vec3[] {
+    const targetCount = Math.max(0, Math.floor(count));
+    if (targetCount === 0) {
+      return [];
+    }
+
+    const selected: Vec3[] = this.findSpawnPoints(targetCount).filter(
+      (pt) => pt.y > waterLevel + 0.8,
+    );
+    if (selected.length >= targetCount) {
+      return selected.slice(0, targetCount);
+    }
+
+    const isGrand = this.mapScale === "grand";
+    const margin = isGrand ? 6.0 : 3.5;
+    const step = isGrand ? 2.6 : 1.5;
+
+    const appendMaximallySeparated = (pool: readonly Vec3[], minDistFloor: number): void => {
+      while (selected.length < targetCount && pool.length > 0) {
+        let best: Vec3 | null = null;
+        let bestScore = -Infinity;
+        for (const cand of pool) {
+          let minDist = Infinity;
+          for (const existing of selected) {
+            const d = Math.hypot(
+              cand.x - existing.x,
+              cand.y - existing.y,
+              cand.z - existing.z,
+            );
+            if (d < minDist) {
+              minDist = d;
+            }
+          }
+          if (selected.length > 0 && minDist < minDistFloor) {
+            continue;
+          }
+          const score =
+            (selected.length === 0 ? 0 : Math.min(minDist, isGrand ? 40.0 : 20.0)) +
+            cand.y * 0.45;
+          if (score > bestScore) {
+            bestScore = score;
+            best = cand;
+          }
+        }
+        if (!best) {
+          break;
+        }
+        selected.push({ ...best });
+      }
+    };
+
+    // Pass 2: progressively relaxed slope (normal.y >= 0.35) & clearance above waterLevel + 0.8
+    const relaxedCandidates: Vec3[] = [];
+    for (let x = margin; x <= this.worldWidth - margin; x += step) {
+      for (let z = margin; z <= this.worldDepth - margin; z += step) {
+        const surfaceY = this.getSurfaceY(x, z);
+        if (surfaceY === null || surfaceY <= waterLevel + 0.8) {
+          continue;
+        }
+        const normal = this.sampleNormal(x, surfaceY, z);
+        if (normal.y < 0.35) {
+          continue;
+        }
+        if (this.sample(x, surfaceY + 0.9, z) <= 0) {
+          continue;
+        }
+        relaxedCandidates.push({ x, y: surfaceY, z });
+      }
+    }
+    appendMaximallySeparated(relaxedCandidates, 1.4);
+
+    // Pass 3: highest remaining solid voxels above waterLevel + 0.3
+    if (selected.length < targetCount) {
+      const solidFallback: Vec3[] = [];
+      for (let x = margin; x <= this.worldWidth - margin; x += step) {
+        for (let z = margin; z <= this.worldDepth - margin; z += step) {
+          const surfaceY = this.getSurfaceY(x, z);
+          if (surfaceY === null || surfaceY <= waterLevel + 0.3) {
+            continue;
+          }
+          solidFallback.push({ x, y: surfaceY, z });
+        }
+      }
+      solidFallback.sort((a, b) => b.y - a.y);
+      appendMaximallySeparated(solidFallback, 1.0);
+      // If still short due to tight remaining rock pillar, allow closer placement
+      if (selected.length < targetCount) {
+        appendMaximallySeparated(solidFallback, 0.2);
+      }
+    }
+
+    // Pass 4: absolute emergency fallback if entire island was somehow vaporized
+    while (selected.length < targetCount) {
+      const idx = selected.length;
+      const offset = idx === 0 ? 0 : (idx % 2 === 0 ? 1 : -1) * Math.ceil(idx / 2) * 1.2;
+      selected.push({
+        x: this.centerX + offset,
+        y: waterLevel + 2.0,
+        z: this.centerZ,
+      });
+    }
+
+    return selected.slice(0, targetCount);
   }
 
   /**

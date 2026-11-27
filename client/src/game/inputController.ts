@@ -132,7 +132,11 @@ function isEditableTarget(target: EventTarget | null): boolean {
 }
 
 function isUtilityGadget(gadgetId: GadgetId): boolean {
-  return gadgetId === "vine_grapple" || gadgetId === "prism_wall";
+  return (
+    gadgetId === "vine_grapple" ||
+    gadgetId === "prism_wall" ||
+    gadgetId === "mend_brew"
+  );
 }
 
 /**
@@ -843,7 +847,9 @@ export class InputController {
     }
 
     if (code === "KeyF") {
-      this.callbacks.onRetreatBurrow();
+      if (this.canMove && !this.isDroneMode) {
+        this.callbacks.onRetreatBurrow();
+      }
       return;
     }
 

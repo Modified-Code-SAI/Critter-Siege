@@ -138,7 +138,12 @@ export interface GroundHazardContext {
   critters?: CritterState[];
   shooter?: CritterState | null;
   areTeammates?: (a: CritterState, b: CritterState) => boolean;
-  onEnemyKo?: (shooter: CritterState) => void;
+  onEnemyDamage?: (
+    shooter: CritterState,
+    damage: number,
+    source: "spark_mine" | "blast_barrel",
+  ) => EngineEvent[];
+  onEnemyKo?: (shooter: CritterState) => EngineEvent[];
   onWaterContact?: (
     critter: CritterState,
     attacker?: CritterState | null,
@@ -194,10 +199,11 @@ export function applyGroundHazardsForCritter(
       const allCritters = context?.critters ?? [critter];
       const shooter = context?.shooter ?? null;
       const areTeammates = context?.areTeammates ?? (() => false);
-      const onEnemyKo = context?.onEnemyKo ?? (() => {});
+      const onEnemyDamage = context?.onEnemyDamage;
+      const onEnemyKo = context?.onEnemyKo ?? (() => []);
       const onWaterContact = context?.onWaterContact;
       const affectedCritterIds: string[] = [];
-      const waterEvents: EngineEvent[] = [];
+      const postHazardEvents: EngineEvent[] = [];
 
       for (const target of allCritters) {
         if (!target.alive) continue;
@@ -266,22 +272,33 @@ export function applyGroundHazardsForCritter(
           shooter !== null && !isSelf && areTeammates(shooter, target);
         if (shooter && !isSelf && !isFriendly) {
           shooter.damageDealt += totalDamage;
+          if (totalDamage > 0 && onEnemyDamage) {
+            postHazardEvents.push(
+              ...onEnemyDamage(shooter, totalDamage, "spark_mine"),
+            );
+          }
         }
 
         if (target.hp <= 0) {
           target.alive = false;
           target.hp = 0;
           if (shooter && !isSelf && !isFriendly) {
-            onEnemyKo(shooter);
+            const koEvs = onEnemyKo(shooter);
+            if (koEvs) {
+              postHazardEvents.push(...koEvs);
+            }
           }
         } else if (settled.drowned) {
           if (onWaterContact) {
-            waterEvents.push(...onWaterContact(target, shooter));
+            postHazardEvents.push(...onWaterContact(target, shooter));
           } else {
             target.alive = false;
             target.hp = 0;
             if (shooter && !isSelf && !isFriendly) {
-              onEnemyKo(shooter);
+              const koEvs = onEnemyKo(shooter);
+              if (koEvs) {
+                postHazardEvents.push(...koEvs);
+              }
             }
           }
         }
@@ -294,7 +311,7 @@ export function applyGroundHazardsForCritter(
         position: { ...h.position },
         affectedCritterIds,
       });
-      events.push(...waterEvents);
+      events.push(...postHazardEvents);
 
       // Chain-trigger any nearby Blast Barrels caught in the Spark Mine blast!
       const chainShooter = context?.shooter ?? critter;
@@ -315,7 +332,13 @@ export function applyGroundHazardsForCritter(
           initialImpacts: [syntheticImpact],
           waterLevel,
           areTeammates: context?.areTeammates ?? (() => false),
-          onEnemyKo: context?.onEnemyKo ?? (() => {}),
+          ...(onEnemyDamage
+            ? {
+                onEnemyDamage: (atk, dmg) =>
+                  onEnemyDamage(atk, dmg, "blast_barrel"),
+              }
+            : {}),
+          onEnemyKo: context?.onEnemyKo ?? (() => []),
           ...(onWaterContact ? { onWaterContact } : {}),
         }),
       );
@@ -449,7 +472,8 @@ export interface BarrelChainParams {
   waterLevel: number;
   preImpactPositions?: ReadonlyMap<string, Vec3>;
   areTeammates: (a: CritterState, b: CritterState) => boolean;
-  onEnemyKo: (shooter: CritterState) => void;
+  onEnemyDamage?: (shooter: CritterState, damage: number) => EngineEvent[];
+  onEnemyKo: (shooter: CritterState) => EngineEvent[];
   onWaterContact?: (
     critter: CritterState,
     attacker?: CritterState | null,
@@ -473,6 +497,7 @@ export function resolveBarrelChainDetonations(
     waterLevel,
     preImpactPositions,
     areTeammates,
+    onEnemyDamage,
     onEnemyKo,
     onWaterContact,
   } = params;
@@ -526,7 +551,7 @@ export function resolveBarrelChainDetonations(
     events.push({ type: "TERRAIN_CARVED", op, dirtyChunks });
 
     const affectedCritterIds: string[] = [];
-    const waterEvents: EngineEvent[] = [];
+    const postBarrelEvents: EngineEvent[] = [];
 
     for (const target of critters) {
       if (!target.alive) continue;
@@ -609,22 +634,31 @@ export function resolveBarrelChainDetonations(
       const isFriendly = !isSelf && areTeammates(shooter, target);
       if (!isSelf && !isFriendly) {
         shooter.damageDealt += totalDamage;
+        if (onEnemyDamage) {
+          postBarrelEvents.push(...onEnemyDamage(shooter, totalDamage));
+        }
       }
 
       if (target.hp <= 0) {
         target.alive = false;
         target.hp = 0;
         if (!isSelf && !isFriendly) {
-          onEnemyKo(shooter);
+          const koEvs = onEnemyKo(shooter);
+          if (koEvs) {
+            postBarrelEvents.push(...koEvs);
+          }
         }
       } else if (settled.drowned) {
         if (onWaterContact) {
-          waterEvents.push(...onWaterContact(target, shooter));
+          postBarrelEvents.push(...onWaterContact(target, shooter));
         } else {
           target.alive = false;
           target.hp = 0;
           if (!isSelf && !isFriendly) {
-            onEnemyKo(shooter);
+            const koEvs = onEnemyKo(shooter);
+            if (koEvs) {
+              postBarrelEvents.push(...koEvs);
+            }
           }
         }
       }
@@ -637,7 +671,7 @@ export function resolveBarrelChainDetonations(
       position: { ...hazard.position },
       affectedCritterIds,
     });
-    events.push(...waterEvents);
+    events.push(...postBarrelEvents);
 
     enqueueNearbyBarrels(hazard.position, barrelCarveRadius, depth + 1);
   }

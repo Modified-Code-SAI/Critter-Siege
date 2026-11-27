@@ -9,12 +9,57 @@ import {
 /** LocalStorage key for persisting the player's Critter Siege Essence profile. */
 export const PROFILE_STORAGE_KEY = "critter_siege_profile_v1";
 
+/** Unlockable Siege Essence cosmetic collar & aura accent definition. */
+export interface CosmeticAccentDefinition {
+  id: string;
+  name: string;
+  hex: string;
+  cost: number;
+  description: string;
+}
+
+/** Catalog of Siege Essence cosmetic collar & aura accents. */
+export const COSMETIC_ACCENT_CATALOG: readonly CosmeticAccentDefinition[] = [
+  {
+    id: "neon_cyan",
+    name: "Glacier Glow",
+    hex: "#22d3ee",
+    cost: 40,
+    description: "Luminous arctic teal collar & aura accent.",
+  },
+  {
+    id: "solar_gold",
+    name: "Solar Crown",
+    hex: "#facc15",
+    cost: 60,
+    description: "Radiant golden-hour champion trim.",
+  },
+  {
+    id: "void_magenta",
+    name: "Nebula Pulse",
+    hex: "#ec4899",
+    cost: 80,
+    description: "Electric magenta apex energy accent.",
+  },
+  {
+    id: "emerald_aura",
+    name: "Emerald Sovereign",
+    hex: "#10b981",
+    cost: 100,
+    description: "Vibrant forest-gemstone prestige glow.",
+  },
+];
+
+const COSMETIC_ACCENT_MAP: ReadonlyMap<string, CosmeticAccentDefinition> =
+  new Map(COSMETIC_ACCENT_CATALOG.map((def) => [def.id, def]));
+
 /** Persistent browser-local player profile and Siege Essence unlocks. */
 export interface PlayerProfile {
   displayName: string;
   essence: number;
   unlockedSpecies: SpeciesId[];
   unlockedBonusGadgets: GadgetId[];
+  unlockedCosmetics: string[];
   selectedSpecies: SpeciesId;
   selectedColor: string;
   matchesPlayed: number;
@@ -76,6 +121,7 @@ function createDefaultProfile(): PlayerProfile {
     essence: 0,
     unlockedSpecies: [...STARTER_SPECIES],
     unlockedBonusGadgets: [],
+    unlockedCosmetics: [],
     selectedSpecies: "mole",
     selectedColor: DEFAULT_SELECTED_COLOR,
     matchesPlayed: 0,
@@ -89,6 +135,7 @@ function cloneProfile(profile: PlayerProfile): PlayerProfile {
     essence: profile.essence,
     unlockedSpecies: [...profile.unlockedSpecies],
     unlockedBonusGadgets: [...profile.unlockedBonusGadgets],
+    unlockedCosmetics: [...profile.unlockedCosmetics],
     selectedSpecies: profile.selectedSpecies,
     selectedColor: profile.selectedColor,
     matchesPlayed: profile.matchesPlayed,
@@ -113,6 +160,10 @@ function isValidBonusGadgetId(value: unknown): value is GadgetId {
     Object.prototype.hasOwnProperty.call(GADGET_CATALOG, value) &&
     GADGET_CATALOG[value as GadgetId].bonusLobbyOnly
   );
+}
+
+function isValidCosmeticId(value: unknown): value is string {
+  return typeof value === "string" && COSMETIC_ACCENT_MAP.has(value);
 }
 
 function sanitizeNonNegativeInt(value: unknown, fallback = 0): number {
@@ -167,6 +218,16 @@ function parseStoredProfile(raw: string | null): PlayerProfile {
   }
   const unlockedBonusGadgets = Array.from(unlockedGadgetSet);
 
+  const unlockedCosmeticSet = new Set<string>();
+  if (Array.isArray(parsed.unlockedCosmetics)) {
+    for (const item of parsed.unlockedCosmetics) {
+      if (isValidCosmeticId(item)) {
+        unlockedCosmeticSet.add(item);
+      }
+    }
+  }
+  const unlockedCosmetics = Array.from(unlockedCosmeticSet);
+
   const selectedSpecies: SpeciesId =
     isValidSpeciesId(parsed.selectedSpecies) &&
     unlockedSpeciesSet.has(parsed.selectedSpecies)
@@ -183,6 +244,7 @@ function parseStoredProfile(raw: string | null): PlayerProfile {
     essence,
     unlockedSpecies,
     unlockedBonusGadgets,
+    unlockedCosmetics,
     selectedSpecies,
     selectedColor,
     matchesPlayed,
@@ -343,6 +405,46 @@ export class ProgressionStore {
 
     this.profile.essence -= cost;
     this.profile.unlockedBonusGadgets.push(gadget);
+    this.saveProfile();
+
+    return {
+      ok: true,
+      profile: cloneProfile(this.profile),
+    };
+  }
+
+  /** Unlock a cosmetic critter collar accent using Siege Essence and automatically equip its color. */
+  public purchaseCosmetic(cosmeticId: string): {
+    ok: boolean;
+    reason?: string;
+    profile: PlayerProfile;
+  } {
+    const def = COSMETIC_ACCENT_MAP.get(cosmeticId);
+    if (!def) {
+      return {
+        ok: false,
+        reason: "Unknown cosmetic accent.",
+        profile: cloneProfile(this.profile),
+      };
+    }
+    if (this.profile.unlockedCosmetics.includes(cosmeticId)) {
+      return {
+        ok: false,
+        reason: `${def.name} is already unlocked.`,
+        profile: cloneProfile(this.profile),
+      };
+    }
+    if (this.profile.essence < def.cost) {
+      return {
+        ok: false,
+        reason: `Need ${def.cost} Essence to unlock ${def.name}.`,
+        profile: cloneProfile(this.profile),
+      };
+    }
+
+    this.profile.essence -= def.cost;
+    this.profile.unlockedCosmetics.push(cosmeticId);
+    this.profile.selectedColor = def.hex;
     this.saveProfile();
 
     return {

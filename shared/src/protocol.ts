@@ -1,6 +1,7 @@
 import {
   GADGET_CATALOG,
   HARDPOINT_SLOTS,
+  MAX_LOADOUT_SLOTS,
   MUTATION_CATALOG,
   SPECIES_CATALOG,
   THEME_IDS,
@@ -32,6 +33,7 @@ export type ClientMessage =
       botCount?: number;
       mapScale?: MapScaleChoice;
       bonusGadget?: GadgetId | null;
+      startingLoadout?: GadgetId[];
     }
   | {
       type: "JOIN_ROOM";
@@ -39,6 +41,7 @@ export type ClientMessage =
       playerName: string;
       species: SpeciesId;
       bonusGadget?: GadgetId | null;
+      startingLoadout?: GadgetId[];
     }
   | {
       type: "RECONNECT_ROOM";
@@ -55,10 +58,11 @@ export type ClientMessage =
       position: Vec3;
       velocity: Vec3;
       yaw: number;
+      pitch?: number;
     }
   | {
       type: "UTILITY_ACTION";
-      gadgetId: GadgetId;
+      gadgetId: GadgetId | "sky_bomber_drop";
       origin: Vec3;
       direction: Vec3;
       target?: Vec3;
@@ -70,6 +74,11 @@ export type ClientMessage =
       direction: Vec3;
       power: number;
       targetPing?: Vec3;
+    }
+  | {
+      type: "BUY_ABILITY";
+      gadgetId: GadgetId;
+      replaceGadgetId?: GadgetId;
     }
   | {
       type: "RETREAT_BURROW";
@@ -198,6 +207,22 @@ function parseOptionalBonusGadget(
   return { ok: true, value: parsed };
 }
 
+function parseOptionalStartingLoadout(
+  value: unknown,
+): { ok: true; value: GadgetId[] | undefined } | { ok: false } {
+  if (value === undefined) return { ok: true, value: undefined };
+  if (!Array.isArray(value) || value.length > MAX_LOADOUT_SLOTS) {
+    return { ok: false };
+  }
+  const parsed: GadgetId[] = [];
+  for (const item of value) {
+    const gid = parseGadgetId(item);
+    if (!gid) return { ok: false };
+    parsed.push(gid);
+  }
+  return { ok: true, value: parsed };
+}
+
 function parseThemeId(value: unknown): ThemeId | null {
   if (typeof value !== "string" || !THEME_SET.has(value)) return null;
   return value as ThemeId;
@@ -267,6 +292,11 @@ function parseCreateRoom(raw: Record<string, unknown>): ClientMessage | null {
   if (bonus.value !== undefined) {
     msg.bonusGadget = bonus.value;
   }
+  const loadout = parseOptionalStartingLoadout(raw.startingLoadout);
+  if (!loadout.ok) return null;
+  if (loadout.value !== undefined) {
+    msg.startingLoadout = loadout.value;
+  }
   return msg;
 }
 
@@ -279,6 +309,9 @@ function parseJoinRoom(raw: Record<string, unknown>): ClientMessage | null {
   const bonus = parseOptionalBonusGadget(raw.bonusGadget);
   if (!bonus.ok) return null;
 
+  const loadout = parseOptionalStartingLoadout(raw.startingLoadout);
+  if (!loadout.ok) return null;
+
   const msg: Extract<ClientMessage, { type: "JOIN_ROOM" }> = {
     type: "JOIN_ROOM",
     roomCode,
@@ -287,6 +320,9 @@ function parseJoinRoom(raw: Record<string, unknown>): ClientMessage | null {
   };
   if (bonus.value !== undefined) {
     msg.bonusGadget = bonus.value;
+  }
+  if (loadout.value !== undefined) {
+    msg.startingLoadout = loadout.value;
   }
   return msg;
 }
@@ -347,6 +383,11 @@ function parseLobbyConfig(raw: Record<string, unknown>): ClientMessage | null {
   if (bonus.value !== undefined) {
     msg.bonusGadget = bonus.value;
   }
+  const loadout = parseOptionalStartingLoadout(raw.startingLoadout);
+  if (!loadout.ok) return null;
+  if (loadout.value !== undefined) {
+    msg.startingLoadout = loadout.value;
+  }
   return msg;
 }
 
@@ -354,18 +395,26 @@ function parseMoveState(raw: Record<string, unknown>): ClientMessage | null {
   const position = parseVec3(raw.position);
   const velocity = parseVec3(raw.velocity);
   if (!position || !velocity || !isFiniteNumber(raw.yaw)) return null;
-  return {
+  const msg: Extract<ClientMessage, { type: "MOVE_STATE" }> = {
     type: "MOVE_STATE",
     position,
     velocity,
     yaw: raw.yaw,
   };
+  if (raw.pitch !== undefined) {
+    if (!isFiniteNumber(raw.pitch)) return null;
+    msg.pitch = raw.pitch;
+  }
+  return msg;
 }
 
 function parseUtilityAction(
   raw: Record<string, unknown>,
 ): ClientMessage | null {
-  const gadgetId = parseGadgetId(raw.gadgetId);
+  const gadgetId: GadgetId | "sky_bomber_drop" | null =
+    raw.gadgetId === "sky_bomber_drop"
+      ? "sky_bomber_drop"
+      : parseGadgetId(raw.gadgetId);
   const origin = parseVec3(raw.origin);
   const direction = parseVec3(raw.direction);
   if (!gadgetId || !origin || !direction) return null;
@@ -416,6 +465,22 @@ function parseFireAction(raw: Record<string, unknown>): ClientMessage | null {
   return msg;
 }
 
+function parseBuyAbility(raw: Record<string, unknown>): ClientMessage | null {
+  const gadgetId = parseGadgetId(raw.gadgetId);
+  if (!gadgetId) return null;
+
+  const msg: Extract<ClientMessage, { type: "BUY_ABILITY" }> = {
+    type: "BUY_ABILITY",
+    gadgetId,
+  };
+  if (raw.replaceGadgetId !== undefined) {
+    const replaceGadgetId = parseGadgetId(raw.replaceGadgetId);
+    if (!replaceGadgetId) return null;
+    msg.replaceGadgetId = replaceGadgetId;
+  }
+  return msg;
+}
+
 function parsePickMutation(raw: Record<string, unknown>): ClientMessage | null {
   const mutationId = parseMutationId(raw.mutationId);
   if (!mutationId) return null;
@@ -459,6 +524,8 @@ export function parseClientMessage(raw: unknown): ClientMessage | null {
       return parseUtilityAction(raw);
     case "FIRE_ACTION":
       return parseFireAction(raw);
+    case "BUY_ABILITY":
+      return parseBuyAbility(raw);
     case "RETREAT_BURROW": {
       const direction = parseVec3(raw.direction);
       return direction ? { type: "RETREAT_BURROW", direction } : null;

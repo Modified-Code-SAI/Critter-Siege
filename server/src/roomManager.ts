@@ -1,6 +1,8 @@
 import { randomInt, randomUUID } from "node:crypto";
 import {
   MatchEngine,
+  chooseBotShopPurchase,
+  chooseBotStartingLoadout,
   parseClientMessage,
   planBotTurn,
   type ClientMessage,
@@ -23,6 +25,12 @@ export interface RoomManagerOptions {
   tickIntervalMs?: number;
   disconnectGraceMs?: number;
   botThinkDelayMs?: number;
+  roundDurationSec?: number;
+  maxRounds?: number;
+  floodDurationSec?: number;
+  roomCleanupIntervalMs?: number;
+  finishedRoomTtlMs?: number;
+  idleRoomTtlMs?: number;
 }
 
 /** Minimal WebSocket-compatible interface for decoupling room logic from concrete socket implementations. */
@@ -36,6 +44,9 @@ const WS_READY_OPEN = 1;
 const DEFAULT_TICK_INTERVAL_MS = 100;
 const DEFAULT_DISCONNECT_GRACE_MS = 15_000;
 const DEFAULT_BOT_THINK_DELAY_MS = 600;
+const DEFAULT_ROOM_CLEANUP_INTERVAL_MS = 30_000;
+const DEFAULT_FINISHED_ROOM_TTL_MS = 60_000;
+const DEFAULT_IDLE_ROOM_TTL_MS = 300_000;
 const MAX_ROOM_PLAYERS = 4;
 const ROOM_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ";
 
@@ -59,6 +70,7 @@ interface HumanSeat {
   species: SpeciesId;
   team: TeamId;
   bonusGadget: GadgetId | null;
+  startingLoadout?: GadgetId[];
   reconnectToken: string;
   socket: ClientSocketLike | null;
   connected: boolean;
@@ -77,6 +89,9 @@ interface RoomRecord {
   engine: MatchEngine | null;
   tickTimer: ReturnType<typeof setInterval> | null;
   lastTickMs: number;
+  lastSnapshotMs: number;
+  lastActivityMs: number;
+  finishedAtMs: number | null;
   activeTurnAutomationKey: string | null;
   activeTurnTimer: ReturnType<typeof setTimeout> | null;
   draftTimers: Map<string, ReturnType<typeof setTimeout>>;
@@ -90,14 +105,23 @@ interface SocketBinding {
 /**
  * Authoritative 4-letter room manager for Critter Siege multiplayer lobbies.
  * Validates client messages, drives MatchEngine ticks, runs AI bots and
- * disconnect grace fallbacks, and replays full carveLog state on reconnect.
+ * disconnect grace fallbacks, supports Anytime Armory purchases, replays
+ * full cumulative carveLog state across all rounds on reconnect, and reaps
+ * expired finished/idle rooms automatically.
  */
 export class RoomManager {
   private readonly tickIntervalMs: number;
   private readonly disconnectGraceMs: number;
   private readonly botThinkDelayMs: number;
+  private readonly roomCleanupIntervalMs: number;
+  private readonly finishedRoomTtlMs: number;
+  private readonly idleRoomTtlMs: number;
+  private readonly roundDurationSec?: number;
+  private readonly maxRounds?: number;
+  private readonly floodDurationSec?: number;
   private readonly rooms = new Map<string, RoomRecord>();
   private readonly socketBindings = new Map<ClientSocketLike, SocketBinding>();
+  private cleanupTimer: ReturnType<typeof setInterval> | null = null;
   private disposed = false;
 
   public constructor(options?: RoomManagerOptions) {
@@ -113,6 +137,76 @@ export class RoomManager {
       10,
       options?.botThinkDelayMs ?? DEFAULT_BOT_THINK_DELAY_MS,
     );
+    this.roomCleanupIntervalMs = Math.max(
+      10,
+      options?.roomCleanupIntervalMs ?? DEFAULT_ROOM_CLEANUP_INTERVAL_MS,
+    );
+    this.finishedRoomTtlMs = Math.max(
+      0,
+      options?.finishedRoomTtlMs ?? DEFAULT_FINISHED_ROOM_TTL_MS,
+    );
+    this.idleRoomTtlMs = Math.max(
+      0,
+      options?.idleRoomTtlMs ?? DEFAULT_IDLE_ROOM_TTL_MS,
+    );
+    if (options?.roundDurationSec !== undefined) {
+      this.roundDurationSec = options.roundDurationSec;
+    }
+    if (options?.maxRounds !== undefined) {
+      this.maxRounds = options.maxRounds;
+    }
+    if (options?.floodDurationSec !== undefined) {
+      this.floodDurationSec = options.floodDurationSec;
+    }
+
+    this.cleanupTimer = setInterval(() => {
+      this.sweepExpiredRooms();
+    }, this.roomCleanupIntervalMs);
+    this.cleanupTimer.unref?.();
+  }
+
+  /** Return the current number of active rooms held in memory. */
+  public getRoomCount(): number {
+    return this.rooms.size;
+  }
+
+  /**
+   * Sweep and dispose rooms that have exceeded either the finished-match TTL
+   * or the idle all-disconnected TTL. Returns the count of reaped rooms.
+   */
+  public sweepExpiredRooms(nowMs: number = Date.now()): number {
+    if (this.disposed) {
+      return 0;
+    }
+    let removed = 0;
+    for (const room of Array.from(this.rooms.values())) {
+      const finishedExpired =
+        room.finishedAtMs !== null &&
+        nowMs - room.finishedAtMs >= this.finishedRoomTtlMs;
+      const allDisconnected = room.humans.every((h) => !h.connected);
+      const idleExpired =
+        allDisconnected && nowMs - room.lastActivityMs >= this.idleRoomTtlMs;
+
+      if (!finishedExpired && !idleExpired) {
+        continue;
+      }
+
+      this.clearRoomTimers(room);
+      for (const human of room.humans) {
+        if (human.socket) {
+          this.socketBindings.delete(human.socket);
+          human.socket = null;
+        }
+      }
+      for (const [sock, binding] of Array.from(this.socketBindings.entries())) {
+        if (binding.roomCode === room.roomCode) {
+          this.socketBindings.delete(sock);
+        }
+      }
+      this.rooms.delete(room.roomCode);
+      removed += 1;
+    }
+    return removed;
   }
 
   /** Parse and dispatch a raw JSON payload received from a client socket. */
@@ -164,6 +258,9 @@ export class RoomManager {
       case "FIRE_ACTION":
         this.handleFireAction(socket, msg);
         return;
+      case "BUY_ABILITY":
+        this.handleBuyAbility(socket, msg);
+        return;
       case "RETREAT_BURROW":
         this.handleRetreatBurrow(socket, msg);
         return;
@@ -202,6 +299,7 @@ export class RoomManager {
 
     seat.socket = null;
     seat.connected = false;
+    room.lastActivityMs = Date.now();
 
     if (room.started && room.engine) {
       this.broadcastSnapshot(room);
@@ -214,6 +312,10 @@ export class RoomManager {
   /** Clear all active room intervals and timers cleanly so Node/Vitest can exit immediately. */
   public dispose(): void {
     this.disposed = true;
+    if (this.cleanupTimer) {
+      clearInterval(this.cleanupTimer);
+      this.cleanupTimer = null;
+    }
     for (const room of this.rooms.values()) {
       this.clearRoomTimers(room);
     }
@@ -239,11 +341,15 @@ export class RoomManager {
       species: msg.species,
       team: "A",
       bonusGadget: msg.bonusGadget ?? null,
+      ...(msg.startingLoadout !== undefined
+        ? { startingLoadout: [...msg.startingLoadout] }
+        : {}),
       reconnectToken,
       socket,
       connected: true,
     };
 
+    const nowMs = Date.now();
     const room: RoomRecord = {
       roomCode,
       hostId,
@@ -256,7 +362,10 @@ export class RoomManager {
       humans: [hostSeat],
       engine: null,
       tickTimer: null,
-      lastTickMs: Date.now(),
+      lastTickMs: nowMs,
+      lastSnapshotMs: nowMs,
+      lastActivityMs: nowMs,
+      finishedAtMs: null,
       activeTurnAutomationKey: null,
       activeTurnTimer: null,
       draftTimers: new Map(),
@@ -319,11 +428,15 @@ export class RoomManager {
       species: msg.species,
       team: teamA <= teamB ? "A" : "B",
       bonusGadget: msg.bonusGadget ?? null,
+      ...(msg.startingLoadout !== undefined
+        ? { startingLoadout: [...msg.startingLoadout] }
+        : {}),
       reconnectToken,
       socket,
       connected: true,
     };
     room.humans.push(seat);
+    room.lastActivityMs = Date.now();
     room.botCount = Math.min(
       room.botCount,
       Math.max(0, MAX_ROOM_PLAYERS - room.humans.length),
@@ -379,6 +492,7 @@ export class RoomManager {
 
     seat.socket = socket;
     seat.connected = true;
+    room.lastActivityMs = Date.now();
     this.socketBindings.set(socket, {
       roomCode: room.roomCode,
       playerId: seat.id,
@@ -467,6 +581,9 @@ export class RoomManager {
     if (msg.bonusGadget !== undefined) {
       seat.bonusGadget = msg.bonusGadget;
     }
+    if (msg.startingLoadout !== undefined) {
+      seat.startingLoadout = [...msg.startingLoadout];
+    }
 
     this.broadcastLobby(room);
   }
@@ -510,10 +627,20 @@ export class RoomManager {
       theme: room.theme,
       mode: room.mode,
       mapScale: resolvedMapScale,
+      ...(this.roundDurationSec !== undefined
+        ? { roundDurationSec: this.roundDurationSec }
+        : {}),
+      ...(this.maxRounds !== undefined ? { maxRounds: this.maxRounds } : {}),
+      ...(this.floodDurationSec !== undefined
+        ? { floodDurationSec: this.floodDurationSec }
+        : {}),
       players,
     });
     room.started = true;
-    room.lastTickMs = Date.now();
+    room.finishedAtMs = null;
+    const nowMs = Date.now();
+    room.lastTickMs = nowMs;
+    room.lastActivityMs = nowMs;
 
     this.broadcastSnapshot(room);
     this.startRoomTickLoop(room);
@@ -541,7 +668,12 @@ export class RoomManager {
       return;
     }
 
-    const events = engine.applyMove(seat.id, msg.position, msg.yaw, 0);
+    const events = engine.applyMove(
+      seat.id,
+      msg.position,
+      msg.yaw,
+      msg.pitch ?? 0,
+    );
     this.publishEngineUpdate(room, events);
   }
 
@@ -554,16 +686,27 @@ export class RoomManager {
     const { room, seat, engine } = context;
     const snap = engine.getSnapshot();
 
-    if (snap.activePlayerId !== seat.id || snap.phase !== "ACTIVE") {
+    const isSkyBomberDrop = msg.gadgetId === "sky_bomber_drop";
+    const allowedPhase = isSkyBomberDrop
+      ? snap.phase === "ACTIVE" || snap.phase === "RETREAT"
+      : snap.phase === "ACTIVE";
+    if (snap.activePlayerId !== seat.id || !allowedPhase) {
       this.sendError(
         socket,
         "NOT_YOUR_TURN",
-        "Only the active critter can use utility gadgets during ACTIVE phase.",
+        isSkyBomberDrop
+          ? "Sky Bomber drop is only available to the active critter during ACTIVE or RETREAT phases."
+          : "Only the active critter can use utility gadgets during ACTIVE phase.",
       );
       return;
     }
 
-    if (msg.gadgetId !== "vine_grapple" && msg.gadgetId !== "prism_wall") {
+    if (
+      msg.gadgetId !== "vine_grapple" &&
+      msg.gadgetId !== "prism_wall" &&
+      msg.gadgetId !== "mend_brew" &&
+      msg.gadgetId !== "sky_bomber_drop"
+    ) {
       this.sendError(
         socket,
         "INVALID_UTILITY",
@@ -610,6 +753,31 @@ export class RoomManager {
         socket,
         "INVALID_FIRE_ACTION",
         "Shot could not be fired (insufficient charges or invalid gadget).",
+      );
+      return;
+    }
+
+    this.publishEngineUpdate(room, events);
+  }
+
+  private handleBuyAbility(
+    socket: ClientSocketLike,
+    msg: Extract<ClientMessage, { type: "BUY_ABILITY" }>,
+  ): void {
+    const context = this.requireActiveEngineSeat(socket);
+    if (!context) return;
+    const { room, seat, engine } = context;
+
+    const events = engine.applyBuyAbility(
+      seat.id,
+      msg.gadgetId,
+      msg.replaceGadgetId,
+    );
+    if (events.length === 0) {
+      this.sendError(
+        socket,
+        "INVALID_BUY_ABILITY",
+        "Ability purchase rejected (insufficient Siege Coins, full loadout, or invalid phase).",
       );
       return;
     }
@@ -734,7 +902,9 @@ export class RoomManager {
     if (room.tickTimer) {
       clearInterval(room.tickTimer);
     }
-    room.lastTickMs = Date.now();
+    const startMs = Date.now();
+    room.lastTickMs = startMs;
+    room.lastSnapshotMs = startMs;
     room.tickTimer = setInterval(() => {
       if (this.disposed || !room.engine) {
         return;
@@ -753,7 +923,20 @@ export class RoomManager {
 
       const events = room.engine.tick(dtSec);
       if (events.length > 0) {
+        room.lastSnapshotMs = now;
         this.publishEngineUpdate(room, events);
+      } else {
+        const snap = room.engine.getSnapshot();
+        if (snap.phase !== "MATCH_OVER" && snap.phase !== "LOBBY") {
+          const isFloodOrWarning =
+            snap.phase === "FINAL_FLOOD" ||
+            (snap.round >= snap.maxRounds && snap.roundTimeRemainingSec <= 60);
+          const intervalMs = isFloodOrWarning ? 100 : 500;
+          if (now - room.lastSnapshotMs >= intervalMs) {
+            room.lastSnapshotMs = now;
+            this.broadcastSnapshot(room);
+          }
+        }
       }
     }, this.tickIntervalMs);
   }
@@ -763,10 +946,16 @@ export class RoomManager {
     if (events.length > 0) {
       this.broadcastMessage(room, { type: "ENGINE_EVENTS", events });
     }
+    const nowMs = Date.now();
+    room.lastSnapshotMs = nowMs;
+    room.lastActivityMs = nowMs;
     this.broadcastSnapshot(room);
 
     const snap = room.engine.getSnapshot();
     if (snap.phase === "MATCH_OVER") {
+      if (room.finishedAtMs === null) {
+        room.finishedAtMs = nowMs;
+      }
       this.clearRoomTimers(room);
       return;
     }
@@ -779,6 +968,13 @@ export class RoomManager {
     }
 
     const snap = room.engine.getSnapshot();
+
+    // Pause all bot/grace turn timers cleanly during Round 5 FINAL_FLOOD engulfment
+    if (snap.phase === "FINAL_FLOOD") {
+      this.clearActiveTurnTimer(room);
+      this.clearDraftTimers(room);
+      return;
+    }
 
     // 1. Handle ACTIVE turn automation for AI bots and disconnected humans
     if (snap.phase === "ACTIVE" && snap.activePlayerId) {
@@ -898,6 +1094,16 @@ export class RoomManager {
       }
     }
 
+    if (plan.preUtilities && plan.preUtilities.length > 0) {
+      for (const util of plan.preUtilities) {
+        const utilSnap = room.engine.getSnapshot();
+        if (utilSnap.phase !== "ACTIVE" || utilSnap.activePlayerId !== playerId) {
+          break;
+        }
+        events.push(...room.engine.applyUtility(playerId, util));
+      }
+    }
+
     const postMove = room.engine.getSnapshot();
     if (postMove.phase === "ACTIVE" && postMove.activePlayerId === playerId) {
       let fireEvents = room.engine.applyFire(playerId, {
@@ -938,13 +1144,35 @@ export class RoomManager {
     if (snap.phase !== "DRAFT_IF_READY" && snap.phase !== "ROUND_DRAFT") {
       return;
     }
+
+    const events: EngineEvent[] = [];
+    // Bots shop in the Armory during ROUND_DRAFT before finalizing their mutation pick
+    if (snap.phase === "ROUND_DRAFT" && !requireDisconnected) {
+      const botCritter = snap.critters.find((c) => c.id === playerId && c.isBot);
+      if (botCritter) {
+        const purchase = chooseBotShopPurchase(botCritter);
+        if (purchase) {
+          events.push(
+            ...room.engine.applyBuyAbility(
+              playerId,
+              purchase.gadgetId,
+              purchase.replaceGadgetId,
+            ),
+          );
+        }
+      }
+    }
+
     const draft = snap.pendingDrafts.find((d) => d.playerId === playerId);
     const firstOption = draft?.options[0];
     if (!firstOption) {
+      if (events.length > 0) {
+        this.publishEngineUpdate(room, events);
+      }
       return;
     }
 
-    const events = room.engine.applyMutationPick(playerId, firstOption);
+    events.push(...room.engine.applyMutationPick(playerId, firstOption));
     this.publishEngineUpdate(room, events);
   }
 
@@ -957,6 +1185,9 @@ export class RoomManager {
       isBot: false,
       connected: h.connected,
       bonusGadget: h.bonusGadget,
+      ...(h.startingLoadout !== undefined
+        ? { startingLoadout: [...h.startingLoadout] }
+        : {}),
     }));
 
     let countA = players.filter((p) => p.team === "A").length;
@@ -980,6 +1211,7 @@ export class RoomManager {
         isBot: true,
         connected: true,
         bonusGadget: null,
+        startingLoadout: chooseBotStartingLoadout(species),
       });
     }
 
@@ -1004,6 +1236,11 @@ export class RoomManager {
       team: p.team,
       isBot: p.isBot,
       bonusGadget: p.bonusGadget ?? null,
+      ...(p.isBot
+        ? { startingLoadout: chooseBotStartingLoadout(p.species) }
+        : p.startingLoadout !== undefined
+          ? { startingLoadout: [...p.startingLoadout] }
+          : {}),
     }));
   }
 
@@ -1043,6 +1280,7 @@ export class RoomManager {
       this.sendError(socket, "SEAT_NOT_FOUND", "Player seat not found in room.");
       return null;
     }
+    room.lastActivityMs = Date.now();
     return { room, seat };
   }
 

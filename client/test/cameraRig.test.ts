@@ -696,4 +696,52 @@ describe("CameraRig", () => {
     }
     expect(rigA.camera.position.distanceTo(rigB.camera.position)).toBeLessThan(0.001);
   });
+
+  it("activates panoramic flood_cam during FINAL_FLOOD and stays cleanly above the rising waterLevel", () => {
+    const world = new SdfWorld(808, "emerald_spire");
+    const rig = new CameraRig(16 / 9);
+
+    // Even if first-person or shot-cam was active beforehand, FINAL_FLOOD takes highest priority
+    rig.setFirstPerson(true);
+    rig.update(makeContext(world, { phase: "ACTIVE", waterLevel: 2.0 }));
+    expect(rig.getMode()).toBe("first_person");
+
+    rig.update(
+      makeContext(world, {
+        phase: "FINAL_FLOOD",
+        shotPos: { x: 25, y: 12, z: 25 },
+        localAlive: true,
+        waterLevel: 6.0,
+        dtSec: 0.05,
+      }),
+    );
+    expect(rig.getMode()).toBe("flood_cam");
+    expect(rig.camera.position.y).toBeGreaterThanOrEqual(6.0 + 8.0);
+
+    const startPos = rig.camera.position.clone();
+
+    // Advance across rising Final Deluge water levels -> smoothly orbits and never clips underwater
+    for (let step = 1; step <= 40; step++) {
+      const risingWater = 6.0 + step * 0.6; // rises up to 30.0m
+      rig.update(
+        makeContext(world, {
+          phase: "FINAL_FLOOD",
+          localAlive: step < 25,
+          waterLevel: risingWater,
+          dtSec: 0.08,
+        }),
+      );
+      expect(rig.getMode()).toBe("flood_cam");
+      expect(rig.camera.position.y).toBeGreaterThanOrEqual(risingWater + 8.0 - 1e-4);
+    }
+
+    // Confirm panoramic orbit moved around the island center at ~worldSpan * 0.72 radius
+    const endPos = rig.camera.position.clone();
+    expect(endPos.distanceTo(startPos)).toBeGreaterThan(5.0);
+    const horizDist = Math.hypot(
+      endPos.x - world.centerX,
+      endPos.z - world.centerZ,
+    );
+    expect(horizDist).toBeCloseTo(world.worldWidth * 0.72, 0);
+  });
 });

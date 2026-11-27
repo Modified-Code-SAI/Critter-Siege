@@ -7,7 +7,8 @@ export type CameraMode =
   | "first_person"
   | "drone_recon"
   | "shot_cam"
-  | "spectator_drone";
+  | "spectator_drone"
+  | "flood_cam";
 
 /** Per-frame context passed to CameraRig.update(). */
 export interface CameraUpdateContext {
@@ -19,6 +20,7 @@ export interface CameraUpdateContext {
   shotPos: Vec3 | null;
   world: SdfWorld;
   dtSec: number;
+  waterLevel?: number;
 }
 
 const DEFAULT_FOV = 64;
@@ -40,6 +42,11 @@ const DRONE_MIN_PITCH = 0.25;
 const DRONE_MAX_PITCH = 1.38;
 const DRONE_DEFAULT_PITCH = Math.PI * 0.25;
 
+const FLOOD_CAM_RADIUS_RATIO = 0.72;
+const FLOOD_CAM_HEIGHT_RATIO = 0.72;
+const FLOOD_CAM_ORBIT_SPEED = 0.28;
+const FLOOD_CAM_WATER_CLEARANCE = 8.0;
+
 const PULLBACK_STEP = 0.15;
 const PULLBACK_MARGIN = 0.35;
 const PULLBACK_SDF_CLEARANCE = 0.22;
@@ -60,8 +67,8 @@ function finiteOr(value: number, fallback: number): number {
 }
 
 /**
- * Seamless 4-mode Three.js camera rig (Over-the-Shoulder, First-Person Optic Visor,
- * Tactical Drone Recon, Projectile Shot Cam, plus Spectator Drone when KO'd)
+ * Seamless multi-mode Three.js camera rig (Over-the-Shoulder, First-Person Optic Visor,
+ * Tactical Drone Recon, Projectile Shot Cam, Spectator Drone when KO'd, and panoramic Flood Cam)
  * with smooth exponential damping and SDF terrain collision pullback.
  */
 export class CameraRig {
@@ -78,6 +85,7 @@ export class CameraRig {
   private droneYaw = Math.PI * 0.25;
   private dronePitch = DRONE_DEFAULT_PITCH;
   private droneZoomRatio = DRONE_DEFAULT_ZOOM_RATIO;
+  private floodOrbitYaw = Math.PI * 0.25;
 
   private readonly currentPos = new THREE.Vector3(
     DEFAULT_ISLAND_CENTER.x,
@@ -234,7 +242,10 @@ export class CameraRig {
     let targetFov = DEFAULT_FOV;
     let obstructPulledIn = false;
 
-    if (this.mode === "shot_cam") {
+    if (this.mode === "flood_cam") {
+      dampRate = 4.5;
+      this.computeFloodCamPose(ctx.world, safeDt, targetY, ctx.waterLevel);
+    } else if (this.mode === "shot_cam") {
       dampRate = 9.0;
       this.computeShotCamPose(ctx.shotPos);
     } else if (this.mode === "spectator_drone" || this.mode === "drone_recon") {
@@ -294,6 +305,18 @@ export class CameraRig {
       }
     }
 
+    // Hard safety guard in flood_cam: never dip beneath the rising deluge crest
+    if (this.mode === "flood_cam") {
+      const safeWater =
+        ctx.waterLevel !== undefined && Number.isFinite(ctx.waterLevel)
+          ? ctx.waterLevel
+          : 2.0;
+      const minFloodCamY = safeWater + FLOOD_CAM_WATER_CLEARANCE;
+      if (this.currentPos.y < minFloodCamY) {
+        this.currentPos.y = minFloodCamY;
+      }
+    }
+
     const fovAlpha =
       snapImmediate || this.mode === "first_person"
         ? 1
@@ -334,6 +357,9 @@ export class CameraRig {
   }
 
   private resolveMode(ctx: CameraUpdateContext): CameraMode {
+    if (ctx.phase === "FINAL_FLOOD") {
+      return "flood_cam";
+    }
     if ((ctx.phase === "RESOLVING" && ctx.shotPos !== null) || this.shotCamActive) {
       return "shot_cam";
     }
@@ -350,7 +376,9 @@ export class CameraRig {
   }
 
   private syncImmediateMode(): void {
-    if (this.shotCamActive) {
+    if (this.prevPhase === "FINAL_FLOOD") {
+      this.mode = "flood_cam";
+    } else if (this.shotCamActive) {
       this.mode = "shot_cam";
     } else if (this.spectatorOverride) {
       this.mode = "spectator_drone";
@@ -507,6 +535,34 @@ export class CameraRig {
       centerZ + Math.cos(this.droneYaw) * cosP * effectiveDist,
     );
     this.desiredLookAt.set(centerX, centerY, centerZ);
+  }
+
+  private computeFloodCamPose(
+    world: SdfWorld,
+    dtSec: number,
+    targetY: number,
+    waterLevel?: number,
+  ): void {
+    this.floodOrbitYaw += dtSec * FLOOD_CAM_ORBIT_SPEED;
+
+    const worldSpan = Math.max(world.worldWidth, world.worldDepth);
+    const radius = worldSpan * FLOOD_CAM_RADIUS_RATIO;
+    const safeWater =
+      waterLevel !== undefined && Number.isFinite(waterLevel) ? waterLevel : 2.0;
+
+    const elevatedY = Math.max(
+      world.worldHeight * FLOOD_CAM_HEIGHT_RATIO,
+      targetY + 12.0,
+      safeWater + FLOOD_CAM_WATER_CLEARANCE + 1.5,
+    );
+    const lookY = Math.max(world.worldHeight * 0.28, safeWater + 1.0);
+
+    this.desiredPos.set(
+      world.centerX + Math.sin(this.floodOrbitYaw) * radius,
+      elevatedY,
+      world.centerZ + Math.cos(this.floodOrbitYaw) * radius,
+    );
+    this.desiredLookAt.set(world.centerX, lookY, world.centerZ);
   }
 
   private computeShotCamPose(shotPos: Vec3 | null): void {
