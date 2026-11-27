@@ -191,11 +191,11 @@ const MUTATION_STAT_CHIPS: Record<MutationId, readonly [string, string]> = {
 
 const GADGET_SHORT_TOOLTIP: Record<GadgetId, string> = {
   gale_mortar: "Gale Mortar — Wind-curved explosive crater shell",
-  quake_club: "Quake Club — Close-range knockback smash",
+  quake_club: "Gale Scatter — Wide-cone pneumatic wind shotgun blast",
   vine_grapple: "Vine Grapple — Climb cliffs or rappel safely down (6/rd, 1/turn)",
   spore_burst: "Spore Burst — Splits into 5 buoyant cluster sub-spores",
   burrow_bore: "Burrow Bore — Drills straight through rock walls",
-  seeker_firefly: "Seeker Firefly — Homes onto your Drone Ping target",
+  seeker_firefly: "Seeker Firefly — Guided GPS homing missile onto your Drone Ping",
   gravity_mine: "Gravity Mine — Pulls rivals inward before blast",
   prism_wall: "Prism Wall — Raises sculpted cover shelter (non-turn-ending)",
   shock_magnet: "Shock Magnet — Snaps onto rock and jolts rivals away",
@@ -204,11 +204,11 @@ const GADGET_SHORT_TOOLTIP: Record<GadgetId, string> = {
 
 const GADGET_CONCISE_EFFECT: Record<GadgetId, string> = {
   gale_mortar: "Wind-curved explosive mortar · ∞",
-  quake_club: "Heavy close knockback slam · ∞",
+  quake_club: "6m wind-shotgun knockback blast · ∞",
   vine_grapple: "Free-action cliff zip & rappel",
   spore_burst: "Splits into 5 fungal sub-spores",
   burrow_bore: "Drills 0.6s through solid rock",
-  seeker_firefly: "Guided homing shell to Drone Ping",
+  seeker_firefly: "Guided GPS homing missile",
   gravity_mine: "Vortex implosion yanks rivals",
   prism_wall: "Free-action crystal cover wall",
   shock_magnet: "Electrified ledge-jolt beacon",
@@ -252,9 +252,9 @@ function getGadgetSvgIcon(gadget: GadgetId): string {
       </svg>`;
     case "quake_club":
       return `<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-        <path d="M5 19l7-7"/>
-        <path d="M11 6l7 7-3 3-7-7z" fill="currentColor" opacity="0.25"/>
-        <path d="M16 4l4 4M3 16c2 2 4 3 6 3"/>
+        <path d="M3 14l4.5-2.5 2 2-4.5 3z" fill="currentColor" opacity="0.28"/>
+        <path d="M9 11l10-5.5M9.5 12.5h11M9 14l10 5.5"/>
+        <path d="M16.5 5.5a9.5 9.5 0 0 1 0 13" opacity="0.75"/>
       </svg>`;
     case "vine_grapple":
       return `<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -275,10 +275,11 @@ function getGadgetSvgIcon(gadget: GadgetId): string {
         <path d="M11 9.5l3 5M14.5 8.5l2 3.5"/>
       </svg>`;
     case "seeker_firefly":
-      return `<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true">
-        <circle cx="12" cy="12" r="7" stroke-dasharray="3 3"/>
-        <circle cx="12" cy="12" r="2.5" fill="currentColor"/>
-        <path d="M12 2v3M12 19v3M2 12h3M19 12h3"/>
+      return `<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <circle cx="12" cy="12" r="8" stroke-dasharray="3 3" opacity="0.75"/>
+        <path d="M7.5 16.5L16.5 7.5" stroke-width="2.1"/>
+        <path d="M12.5 7.5h4v4" fill="currentColor" opacity="0.3"/>
+        <path d="M6.5 13.5l4 4M12 2v2.5M12 19.5V22M2 12h2.5M19.5 12H22"/>
       </svg>`;
     case "gravity_mine":
       return `<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
@@ -1268,11 +1269,16 @@ export class HudController {
         selectedGadget === "prism_wall" ||
         selectedGadget === "mend_brew";
       this.holdFireBtnEl.classList.toggle("cs-charging", frame.charging);
-      this.holdFireBtnEl.textContent = isUtility
-        ? "USE GADGET"
-        : frame.charging
-          ? `RELEASE · ${chargePct}%`
-          : "HOLD TO FIRE";
+      this.holdFireBtnEl.textContent =
+        selectedGadget === "quake_club"
+          ? "FIRE BLAST"
+          : selectedGadget === "vine_grapple"
+            ? "SHOOT HOOK"
+            : isUtility
+              ? "USE GADGET"
+              : frame.charging
+                ? `RELEASE · ${chargePct}%`
+                : "HOLD TO FIRE";
     } else if (this.uiFireActive) {
       this.uiFireActive = false;
     }

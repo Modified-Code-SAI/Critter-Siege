@@ -1,6 +1,13 @@
 import * as THREE from "three";
 import { describe, expect, it, vi } from "vitest";
-import { SdfWorld, type TurnPhase, type Vec3 } from "@critter/shared";
+import {
+  GALE_SCATTER_CONE_MIN_DOT,
+  GALE_SCATTER_REACH,
+  SdfWorld,
+  type EvoPodState,
+  type TurnPhase,
+  type Vec3,
+} from "@critter/shared";
 import { CameraRig, type CameraUpdateContext } from "../src/game/cameraRig.js";
 import {
   InputController,
@@ -743,5 +750,374 @@ describe("CameraRig", () => {
       endPos.z - world.centerZ,
     );
     expect(horizDist).toBeCloseTo(world.worldWidth * 0.72, 0);
+  });
+
+  it("keeps shot_cam strictly outside solid SDF terrain when a Burrow Bore tunnels deep inside a cliff", () => {
+    const world = new SdfWorld(909, "emerald_spire");
+
+    // Locate a thick solid rock interior where both shotPos and default trailing offset (-5.2 behind, +2.8 up) are solid
+    let rockOrigin: Vec3 | null = null;
+    for (let x = 18; x <= 42 && !rockOrigin; x += 1.0) {
+      for (let z = 18; z <= 42 && !rockOrigin; z += 1.0) {
+        const surfY = world.getSurfaceY(x, z);
+        if (surfY === null || surfY < 10.0) {
+          continue;
+        }
+        const deepY = surfY - 6.0;
+        if (
+          deepY >= 2.0 &&
+          world.isSolid(x, deepY, z) &&
+          world.isSolid(x - 5.2, Math.max(3.2, deepY + 2.8), z + 1.6)
+        ) {
+          rockOrigin = { x, y: deepY, z };
+        }
+      }
+    }
+
+    expect(rockOrigin).not.toBeNull();
+    const cliffCore = rockOrigin as Vec3;
+
+    const rig = new CameraRig(16 / 9);
+    // Start in open air approaching the cliff along +X, then bore straight through solid rock
+    for (let step = 0; step < 24; step++) {
+      const shotPos: Vec3 = {
+        x: cliffCore.x - 10 + step * 0.65,
+        y: cliffCore.y,
+        z: cliffCore.z,
+      };
+      if (step === 16) {
+        rig.triggerShake(0.8, 0.25);
+      }
+      rig.update(
+        makeContext(world, {
+          phase: "RESOLVING",
+          shotPos,
+          dtSec: 0.04,
+        }),
+      );
+      expect(rig.getMode()).toBe("shot_cam");
+      const pos = rig.camera.position;
+      expect(world.isSolid(pos.x, pos.y, pos.z)).toBe(false);
+    }
+
+    // Fresh rig initialized directly on a deep solid rock coordinate must also stay strictly outside solid terrain
+    const freshRig = new CameraRig(16 / 9);
+    freshRig.update(
+      makeContext(world, {
+        phase: "RESOLVING",
+        shotPos: cliffCore,
+        dtSec: 0.05,
+      }),
+    );
+    expect(freshRig.getMode()).toBe("shot_cam");
+    expect(
+      world.isSolid(
+        freshRig.camera.position.x,
+        freshRig.camera.position.y,
+        freshRig.camera.position.z,
+      ),
+    ).toBe(false);
+  });
+
+  it("renders Gale Scatter spread cone and Vine Grapple latch previews with exact shared parity, switches cleanly, and disposes all resources", () => {
+    const world = new SdfWorld(515, "emerald_spire");
+    const preview = new TrajectoryPreview();
+
+    const origin: Vec3 = { x: world.centerX, y: 14, z: world.centerZ };
+    const forwardDir: Vec3 = { x: 1, y: 0, z: 0 };
+    const wind: Vec3 = { x: 1.0, y: 0, z: -0.5 };
+
+    // 1. Gale Scatter (quake_club) shows gale_scatter_cone and hides ballistic arc + grapple preview
+    preview.update(
+      world,
+      { gadgetId: "quake_club", origin, direction: forwardDir, power: 1.0 },
+      wind,
+      false,
+      true,
+      { gadgetId: "gale_mortar", origin, direction: forwardDir, power: 0.7 },
+    );
+    expect(preview.group.visible).toBe(true);
+
+    const scatterCone = preview.group.getObjectByName("gale_scatter_cone");
+    const grapplePreview = preview.group.getObjectByName("grapple_latch_preview");
+    const arcDots = preview.group.getObjectByName("trajectory_arc_dots");
+    const ghostDots = preview.group.getObjectByName("trajectory_ghost_dots");
+
+    expect(scatterCone).toBeInstanceOf(THREE.Group);
+    expect(scatterCone?.visible).toBe(true);
+    expect(grapplePreview).toBeInstanceOf(THREE.Group);
+    expect(grapplePreview?.visible).toBe(false);
+    if (arcDots instanceof THREE.InstancedMesh) {
+      expect(arcDots.count).toBe(0);
+    }
+    if (ghostDots instanceof THREE.InstancedMesh) {
+      expect(ghostDots.count).toBe(0);
+    }
+
+    // Verify exact shared cone dimensions: length === GALE_SCATTER_REACH (6.0), radius === reach * tan(acos(0.85))
+    const expectedRadius =
+      GALE_SCATTER_REACH * Math.tan(Math.acos(GALE_SCATTER_CONE_MIN_DOT));
+    const mouthRing = scatterCone?.getObjectByName("gale_scatter_mouth_ring");
+    expect(mouthRing).toBeInstanceOf(THREE.Mesh);
+    expect(mouthRing?.position.z).toBeCloseTo(GALE_SCATTER_REACH, 3);
+    if (mouthRing instanceof THREE.Mesh && mouthRing.geometry instanceof THREE.TorusGeometry) {
+      expect(mouthRing.geometry.parameters.radius).toBeCloseTo(expectedRadius, 3);
+    }
+    const windRays = scatterCone?.getObjectByName("gale_scatter_wind_rays");
+    expect(windRays).toBeInstanceOf(THREE.LineSegments);
+    if (windRays instanceof THREE.LineSegments) {
+      const posAttr = windRays.geometry.getAttribute("position");
+      expect(posAttr?.count).toBe(10); // 5 diverging rays * 2 endpoints
+    }
+
+    // 2. Vine Grapple aimed down at island terrain shows emerald latch preview
+    const sp = world.findSpawnPoints(1)[0];
+    expect(sp).toBeDefined();
+    const grappleOrigin: Vec3 = {
+      x: sp?.x ?? world.centerX,
+      y: (sp?.y ?? 10) + 5.0,
+      z: sp?.z ?? world.centerZ,
+    };
+    preview.update(
+      world,
+      {
+        gadgetId: "vine_grapple",
+        origin: grappleOrigin,
+        direction: { x: 0, y: -1, z: 0 },
+        power: 1.0,
+        grappleReach: 18,
+        waterLevel: 1.8,
+      },
+      wind,
+      false,
+      true,
+    );
+    expect(preview.group.visible).toBe(true);
+    expect(scatterCone?.visible).toBe(false);
+    expect(grapplePreview?.visible).toBe(true);
+
+    const latchRing = grapplePreview?.getObjectByName("grapple_latch_ring");
+    expect(latchRing).toBeInstanceOf(THREE.Mesh);
+    if (latchRing instanceof THREE.Mesh && latchRing.material instanceof THREE.MeshBasicMaterial) {
+      expect(latchRing.material.color.getHex()).toBe(0x34d399);
+    }
+
+    // 3. Vine Grapple aimed at an uncollected Evo Pod turns latch ring gold (0xfacc15)
+    const skyOrigin: Vec3 = { x: world.centerX, y: world.worldHeight - 2.0, z: world.centerZ };
+    const podTarget: EvoPodState = {
+      id: "pod-grapple-test",
+      position: { x: skyOrigin.x + 8.0, y: skyOrigin.y, z: skyOrigin.z },
+      collected: false,
+      mutationChoices: ["glider_wings", "spring_paws", "optic_visor"],
+    };
+    preview.update(
+      world,
+      {
+        gadgetId: "vine_grapple",
+        origin: skyOrigin,
+        direction: { x: 1, y: 0, z: 0 },
+        power: 1.0,
+        grappleReach: 18,
+        waterLevel: 1.8,
+        evoPods: [podTarget],
+      },
+      wind,
+      false,
+      true,
+    );
+    expect(preview.group.visible).toBe(true);
+    expect(grapplePreview?.visible).toBe(true);
+    if (latchRing instanceof THREE.Mesh && latchRing.material instanceof THREE.MeshBasicMaterial) {
+      expect(latchRing.material.color.getHex()).toBe(0xfacc15);
+    }
+
+    // 4. Vine Grapple aimed into empty sky hides preview cleanly
+    preview.update(
+      world,
+      {
+        gadgetId: "vine_grapple",
+        origin: skyOrigin,
+        direction: { x: 0, y: 1, z: 0 },
+        power: 1.0,
+        grappleReach: 18,
+        waterLevel: 1.8,
+      },
+      wind,
+      false,
+      true,
+    );
+    expect(grapplePreview?.visible).toBe(false);
+    expect(preview.group.visible).toBe(false);
+
+    // 5. Switching back to gale_mortar hides cone & grapple cleanly and restores ballistic dots
+    preview.update(
+      world,
+      {
+        gadgetId: "gale_mortar",
+        origin: { x: 10, y: 11, z: 10 },
+        direction: { x: 0.65, y: 0.75, z: 0.1 },
+        power: 0.7,
+      },
+      wind,
+      false,
+      true,
+    );
+    expect(scatterCone?.visible).toBe(false);
+    expect(grapplePreview?.visible).toBe(false);
+    if (arcDots instanceof THREE.InstancedMesh) {
+      expect(arcDots.count).toBeGreaterThan(2);
+    }
+
+    // 6. visible = false hides everything
+    preview.update(
+      world,
+      { gadgetId: "quake_club", origin, direction: forwardDir, power: 1.0 },
+      wind,
+      false,
+      false,
+    );
+    expect(preview.group.visible).toBe(false);
+    expect(scatterCone?.visible).toBe(false);
+    expect(grapplePreview?.visible).toBe(false);
+
+    // 7. Dispose releases every mesh & line geometry and material cleanly
+    const geoSpies: Array<ReturnType<typeof vi.spyOn>> = [];
+    const matSpies: Array<ReturnType<typeof vi.spyOn>> = [];
+    preview.group.traverse((obj) => {
+      if (obj instanceof THREE.Mesh || obj instanceof THREE.LineSegments || obj instanceof THREE.Line) {
+        geoSpies.push(vi.spyOn(obj.geometry, "dispose"));
+        if (!Array.isArray(obj.material)) {
+          matSpies.push(vi.spyOn(obj.material, "dispose"));
+        }
+      }
+    });
+    expect(geoSpies.length).toBeGreaterThanOrEqual(9);
+    expect(matSpies.length).toBeGreaterThanOrEqual(9);
+
+    preview.dispose();
+    for (const spy of geoSpies) {
+      expect(spy).toHaveBeenCalledTimes(1);
+    }
+    for (const spy of matSpies) {
+      expect(spy).toHaveBeenCalledTimes(1);
+    }
+    expect(preview.group.children.length).toBe(0);
+  });
+
+  it("fires quake_club (Gale Scatter) instantly at power 1.0 without charging while preserving unlocked pointer-lock zero-misfire", () => {
+    const canvasListeners = new Map<string, Set<EventListenerOrEventListenerObject>>();
+    const windowListeners = new Map<string, Set<EventListenerOrEventListenerObject>>();
+    const docListeners = new Map<string, Set<EventListenerOrEventListenerObject>>();
+
+    const makeBus = (store: Map<string, Set<EventListenerOrEventListenerObject>>) => ({
+      addEventListener(type: string, listener: EventListenerOrEventListenerObject): void {
+        let set = store.get(type);
+        if (!set) {
+          set = new Set();
+          store.set(type, set);
+        }
+        set.add(listener);
+      },
+      removeEventListener(type: string, listener: EventListenerOrEventListenerObject): void {
+        store.get(type)?.delete(listener);
+      },
+      dispatch(type: string, event: Event): void {
+        const set = store.get(type);
+        if (!set) return;
+        for (const fn of set) {
+          if (typeof fn === "function") {
+            fn(event);
+          } else {
+            fn.handleEvent(event);
+          }
+        }
+      },
+    });
+
+    const canvasBus = makeBus(canvasListeners);
+    const windowBus = makeBus(windowListeners);
+    const docBus = makeBus(docListeners);
+
+    let pointerLockRequests = 0;
+    let lockedEl: unknown = null;
+
+    const mockCanvas: InputCanvasTarget = {
+      addEventListener: (t, l) => canvasBus.addEventListener(t, l),
+      removeEventListener: (t, l) => canvasBus.removeEventListener(t, l),
+      getBoundingClientRect: () => ({ left: 0, top: 0, width: 800, height: 600 }),
+      requestPointerLock: () => {
+        pointerLockRequests += 1;
+      },
+    };
+    const mockWindow: InputGlobalTarget = {
+      addEventListener: (t, l) => windowBus.addEventListener(t, l),
+      removeEventListener: (t, l) => windowBus.removeEventListener(t, l),
+    };
+    const mockDoc: InputDocumentTarget = {
+      get pointerLockElement() {
+        return lockedEl;
+      },
+      exitPointerLock: () => {
+        lockedEl = null;
+      },
+      addEventListener: (t, l) => docBus.addEventListener(t, l),
+      removeEventListener: (t, l) => docBus.removeEventListener(t, l),
+    };
+
+    const firedPowers: number[] = [];
+    const callbacks: InputCallbacks = {
+      onFire: (p) => firedPowers.push(p),
+      onUtility: () => undefined,
+      onRetreatBurrow: () => undefined,
+      onDroneNudge: () => undefined,
+      onDronePing: () => undefined,
+      onSelectGadgetIndex: () => undefined,
+      onToggleDrone: () => undefined,
+      onFirstPersonChange: () => undefined,
+    };
+
+    const camera = new THREE.PerspectiveCamera(64, 800 / 600, 0.1, 200);
+    const controller = new InputController(
+      mockCanvas,
+      camera,
+      callbacks,
+      undefined,
+      mockWindow,
+      mockDoc,
+    );
+    controller.setCanAct(true, true, false);
+    controller.setSelectedGadget("quake_club");
+
+    // 1. Unlocked canvas click MUST lock pointer first with ZERO misfire
+    canvasBus.dispatch("mousedown", { button: 0, clientX: 400, clientY: 300 } as unknown as Event);
+    windowBus.dispatch("mouseup", { button: 0, clientX: 400, clientY: 300 } as unknown as Event);
+    expect(pointerLockRequests).toBe(1);
+    expect(firedPowers).toEqual([]);
+    expect(controller.update(0.05).charging).toBe(false);
+
+    // 2. Pointer-locked LMB click fires immediately at power 1.0 without charging or double-firing on mouseup
+    lockedEl = mockCanvas;
+    docBus.dispatch("pointerlockchange", {} as Event);
+    canvasBus.dispatch("mousedown", { button: 0, clientX: 400, clientY: 300 } as unknown as Event);
+    expect(firedPowers).toEqual([1.0]);
+    expect(controller.update(0.05).charging).toBe(false);
+    windowBus.dispatch("mouseup", { button: 0, clientX: 400, clientY: 300 } as unknown as Event);
+    expect(firedPowers).toEqual([1.0]);
+
+    // 3. Pressing Enter fires immediately at power 1.0 without charging or double-firing on keyup
+    windowBus.dispatch("keydown", { code: "Enter", repeat: false } as unknown as Event);
+    expect(firedPowers).toEqual([1.0, 1.0]);
+    expect(controller.update(0.05).charging).toBe(false);
+    windowBus.dispatch("keyup", { code: "Enter" } as unknown as Event);
+    expect(firedPowers).toEqual([1.0, 1.0]);
+
+    // 4. Tapping HUD fire button (startUiFireCharge) fires immediately at power 1.0 without charging
+    controller.startUiFireCharge();
+    expect(firedPowers).toEqual([1.0, 1.0, 1.0]);
+    expect(controller.update(0.05).charging).toBe(false);
+    controller.releaseUiFireCharge();
+    expect(firedPowers).toEqual([1.0, 1.0, 1.0]);
+
+    controller.dispose();
   });
 });

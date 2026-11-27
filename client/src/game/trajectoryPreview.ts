@@ -1,6 +1,10 @@
 import * as THREE from "three";
 import {
+  GALE_SCATTER_CONE_MIN_DOT,
+  GALE_SCATTER_REACH,
   sampleAimArc,
+  sampleGrappleTarget,
+  type EvoPodState,
   type GadgetId,
   type PrismWallState,
   type SdfWorld,
@@ -14,15 +18,28 @@ export interface TrajectoryPreviewParams {
   direction: Vec3;
   power: number;
   droneTarget?: Vec3;
+  grappleReach?: number;
+  waterLevel?: number;
+  evoPods?: readonly EvoPodState[];
 }
 
 const MAX_ARC_DOTS = 40;
+const DEFAULT_GRAPPLE_REACH = 18;
+const DEFAULT_WATER_LEVEL = 1.8;
+const SCATTER_CONE_RADIUS =
+  GALE_SCATTER_REACH * Math.tan(Math.acos(GALE_SCATTER_CONE_MIN_DOT));
+const SCATTER_RAY_COUNT = 5;
+const GRAPPLE_TERRAIN_COLOR = 0x34d399;
+const GRAPPLE_POD_COLOR = 0xfacc15;
 const WORLD_UP = new THREE.Vector3(0, 1, 0);
+const LOCAL_FORWARD = new THREE.Vector3(0, 0, 1);
 
 /**
  * Glowing dotted cyan 3D wind-curved trajectory preview rendered via a single
  * InstancedMesh of smooth spheres plus a subtle glowing landing ring marker,
- * alongside an optional translucent gold Last-Shot Ghost trajectory arc.
+ * alongside an optional translucent gold Last-Shot Ghost trajectory arc,
+ * a Gale Scatter wide-cone wind-shotgun spread preview, and a Vine Grapple
+ * latch beam & target ring preview.
  */
 export class TrajectoryPreview {
   public readonly group: THREE.Group;
@@ -43,8 +60,25 @@ export class TrajectoryPreview {
   private readonly ghostRingMaterial: THREE.MeshBasicMaterial;
   private readonly ghostLandingRing: THREE.Mesh;
 
+  private readonly scatterConeGroup: THREE.Group;
+  private readonly scatterShellGeometry: THREE.ConeGeometry;
+  private readonly scatterShellMaterial: THREE.MeshBasicMaterial;
+  private readonly scatterRingGeometry: THREE.TorusGeometry;
+  private readonly scatterRingMaterial: THREE.MeshBasicMaterial;
+  private readonly scatterRaysGeometry: THREE.BufferGeometry;
+  private readonly scatterRaysMaterial: THREE.LineBasicMaterial;
+
+  private readonly grapplePreviewGroup: THREE.Group;
+  private readonly grappleBeamGeometry: THREE.CylinderGeometry;
+  private readonly grappleBeamMaterial: THREE.MeshBasicMaterial;
+  private readonly grappleBeam: THREE.Mesh;
+  private readonly grappleRingGeometry: THREE.TorusGeometry;
+  private readonly grappleRingMaterial: THREE.MeshBasicMaterial;
+  private readonly grappleLatchRing: THREE.Mesh;
+
   private readonly dummy = new THREE.Object3D();
   private readonly normalVec = new THREE.Vector3();
+  private readonly dirVec = new THREE.Vector3();
   private readonly alignQuat = new THREE.Quaternion();
   private readonly flatQuat = new THREE.Quaternion().setFromAxisAngle(
     new THREE.Vector3(1, 0, 0),
@@ -121,11 +155,124 @@ export class TrajectoryPreview {
     this.ghostLandingRing.visible = false;
     this.ghostLandingRing.quaternion.copy(this.flatQuat);
     this.group.add(this.ghostLandingRing);
+
+    // Gale Scatter (quake_club) wide-cone wind-shotgun aim preview
+    this.scatterConeGroup = new THREE.Group();
+    this.scatterConeGroup.name = "gale_scatter_cone";
+    this.scatterConeGroup.visible = false;
+
+    this.scatterShellGeometry = new THREE.ConeGeometry(
+      SCATTER_CONE_RADIUS,
+      GALE_SCATTER_REACH,
+      24,
+      1,
+      true,
+    );
+    this.scatterShellGeometry.rotateX(-Math.PI * 0.5);
+    this.scatterShellGeometry.translate(0, 0, GALE_SCATTER_REACH * 0.5);
+    this.scatterShellMaterial = new THREE.MeshBasicMaterial({
+      color: 0x38e8ff,
+      transparent: true,
+      opacity: 0.16,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    });
+    const scatterShellMesh = new THREE.Mesh(
+      this.scatterShellGeometry,
+      this.scatterShellMaterial,
+    );
+    scatterShellMesh.name = "gale_scatter_cone_shell";
+    this.scatterConeGroup.add(scatterShellMesh);
+
+    this.scatterRingGeometry = new THREE.TorusGeometry(
+      SCATTER_CONE_RADIUS,
+      0.048,
+      8,
+      32,
+    );
+    this.scatterRingMaterial = new THREE.MeshBasicMaterial({
+      color: 0xfb7185,
+      transparent: true,
+      opacity: 0.84,
+      depthWrite: false,
+    });
+    const scatterMouthRing = new THREE.Mesh(
+      this.scatterRingGeometry,
+      this.scatterRingMaterial,
+    );
+    scatterMouthRing.name = "gale_scatter_mouth_ring";
+    scatterMouthRing.position.set(0, 0, GALE_SCATTER_REACH);
+    this.scatterConeGroup.add(scatterMouthRing);
+
+    const rayPositions = new Float32Array(SCATTER_RAY_COUNT * 2 * 3);
+    for (let i = 0; i < SCATTER_RAY_COUNT; i++) {
+      const angle = (i / SCATTER_RAY_COUNT) * Math.PI * 2;
+      const base = i * 6;
+      rayPositions[base] = 0;
+      rayPositions[base + 1] = 0;
+      rayPositions[base + 2] = 0;
+      rayPositions[base + 3] = Math.cos(angle) * SCATTER_CONE_RADIUS;
+      rayPositions[base + 4] = Math.sin(angle) * SCATTER_CONE_RADIUS;
+      rayPositions[base + 5] = GALE_SCATTER_REACH;
+    }
+    this.scatterRaysGeometry = new THREE.BufferGeometry();
+    this.scatterRaysGeometry.setAttribute(
+      "position",
+      new THREE.BufferAttribute(rayPositions, 3),
+    );
+    this.scatterRaysMaterial = new THREE.LineBasicMaterial({
+      color: 0xfda4af,
+      transparent: true,
+      opacity: 0.72,
+      depthWrite: false,
+    });
+    const scatterWindRays = new THREE.LineSegments(
+      this.scatterRaysGeometry,
+      this.scatterRaysMaterial,
+    );
+    scatterWindRays.name = "gale_scatter_wind_rays";
+    this.scatterConeGroup.add(scatterWindRays);
+    this.group.add(this.scatterConeGroup);
+
+    // Vine Grapple straight latch beam & target ring preview
+    this.grapplePreviewGroup = new THREE.Group();
+    this.grapplePreviewGroup.name = "grapple_latch_preview";
+    this.grapplePreviewGroup.visible = false;
+
+    this.grappleBeamGeometry = new THREE.CylinderGeometry(0.032, 0.032, 1, 8, 1);
+    this.grappleBeamMaterial = new THREE.MeshBasicMaterial({
+      color: GRAPPLE_TERRAIN_COLOR,
+      transparent: true,
+      opacity: 0.75,
+      depthWrite: false,
+    });
+    this.grappleBeam = new THREE.Mesh(
+      this.grappleBeamGeometry,
+      this.grappleBeamMaterial,
+    );
+    this.grappleBeam.name = "grapple_latch_beam";
+    this.grapplePreviewGroup.add(this.grappleBeam);
+
+    this.grappleRingGeometry = new THREE.TorusGeometry(0.46, 0.055, 8, 28);
+    this.grappleRingMaterial = new THREE.MeshBasicMaterial({
+      color: GRAPPLE_TERRAIN_COLOR,
+      transparent: true,
+      opacity: 0.9,
+      depthWrite: false,
+    });
+    this.grappleLatchRing = new THREE.Mesh(
+      this.grappleRingGeometry,
+      this.grappleRingMaterial,
+    );
+    this.grappleLatchRing.name = "grapple_latch_ring";
+    this.grappleLatchRing.quaternion.copy(this.flatQuat);
+    this.grapplePreviewGroup.add(this.grappleLatchRing);
+    this.group.add(this.grapplePreviewGroup);
   }
 
   /**
-   * Re-sample the wind-curved deterministic aim arc (and optional Last-Shot Ghost arc)
-   * and update all instanced dots plus landing ring markers.
+   * Re-sample the wind-curved deterministic aim arc (and optional Last-Shot Ghost arc),
+   * Gale Scatter wind-shotgun cone, or Vine Grapple latch target marker.
    */
   public update(
     world: SdfWorld,
@@ -138,13 +285,127 @@ export class TrajectoryPreview {
     shooterId?: string,
   ): void {
     if (this.disposed || !visible) {
-      this.group.visible = false;
-      this.instancedDots.count = 0;
-      this.landingRing.visible = false;
-      this.ghostDots.count = 0;
-      this.ghostLandingRing.visible = false;
+      this.hideAll();
       return;
     }
+
+    if (params.gadgetId === "quake_club") {
+      this.hideBallisticArcs();
+      this.grapplePreviewGroup.visible = false;
+
+      this.dirVec.set(params.direction.x, params.direction.y, params.direction.z);
+      if (
+        !Number.isFinite(this.dirVec.x) ||
+        !Number.isFinite(this.dirVec.y) ||
+        !Number.isFinite(this.dirVec.z) ||
+        this.dirVec.lengthSq() <= 1e-6
+      ) {
+        this.scatterConeGroup.visible = false;
+        this.group.visible = false;
+        return;
+      }
+      this.dirVec.normalize();
+      this.scatterConeGroup.position.set(
+        params.origin.x,
+        params.origin.y,
+        params.origin.z,
+      );
+      this.scatterConeGroup.quaternion.setFromUnitVectors(
+        LOCAL_FORWARD,
+        this.dirVec,
+      );
+      this.scatterConeGroup.visible = true;
+      this.group.visible = true;
+      return;
+    }
+
+    if (params.gadgetId === "vine_grapple") {
+      this.hideBallisticArcs();
+      this.scatterConeGroup.visible = false;
+
+      const hit = sampleGrappleTarget(
+        world,
+        params.origin,
+        params.direction,
+        params.grappleReach ?? DEFAULT_GRAPPLE_REACH,
+        params.waterLevel ?? DEFAULT_WATER_LEVEL,
+        params.evoPods,
+      );
+      if (!hit) {
+        this.grapplePreviewGroup.visible = false;
+        this.group.visible = false;
+        return;
+      }
+
+      const dx = hit.target.x - params.origin.x;
+      const dy = hit.target.y - params.origin.y;
+      const dz = hit.target.z - params.origin.z;
+      const dist = Math.hypot(dx, dy, dz);
+
+      this.grappleBeam.position.set(
+        params.origin.x + dx * 0.5,
+        params.origin.y + dy * 0.5,
+        params.origin.z + dz * 0.5,
+      );
+      this.grappleBeam.scale.set(1, Math.max(0.05, dist), 1);
+      if (dist > 1e-4) {
+        this.dirVec.set(dx / dist, dy / dist, dz / dist);
+        this.grappleBeam.quaternion.setFromUnitVectors(WORLD_UP, this.dirVec);
+      } else {
+        this.grappleBeam.quaternion.identity();
+      }
+
+      this.grappleRingMaterial.color.setHex(
+        hit.isPod ? GRAPPLE_POD_COLOR : GRAPPLE_TERRAIN_COLOR,
+      );
+
+      if (hit.isPod) {
+        this.grappleLatchRing.position.set(
+          hit.target.x,
+          hit.target.y,
+          hit.target.z,
+        );
+        if (dist > 1e-4) {
+          this.grappleLatchRing.quaternion.setFromUnitVectors(
+            LOCAL_FORWARD,
+            this.dirVec,
+          );
+        } else {
+          this.grappleLatchRing.quaternion.copy(this.flatQuat);
+        }
+      } else if (world.isSolid(hit.target.x, hit.target.y, hit.target.z)) {
+        const n = world.sampleNormal(hit.target.x, hit.target.y, hit.target.z);
+        this.normalVec.set(n.x, n.y, n.z);
+        if (this.normalVec.lengthSq() > 1e-4) {
+          this.normalVec.normalize();
+        } else {
+          this.normalVec.copy(WORLD_UP);
+        }
+        this.grappleLatchRing.position.set(
+          hit.target.x + this.normalVec.x * 0.08,
+          hit.target.y + this.normalVec.y * 0.08,
+          hit.target.z + this.normalVec.z * 0.08,
+        );
+        this.alignQuat.setFromUnitVectors(WORLD_UP, this.normalVec);
+        this.grappleLatchRing.quaternion
+          .copy(this.alignQuat)
+          .multiply(this.flatQuat);
+      } else {
+        this.grappleLatchRing.position.set(
+          hit.target.x,
+          hit.target.y + 0.08,
+          hit.target.z,
+        );
+        this.grappleLatchRing.quaternion.copy(this.flatQuat);
+      }
+
+      this.grapplePreviewGroup.visible = true;
+      this.group.visible = true;
+      return;
+    }
+
+    this.scatterConeGroup.visible = false;
+    this.grapplePreviewGroup.visible = false;
 
     const activeCount = this.applyArc(
       world,
@@ -192,7 +453,33 @@ export class TrajectoryPreview {
     this.ghostDotMaterial.dispose();
     this.ghostRingGeometry.dispose();
     this.ghostRingMaterial.dispose();
+    this.scatterShellGeometry.dispose();
+    this.scatterShellMaterial.dispose();
+    this.scatterRingGeometry.dispose();
+    this.scatterRingMaterial.dispose();
+    this.scatterRaysGeometry.dispose();
+    this.scatterRaysMaterial.dispose();
+    this.grappleBeamGeometry.dispose();
+    this.grappleBeamMaterial.dispose();
+    this.grappleRingGeometry.dispose();
+    this.grappleRingMaterial.dispose();
+    this.scatterConeGroup.clear();
+    this.grapplePreviewGroup.clear();
     this.group.clear();
+  }
+
+  private hideBallisticArcs(): void {
+    this.instancedDots.count = 0;
+    this.landingRing.visible = false;
+    this.ghostDots.count = 0;
+    this.ghostLandingRing.visible = false;
+  }
+
+  private hideAll(): void {
+    this.group.visible = false;
+    this.hideBallisticArcs();
+    this.scatterConeGroup.visible = false;
+    this.grapplePreviewGroup.visible = false;
   }
 
   private applyArc(

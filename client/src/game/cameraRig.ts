@@ -52,6 +52,11 @@ const PULLBACK_MARGIN = 0.35;
 const PULLBACK_SDF_CLEARANCE = 0.22;
 const MIN_CAMERA_ARM = 0.65;
 
+const SHOT_CAM_RAY_STEP = 0.25;
+const SHOT_CAM_PULLBACK_MARGIN = 0.45;
+const SHOT_CAM_SDF_CLEARANCE = 0.28;
+const SHOT_CAM_MIN_ARM = 1.8;
+
 const DEFAULT_ISLAND_CENTER = new THREE.Vector3(
   SDF_DIMS.nx * SDF_DIMS.voxelSize * 0.5,
   SDF_DIMS.ny * SDF_DIMS.voxelSize * 0.25,
@@ -247,7 +252,7 @@ export class CameraRig {
       this.computeFloodCamPose(ctx.world, safeDt, targetY, ctx.waterLevel);
     } else if (this.mode === "shot_cam") {
       dampRate = 9.0;
-      this.computeShotCamPose(ctx.shotPos);
+      this.computeShotCamPose(ctx.shotPos, ctx.world);
     } else if (this.mode === "spectator_drone" || this.mode === "drone_recon") {
       dampRate = 8.5;
       this.computeDronePose(ctx.world);
@@ -292,9 +297,9 @@ export class CameraRig {
       }
       this.currentLookAt.lerp(this.desiredLookAt, alpha);
 
-      // Hard safety guard in over_shoulder: damped camera position may never reside in solid rock
+      // Hard safety guard in over_shoulder & shot_cam: damped camera position may never reside in solid rock
       if (
-        this.mode === "over_shoulder" &&
+        (this.mode === "over_shoulder" || this.mode === "shot_cam") &&
         ctx.world.isSolid(
           this.currentPos.x,
           this.currentPos.y,
@@ -303,6 +308,21 @@ export class CameraRig {
       ) {
         this.currentPos.copy(this.desiredPos);
       }
+    }
+
+    // Final hard safety guard: over_shoulder & shot_cam may never end up inside solid SDF rock
+    if (
+      (this.mode === "over_shoulder" || this.mode === "shot_cam") &&
+      ctx.world.isSolid(
+        this.currentPos.x,
+        this.currentPos.y,
+        this.currentPos.z,
+      )
+    ) {
+      this.currentPos.y = Math.max(
+        this.currentPos.y,
+        ctx.world.worldHeight + 4.0,
+      );
     }
 
     // Hard safety guard in flood_cam: never dip beneath the rising deluge crest
@@ -351,6 +371,16 @@ export class CameraRig {
           this.currentPos.y + sy,
           this.currentPos.z + sz,
         );
+        if (
+          (this.mode === "over_shoulder" || this.mode === "shot_cam") &&
+          ctx.world.isSolid(
+            this.camera.position.x,
+            this.camera.position.y,
+            this.camera.position.z,
+          )
+        ) {
+          this.camera.position.copy(this.currentPos);
+        }
       }
     }
     this.camera.lookAt(this.currentLookAt);
@@ -565,7 +595,7 @@ export class CameraRig {
     this.desiredLookAt.set(world.centerX, lookY, world.centerZ);
   }
 
-  private computeShotCamPose(shotPos: Vec3 | null): void {
+  private computeShotCamPose(shotPos: Vec3 | null, world: SdfWorld): void {
     if (shotPos !== null) {
       const sx = finiteOr(shotPos.x, this.lastShotPos.x);
       const sy = finiteOr(shotPos.y, this.lastShotPos.y);
@@ -587,11 +617,175 @@ export class CameraRig {
     const sideX = -this.shotTravelDir.z;
     const sideZ = this.shotTravelDir.x;
 
-    this.desiredPos.set(
-      this.lastShotPos.x - this.shotTravelDir.x * 5.2 + sideX * 1.6,
-      Math.max(3.2, this.lastShotPos.y + 2.8),
-      this.lastShotPos.z - this.shotTravelDir.z * 5.2 + sideZ * 1.6,
-    );
+    const idealX =
+      this.lastShotPos.x - this.shotTravelDir.x * 5.2 + sideX * 1.6;
+    const idealY = Math.max(3.2, this.lastShotPos.y + 2.8);
+    const idealZ =
+      this.lastShotPos.z - this.shotTravelDir.z * 5.2 + sideZ * 1.6;
+
+    const isClearVantage = (
+      x: number,
+      y: number,
+      z: number,
+      clearance: number,
+    ): boolean => !world.isSolid(x, y, z) && world.sample(x, y, z) >= clearance;
+
     this.desiredLookAt.copy(this.lastShotPos);
+
+    const shotInsideRock = world.isSolid(
+      this.lastShotPos.x,
+      this.lastShotPos.y,
+      this.lastShotPos.z,
+    );
+
+    if (!shotInsideRock) {
+      const rayDx = idealX - this.lastShotPos.x;
+      const rayDy = idealY - this.lastShotPos.y;
+      const rayDz = idealZ - this.lastShotPos.z;
+      const rayLen = Math.hypot(rayDx, rayDy, rayDz);
+
+      let obstructedDist: number | null = null;
+      if (rayLen > 1e-4) {
+        const ux = rayDx / rayLen;
+        const uy = rayDy / rayLen;
+        const uz = rayDz / rayLen;
+        for (
+          let dist = SHOT_CAM_RAY_STEP;
+          dist <= rayLen;
+          dist += SHOT_CAM_RAY_STEP
+        ) {
+          const px = this.lastShotPos.x + ux * dist;
+          const py = this.lastShotPos.y + uy * dist;
+          const pz = this.lastShotPos.z + uz * dist;
+          if (
+            world.isSolid(px, py, pz) ||
+            world.sample(px, py, pz) < SHOT_CAM_SDF_CLEARANCE
+          ) {
+            obstructedDist = dist;
+            break;
+          }
+        }
+      }
+
+      if (
+        obstructedDist === null &&
+        isClearVantage(idealX, idealY, idealZ, SHOT_CAM_SDF_CLEARANCE)
+      ) {
+        this.desiredPos.set(idealX, idealY, idealZ);
+        return;
+      }
+
+      if (obstructedDist !== null && rayLen > 1e-4) {
+        const safeDist = obstructedDist - SHOT_CAM_PULLBACK_MARGIN;
+        if (safeDist >= SHOT_CAM_MIN_ARM) {
+          const frac = safeDist / rayLen;
+          const cx = this.lastShotPos.x + rayDx * frac;
+          const cy = this.lastShotPos.y + rayDy * frac;
+          const cz = this.lastShotPos.z + rayDz * frac;
+          if (isClearVantage(cx, cy, cz, SHOT_CAM_SDF_CLEARANCE)) {
+            this.desiredPos.set(cx, cy, cz);
+            return;
+          }
+        }
+      }
+    }
+
+    // Projectile is inside solid rock (e.g. Burrow Bore tunneling) or default offset is blocked:
+    // find the nearest open-air vantage outside the cliff looking back at lastShotPos.
+    const found =
+      this.findOpenAirShotVantage(
+        world,
+        idealX,
+        idealY,
+        idealZ,
+        sideX,
+        sideZ,
+        SHOT_CAM_SDF_CLEARANCE,
+      ) ||
+      this.findOpenAirShotVantage(
+        world,
+        idealX,
+        idealY,
+        idealZ,
+        sideX,
+        sideZ,
+        0,
+      );
+
+    if (!found) {
+      this.desiredPos.set(
+        idealX,
+        Math.max(idealY, world.worldHeight + 4.0),
+        idealZ,
+      );
+    }
+  }
+
+  private findOpenAirShotVantage(
+    world: SdfWorld,
+    idealX: number,
+    idealY: number,
+    idealZ: number,
+    sideX: number,
+    sideZ: number,
+    clearance: number,
+  ): boolean {
+    const isClear = (x: number, y: number, z: number): boolean =>
+      !world.isSolid(x, y, z) && world.sample(x, y, z) >= clearance;
+
+    // 1. Back out along reverse travel direction + upward lift (outside tunnel entrance)
+    const backDistances = [3.5, 5.5, 7.5, 10, 13, 17, 22, 28];
+    for (const d of backDistances) {
+      const bx = this.lastShotPos.x - this.shotTravelDir.x * d + sideX * 1.6;
+      const by = Math.max(3.2, this.lastShotPos.y + 2.2 + d * 0.35);
+      const bz = this.lastShotPos.z - this.shotTravelDir.z * d + sideZ * 1.6;
+      if (isClear(bx, by, bz)) {
+        this.desiredPos.set(bx, by, bz);
+        return true;
+      }
+
+      const rx = this.lastShotPos.x - this.shotTravelDir.x * d;
+      const ry = Math.max(3.2, this.lastShotPos.y + 1.8 + d * 0.2);
+      const rz = this.lastShotPos.z - this.shotTravelDir.z * d;
+      if (isClear(rx, ry, rz)) {
+        this.desiredPos.set(rx, ry, rz);
+        return true;
+      }
+    }
+
+    // 2. Lift cleanly above the cliff crest at idealX/idealZ
+    const surfY = world.getSurfaceY(idealX, idealZ);
+    if (surfY !== null) {
+      const crestY = Math.max(idealY, surfY + 3.2);
+      if (isClear(idealX, crestY, idealZ)) {
+        this.desiredPos.set(idealX, crestY, idealZ);
+        return true;
+      }
+    }
+    const lifts = [2, 4, 6, 9, 12, 16, 20, 26];
+    for (const lift of lifts) {
+      if (isClear(idealX, idealY + lift, idealZ)) {
+        this.desiredPos.set(idealX, idealY + lift, idealZ);
+        return true;
+      }
+    }
+
+    // 3. Sideways open-air flanks
+    const flankDistances = [5, 8, 12, 16, 22];
+    for (const d of flankDistances) {
+      const fy = Math.max(3.2, this.lastShotPos.y + 3.0 + d * 0.25);
+      for (const sign of [1, -1]) {
+        const fx =
+          this.lastShotPos.x + sideX * d * sign - this.shotTravelDir.x * 2.5;
+        const fz =
+          this.lastShotPos.z + sideZ * d * sign - this.shotTravelDir.z * 2.5;
+        if (isClear(fx, fy, fz)) {
+          this.desiredPos.set(fx, fy, fz);
+          return true;
+        }
+      }
+    }
+
+    return false;
   }
 }

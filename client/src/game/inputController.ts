@@ -139,6 +139,11 @@ function isUtilityGadget(gadgetId: GadgetId): boolean {
   );
 }
 
+/** Returns true for gadgets that trigger immediately on press without charging (utilities + Gale Scatter). */
+export function isInstantFireGadget(gadgetId: GadgetId): boolean {
+  return isUtilityGadget(gadgetId) || gadgetId === "quake_club";
+}
+
 /**
  * Grandma-friendly classic 3D artillery keyboard + mouse controller for Critter Siege.
  * Supports Pointer Lock free mouse-look with zero-misfire unlocked click/drag fallback,
@@ -284,8 +289,12 @@ export class InputController {
     if (this.disposed || !this.canFire || this.isDroneMode) {
       return;
     }
-    if (isUtilityGadget(this.selectedGadget)) {
-      this.callbacks.onUtility();
+    if (isInstantFireGadget(this.selectedGadget)) {
+      if (isUtilityGadget(this.selectedGadget)) {
+        this.callbacks.onUtility();
+      } else {
+        this.callbacks.onFire(MAX_CHARGE_POWER);
+      }
       return;
     }
     this.charging = true;
@@ -614,8 +623,12 @@ export class InputController {
     }
 
     if (this.canFire) {
-      if (isUtilityGadget(this.selectedGadget)) {
-        this.callbacks.onUtility();
+      if (isInstantFireGadget(this.selectedGadget)) {
+        if (isUtilityGadget(this.selectedGadget)) {
+          this.callbacks.onUtility();
+        } else {
+          this.callbacks.onFire(MAX_CHARGE_POWER);
+        }
         return;
       }
       this.charging = true;
@@ -819,8 +832,12 @@ export class InputController {
 
     if (code === "Enter") {
       if (this.canFire && !this.isDroneMode) {
-        if (isUtilityGadget(this.selectedGadget)) {
-          this.callbacks.onUtility();
+        if (isInstantFireGadget(this.selectedGadget)) {
+          if (isUtilityGadget(this.selectedGadget)) {
+            this.callbacks.onUtility();
+          } else {
+            this.callbacks.onFire(MAX_CHARGE_POWER);
+          }
         } else {
           this.charging = true;
           this.chargePower = MIN_CHARGE_POWER;
