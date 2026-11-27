@@ -329,88 +329,94 @@ describe("EnvironmentProps lush scenery & interactive hazard visuals", () => {
   });
 });
 
-describe("Dynamic Aim Sightline Prop Clearing", () => {
+describe("Strict Camera-to-Critter Prop Clearing", () => {
   const baseQuery: AimOcclusionQuery = {
     cameraPos: { x: 0, y: 7, z: -6 },
     critterPos: { x: 0, y: 5, z: 0 },
-    aimDir: { x: 0, y: 0, z: 1 },
-    maxRange: 22,
   };
 
-  it("hides tree, landmark, and boulder between camera and critter, in shoulder halo, and along forward 22m aim corridor", () => {
-    // 1. Camera-to-critter segment (between z = -6 and z = 0)
+  it("hides tree, landmark, and boulder strictly between camera and critter or enveloping the camera lens", () => {
+    // Strictly between cameraPos (z = -6) and critterPos (z = 0)
     expect(shouldHidePropForAim({ x: 0, y: 4.5, z: -3 }, "tree", baseQuery)).toBe(true);
     expect(shouldHidePropForAim({ x: 0.5, y: 4.5, z: -3.5 }, "landmark", baseQuery)).toBe(true);
     expect(shouldHidePropForAim({ x: 0, y: 5.5, z: -3 }, "boulder", baseQuery)).toBe(true);
 
-    // 2. Immediate shoulder halo (off to side of critter within radius + 2.0)
-    expect(shouldHidePropForAim({ x: 4.8, y: 5.0, z: 0.0 }, "tree", baseQuery)).toBe(true);
-    expect(shouldHidePropForAim({ x: -5.4, y: 5.0, z: 0.2 }, "landmark", baseQuery)).toBe(true);
-    expect(shouldHidePropForAim({ x: 3.8, y: 5.0, z: -0.2 }, "boulder", baseQuery)).toBe(true);
+    // Tall tree base below camera line whose upper canopy (up to +4.6m) blocks the camera-to-critter ray
+    expect(shouldHidePropForAim({ x: 0.4, y: 2.6, z: -4 }, "tree", baseQuery)).toBe(true);
 
-    // 3. Forward 22m aim corridor
-    expect(shouldHidePropForAim({ x: 1.5, y: 4.0, z: 14 }, "tree", baseQuery)).toBe(true);
-    expect(shouldHidePropForAim({ x: -2.0, y: 4.0, z: 18 }, "landmark", baseQuery)).toBe(true);
-    expect(shouldHidePropForAim({ x: 0.5, y: 5.2, z: 12 }, "boulder", baseQuery)).toBe(true);
-
-    // Just beyond 22m maxRange -> not hidden
-    expect(shouldHidePropForAim({ x: 0, y: 5.0, z: 24.5 }, "tree", baseQuery)).toBe(false);
+    // Enveloping the camera lens within -0.8m behind cameraPos
+    expect(shouldHidePropForAim({ x: 0, y: 5.0, z: -6.5 }, "tree", baseQuery)).toBe(true);
+    expect(shouldHidePropForAim({ x: 0.2, y: 5.0, z: -6.4 }, "landmark", baseQuery)).toBe(true);
+    expect(shouldHidePropForAim({ x: 0, y: 6.2, z: -6.5 }, "boulder", baseQuery)).toBe(true);
   });
 
-  it("returns false for props behind or far off to the side of the aim corridor", () => {
-    // Far behind the camera
-    expect(shouldHidePropForAim({ x: 0, y: 5, z: -15 }, "tree", baseQuery)).toBe(false);
-    expect(shouldHidePropForAim({ x: 0, y: 5, z: -15 }, "landmark", baseQuery)).toBe(false);
-    expect(shouldHidePropForAim({ x: 0, y: 5, z: -15 }, "boulder", baseQuery)).toBe(false);
+  it("never hides props ahead of the critter (zero forward corridor)", () => {
+    // Even 0.5m, 2m, or 12m directly in front of the critter must stay visible
+    expect(shouldHidePropForAim({ x: 0, y: 5.0, z: 0.5 }, "tree", baseQuery)).toBe(false);
+    expect(shouldHidePropForAim({ x: 0, y: 5.0, z: 2.0 }, "tree", baseQuery)).toBe(false);
+    expect(shouldHidePropForAim({ x: 0, y: 4.5, z: 12.0 }, "tree", baseQuery)).toBe(false);
 
-    // Far off to the side
-    expect(shouldHidePropForAim({ x: 16, y: 5, z: 10 }, "tree", baseQuery)).toBe(false);
-    expect(shouldHidePropForAim({ x: -18, y: 5, z: 10 }, "landmark", baseQuery)).toBe(false);
-    expect(shouldHidePropForAim({ x: 12, y: 5, z: 10 }, "boulder", baseQuery)).toBe(false);
+    expect(shouldHidePropForAim({ x: 0, y: 5.0, z: 0.5 }, "landmark", baseQuery)).toBe(false);
+    expect(shouldHidePropForAim({ x: 0, y: 5.0, z: 2.0 }, "landmark", baseQuery)).toBe(false);
+    expect(shouldHidePropForAim({ x: 0, y: 4.5, z: 12.0 }, "landmark", baseQuery)).toBe(false);
 
-    // Outside vertical shoulder halo band
-    expect(shouldHidePropForAim({ x: 4.5, y: 12.0, z: 0 }, "tree", baseQuery)).toBe(false);
-    expect(shouldHidePropForAim({ x: 3.5, y: 0.5, z: 0 }, "boulder", baseQuery)).toBe(false);
+    expect(shouldHidePropForAim({ x: 0, y: 5.2, z: 0.5 }, "boulder", baseQuery)).toBe(false);
+    expect(shouldHidePropForAim({ x: 0, y: 5.2, z: 2.0 }, "boulder", baseQuery)).toBe(false);
+    expect(shouldHidePropForAim({ x: 0, y: 5.2, z: 12.0 }, "boulder", baseQuery)).toBe(false);
+
+    // Elevated prop ahead of critter on a sloped camera ray must not sneak in via midY tilt
+    expect(shouldHidePropForAim({ x: 0, y: 9.0, z: 0.5 }, "tree", baseQuery)).toBe(false);
+    expect(shouldHidePropForAim({ x: 0, y: 8.5, z: 0.8 }, "landmark", baseQuery)).toBe(false);
   });
 
-  it("always returns false for flora even right next to the critter or between camera and critter", () => {
-    expect(shouldHidePropForAim({ x: 0, y: 5, z: 0 }, "flora", baseQuery)).toBe(false);
+  it("does not hide props off to the side, vertically clear, behind camera beyond -0.8m, or in First-Person", () => {
+    // Off to the side beyond tight per-category radius (tree 2.2, landmark 2.4, boulder 1.6)
+    expect(shouldHidePropForAim({ x: 2.6, y: 5.0, z: -3.0 }, "tree", baseQuery)).toBe(false);
+    expect(shouldHidePropForAim({ x: -2.8, y: 5.0, z: -3.0 }, "landmark", baseQuery)).toBe(false);
+    expect(shouldHidePropForAim({ x: 2.0, y: 5.5, z: -3.0 }, "boulder", baseQuery)).toBe(false);
+
+    // Far above or far below the camera-to-critter segment vertically
+    expect(shouldHidePropForAim({ x: 0, y: 12.0, z: -3.0 }, "tree", baseQuery)).toBe(false);
+    expect(shouldHidePropForAim({ x: 0, y: -2.0, z: -3.0 }, "tree", baseQuery)).toBe(false);
+    expect(shouldHidePropForAim({ x: 0, y: 10.5, z: -3.0 }, "boulder", baseQuery)).toBe(false);
+    expect(shouldHidePropForAim({ x: 0, y: 2.0, z: -3.0 }, "boulder", baseQuery)).toBe(false);
+
+    // Behind camera beyond -0.8m
+    expect(shouldHidePropForAim({ x: 0, y: 5.0, z: -7.2 }, "tree", baseQuery)).toBe(false);
+    expect(shouldHidePropForAim({ x: 0, y: 5.0, z: -7.5 }, "landmark", baseQuery)).toBe(false);
+    expect(shouldHidePropForAim({ x: 0, y: 6.2, z: -7.2 }, "boulder", baseQuery)).toBe(false);
+
+    // Degenerate / First-Person segment where cameraPos equals critter pivot H
+    const firstPersonQuery: AimOcclusionQuery = {
+      cameraPos: { x: 0, y: 5.9, z: 0 },
+      critterPos: { x: 0, y: 5.0, z: 0 },
+    };
+    expect(shouldHidePropForAim({ x: 0, y: 5.0, z: 0 }, "tree", firstPersonQuery)).toBe(false);
+    expect(shouldHidePropForAim({ x: 0, y: 5.0, z: 0 }, "landmark", firstPersonQuery)).toBe(false);
+    expect(shouldHidePropForAim({ x: 0, y: 5.0, z: 0 }, "boulder", firstPersonQuery)).toBe(false);
+  });
+
+  it("always returns false for flora and handles non-finite coordinates safely", () => {
     expect(shouldHidePropForAim({ x: 0, y: 5, z: -3 }, "flora", baseQuery)).toBe(false);
-    expect(shouldHidePropForAim({ x: 0, y: 5, z: 8 }, "flora", baseQuery)).toBe(false);
-  });
+    expect(shouldHidePropForAim({ x: 0, y: 6.5, z: -6 }, "flora", baseQuery)).toBe(false);
+    expect(shouldHidePropForAim({ x: 0, y: 5, z: 0 }, "flora", baseQuery)).toBe(false);
 
-  it("handles non-finite coordinates and near-zero aimDir safely without throwing", () => {
-    expect(shouldHidePropForAim({ x: Number.NaN, y: 5, z: 5 }, "tree", baseQuery)).toBe(false);
+    expect(shouldHidePropForAim({ x: Number.NaN, y: 5, z: -3 }, "tree", baseQuery)).toBe(false);
     expect(
-      shouldHidePropForAim({ x: 0, y: 5, z: 5 }, "tree", {
+      shouldHidePropForAim({ x: 0, y: 5, z: -3 }, "tree", {
         ...baseQuery,
         cameraPos: { x: Number.POSITIVE_INFINITY, y: 7, z: -6 },
       }),
     ).toBe(false);
     expect(
-      shouldHidePropForAim({ x: 0, y: 5, z: 5 }, "tree", {
+      shouldHidePropForAim({ x: 0, y: 5, z: -3 }, "tree", {
         ...baseQuery,
         critterPos: { x: 0, y: Number.NEGATIVE_INFINITY, z: 0 },
       }),
     ).toBe(false);
-    expect(
-      shouldHidePropForAim({ x: 0, y: 5, z: 5 }, "tree", {
-        ...baseQuery,
-        aimDir: { x: 0, y: Number.NaN, z: 1 },
-      }),
-    ).toBe(false);
-
-    // Near-zero aimDir skips forward corridor, but still evaluates camera segment & shoulder halo
-    const zeroAimQuery: AimOcclusionQuery = {
-      cameraPos: { x: 0, y: 7, z: -6 },
-      critterPos: { x: 0, y: 5, z: 0 },
-      aimDir: { x: 0, y: 0, z: 0 },
-    };
-    expect(shouldHidePropForAim({ x: 0, y: 4.5, z: -3 }, "tree", zeroAimQuery)).toBe(true);
-    expect(shouldHidePropForAim({ x: 0, y: 5.0, z: 12 }, "tree", zeroAimQuery)).toBe(false);
   });
 
-  it("temporarily hides trees, boulders, and landmarks along aim sightline without changing getPropCounts, restores exact matrices on null/turn-away, and never revives carved props", () => {
+  it("temporarily hides trees, boulders, and landmarks strictly between camera and critter without changing getPropCounts, restores exact matrices on null/move-away, and never revives carved props", () => {
     const world = new SdfWorld(4242, "mountain_spine");
     const spawns = world.findSpawnPoints(4);
     const props = new EnvironmentProps(world, 1.5, spawns);
@@ -428,7 +434,7 @@ describe("Dynamic Aim Sightline Prop Clearing", () => {
       return;
     }
 
-    // Snapshot all non-zero instanced matrices before any aim occlusion
+    // Snapshot all non-zero instanced matrices before any occlusion
     const instancedMeshes: THREE.InstancedMesh[] = [];
     if (sceneryGroup) {
       for (const child of sceneryGroup.children) {
@@ -458,8 +464,8 @@ describe("Dynamic Aim Sightline Prop Clearing", () => {
 
     const originalSnapshots = snapshotMatrices();
 
-    // Aim directly through the watchtower from 6m behind it along +Z
-    const aimAtWatchtower: AimOcclusionQuery = {
+    // Watchtower AHEAD of the critter must stay visible
+    const watchtowerAheadQuery: AimOcclusionQuery = {
       cameraPos: {
         x: watchtower.position.x,
         y: watchtower.position.y + 2.0,
@@ -470,26 +476,44 @@ describe("Dynamic Aim Sightline Prop Clearing", () => {
         y: watchtower.position.y,
         z: watchtower.position.z - 5.0,
       },
-      aimDir: { x: 0, y: 0, z: 1 },
-      maxRange: 22,
+    };
+    props.updateAimOcclusion(watchtowerAheadQuery);
+    expect(watchtower.visible).toBe(true);
+
+    // Place camera behind watchtower and critter in front of watchtower so watchtower sits strictly between them
+    const watchtowerBetweenQuery: AimOcclusionQuery = {
+      cameraPos: {
+        x: watchtower.position.x,
+        y: watchtower.position.y + 2.0,
+        z: watchtower.position.z - 4.0,
+      },
+      critterPos: {
+        x: watchtower.position.x,
+        y: watchtower.position.y,
+        z: watchtower.position.z + 4.0,
+      },
     };
 
-    const hiddenCount = props.updateAimOcclusion(aimAtWatchtower);
+    const hiddenCount = props.updateAimOcclusion(watchtowerBetweenQuery);
     expect(hiddenCount).toBeGreaterThanOrEqual(1);
     expect(watchtower.visible).toBe(false);
     // Counts and visible anchor positions must remain strictly unchanged
     expect(props.getPropCounts()).toEqual(initialCounts);
     expect(props.getVisiblePropPositions().length).toBe(initialVisiblePositions.length);
 
-    // Also aim through a tree/boulder cluster across the island center to verify instanced matrices become zero-scale
-    const centerQuery: AimOcclusionQuery = {
-      cameraPos: { x: world.centerX - 18, y: 12, z: world.centerZ - 18 },
-      critterPos: { x: world.centerX - 12, y: 10, z: world.centerZ - 12 },
-      aimDir: { x: 0.707, y: 0, z: 0.707 },
-      maxRange: 30,
+    // Position camera behind a real visible instanced tree so it sits strictly between camera and critter
+    const treePos = initialVisiblePositions[0];
+    expect(treePos).toBeDefined();
+    if (!treePos) {
+      props.dispose();
+      return;
+    }
+    const treeBetweenQuery: AimOcclusionQuery = {
+      cameraPos: { x: treePos.x, y: treePos.y + 2.0, z: treePos.z - 4.0 },
+      critterPos: { x: treePos.x, y: treePos.y, z: treePos.z + 4.0 },
     };
-    const centerHidden = props.updateAimOcclusion(centerQuery);
-    expect(centerHidden).toBeGreaterThan(0);
+    const treeHidden = props.updateAimOcclusion(treeBetweenQuery);
+    expect(treeHidden).toBeGreaterThan(0);
 
     // Verify at least one previously non-zero instanced binding is now zero-scale
     let zeroedInstanceCount = 0;
@@ -508,7 +532,7 @@ describe("Dynamic Aim Sightline Prop Clearing", () => {
     }
     expect(zeroedInstanceCount).toBeGreaterThan(0);
 
-    // Turning aim away / clearing with null restores all props to their exact original matrices & visibility
+    // Clearing with null restores all props to their exact original matrices & visibility
     expect(props.updateAimOcclusion(null)).toBe(0);
     expect(watchtower.visible).toBe(true);
     for (const mesh of instancedMeshes) {
@@ -521,8 +545,8 @@ describe("Dynamic Aim Sightline Prop Clearing", () => {
       }
     }
 
-    // Re-hide watchtower with aim, then permanently carve under it -> must NEVER be revived by updateAimOcclusion(null)
-    expect(props.updateAimOcclusion(aimAtWatchtower)).toBeGreaterThanOrEqual(1);
+    // Re-hide watchtower with camera occlusion, then permanently carve under it -> must NEVER be revived by updateAimOcclusion(null)
+    expect(props.updateAimOcclusion(watchtowerBetweenQuery)).toBeGreaterThanOrEqual(1);
     expect(watchtower.visible).toBe(false);
 
     world.applyCarve({
@@ -547,9 +571,9 @@ describe("Dynamic Aim Sightline Prop Clearing", () => {
     expect(watchtower.parent).toBeNull();
     expect(props.getVisiblePropPositions().length).toBe(prunedPositionsCount);
 
-    // Also verify a permanently pruned instanced prop stays zero-matrix after aim hide + null restore
+    // Also verify permanently pruned instanced props stay zero-matrix after occlusion hide + null restore
     const prunedSnapshot = snapshotMatrices();
-    props.updateAimOcclusion(centerQuery);
+    props.updateAimOcclusion(treeBetweenQuery);
     expect(props.updateAimOcclusion(null)).toBe(0);
     for (const mesh of instancedMeshes) {
       const afterPruneArr = prunedSnapshot.get(mesh);

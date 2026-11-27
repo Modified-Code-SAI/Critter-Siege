@@ -2389,14 +2389,12 @@ class CritterSiegeApp {
       effectiveCamMode === "spectator_drone";
     const trackedCritterId = focusCritter?.id ?? localId;
 
-    // Dynamically hide obstructing trees/boulders/landmarks along active aiming sightline
+    // Strictly clear trees/boulders/landmarks wedged between over-the-shoulder camera and critter
     if (
-      canFire &&
+      canMove &&
       localCritter !== null &&
-      !effectiveIsDroneMode &&
-      effectiveCamMode !== "shot_cam"
+      effectiveCamMode === "over_shoulder"
     ) {
-      const aimDir = computeAimDirection(moveInput.yaw, moveInput.pitch);
       this.environmentProps.updateAimOcclusion({
         cameraPos: {
           x: this.cameraRig.camera.position.x,
@@ -2404,8 +2402,6 @@ class CritterSiegeApp {
           z: this.cameraRig.camera.position.z,
         },
         critterPos: focusPos,
-        aimDir,
-        maxRange: 22,
       });
     } else {
       this.environmentProps.updateAimOcclusion(null);
