@@ -1,11 +1,12 @@
-import type { GadgetId } from "@critter/shared";
+import type { GadgetId, ThemeId } from "@critter/shared";
 import {
   MusicEngine,
+  type MusicGameplayContext,
   type MusicMood,
   type MusicStingerKind,
 } from "./musicEngine.js";
 
-export type { MusicMood, MusicStingerKind };
+export type { MusicGameplayContext, MusicMood, MusicStingerKind };
 
 interface WebkitAudioGlobal {
   AudioContext?: typeof AudioContext;
@@ -29,6 +30,8 @@ function getAudioContextCtor(): (typeof AudioContext) | null {
 export class SynthAudio {
   private ctx: AudioContext | null = null;
   private masterGain: GainNode | null = null;
+  private sharedSafetyLimiter: DynamicsCompressorNode | null = null;
+  private outputBus: AudioNode | null = null;
   private noiseBuffer: AudioBuffer | null = null;
   private muted = false;
   private disposed = false;
@@ -36,7 +39,10 @@ export class SynthAudio {
   private readonly music: MusicEngine;
 
   public constructor() {
-    this.music = new MusicEngine(() => this.ctx);
+    this.music = new MusicEngine(
+      () => this.ctx,
+      () => this.outputBus,
+    );
   }
 
   /** Enable or disable master audio output (both SFX and music) cleanly. */
@@ -63,16 +69,14 @@ export class SynthAudio {
     return this.muted;
   }
 
-  /** Lazily unlock the shared AudioContext and start the adaptive music engine. */
+  /** Lazily unlock the shared AudioContext and start the adaptive music & ambience engine. */
   public unlockAndStartMusic(): void {
     if (this.disposed) {
       return;
     }
     this.ensureContext();
     this.musicAutoStarted = true;
-    if (!this.music.isMusicMuted()) {
-      this.music.start();
-    }
+    this.music.start();
   }
 
   /** Switch adaptive background music mood. */
@@ -83,6 +87,16 @@ export class SynthAudio {
   /** Return current adaptive background music mood. */
   public getMusicMood(): MusicMood {
     return this.music.getMood();
+  }
+
+  /** Push live gameplay telemetry to the adaptive music & ambience engine. */
+  public setMusicContext(context: Partial<MusicGameplayContext>): void {
+    this.music.setContext(context);
+  }
+
+  /** Switch the adaptive music engine's active biome harmonic palette. */
+  public setMusicTheme(theme: ThemeId): void {
+    this.music.setTheme(theme);
   }
 
   /** Mute or unmute background music independently of SFX mute. */
@@ -112,12 +126,12 @@ export class SynthAudio {
   }
 
   /** Play a short procedural musical stinger for major match events. */
-  public playStinger(kind: MusicStingerKind): void {
+  public playStinger(kind: MusicStingerKind, apexBonus?: boolean): void {
     if (this.disposed || this.muted) {
       return;
     }
     this.ensureContext();
-    this.music.playStinger(kind);
+    this.music.playStinger(kind, apexBonus);
   }
 
   /** Rising charge whine tick while holding shot power. */
@@ -277,25 +291,28 @@ export class SynthAudio {
     this.playTone(ctx, master, "triangle", 3135.96, 3150, 0.14, 0.07, now + 0.075);
   }
 
-  /** Satisfying mechanical latch click + bright D-major harmonic triad on Armory purchase. */
+  /** Satisfying mechanical latch click (plus fallback D-major triad only when music is muted). */
   public playShopBuy(): void {
     const ready = this.ensureReady();
     if (!ready) return;
     const { ctx, master } = ready;
     const now = ctx.currentTime;
 
-    // Mechanical latch click
+    // Mechanical latch click (non-pitched noise + latch transient)
     this.playFilteredNoise(ctx, master, "bandpass", 2400, 1200, 0.04, 0.14, 2.0, now);
     this.playTone(ctx, master, "triangle", 310, 460, 0.045, 0.14, now);
 
-    // Bright D-major harmonic triad (D5, F#5, A5)
-    const triad = [587.33, 739.99, 880.0];
-    for (let i = 0; i < triad.length; i++) {
-      const freq = triad[i];
-      if (freq === undefined) continue;
-      const start = now + 0.045 + i * 0.045;
-      this.playTone(ctx, master, "triangle", freq, freq * 1.004, 0.24, 0.15, start);
-      this.playTone(ctx, master, "sine", freq * 2, freq * 2.004, 0.16, 0.05, start);
+    // Fallback D-major harmonic triad (D5, F#5, A5) only when music is muted,
+    // so active biome-keyed music + purchase stinger never clashes bitonally.
+    if (this.music.isMusicMuted()) {
+      const triad = [587.33, 739.99, 880.0];
+      for (let i = 0; i < triad.length; i++) {
+        const freq = triad[i];
+        if (freq === undefined) continue;
+        const start = now + 0.045 + i * 0.045;
+        this.playTone(ctx, master, "triangle", freq, freq * 1.004, 0.24, 0.15, start);
+        this.playTone(ctx, master, "sine", freq * 2, freq * 2.004, 0.16, 0.05, start);
+      }
     }
   }
 
@@ -368,10 +385,29 @@ export class SynthAudio {
     this.disposed = true;
     this.music.dispose();
 
+    const masterGain = this.masterGain;
+    const limiter = this.sharedSafetyLimiter;
     const ctx = this.ctx;
     this.ctx = null;
     this.masterGain = null;
+    this.sharedSafetyLimiter = null;
+    this.outputBus = null;
     this.noiseBuffer = null;
+
+    if (masterGain && typeof masterGain.disconnect === "function") {
+      try {
+        masterGain.disconnect();
+      } catch {
+        // Safe cleanup in restricted environments
+      }
+    }
+    if (limiter && typeof limiter.disconnect === "function") {
+      try {
+        limiter.disconnect();
+      } catch {
+        // Safe cleanup in restricted environments
+      }
+    }
 
     if (ctx && typeof ctx.close === "function") {
       try {
@@ -393,10 +429,28 @@ export class SynthAudio {
       }
       try {
         const ctx = new Ctor();
+        let limiter: DynamicsCompressorNode | null = null;
+        const optionalCtx = ctx as Partial<AudioContext>;
+        if (typeof optionalCtx.createDynamicsCompressor === "function") {
+          try {
+            limiter = optionalCtx.createDynamicsCompressor();
+            limiter.threshold.value = -2;
+            limiter.knee.value = 6;
+            limiter.ratio.value = 10;
+            limiter.attack.value = 0.003;
+            limiter.release.value = 0.12;
+            limiter.connect(ctx.destination);
+          } catch {
+            limiter = null;
+          }
+        }
+        const outputBus: AudioNode = limiter ?? ctx.destination;
         const master = ctx.createGain();
         master.gain.value = this.muted ? 0 : 0.45;
-        master.connect(ctx.destination);
+        master.connect(outputBus);
         this.ctx = ctx;
+        this.sharedSafetyLimiter = limiter;
+        this.outputBus = outputBus;
         this.masterGain = master;
       } catch {
         return null;
@@ -425,9 +479,7 @@ export class SynthAudio {
 
     if (!this.musicAutoStarted) {
       this.musicAutoStarted = true;
-      if (!this.music.isMusicMuted()) {
-        this.music.start();
-      }
+      this.music.start();
     }
 
     return { ctx, master: this.masterGain };

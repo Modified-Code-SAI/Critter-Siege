@@ -5,7 +5,10 @@ import {
   type MusicMood,
   type MusicStingerKind,
 } from "../src/audio/musicEngine.js";
-import { SynthAudio } from "../src/audio/synthAudio.js";
+import {
+  SynthAudio,
+  type MusicGameplayContext,
+} from "../src/audio/synthAudio.js";
 
 interface MockAudioParam {
   value: number;
@@ -277,8 +280,16 @@ function createMockAudioContext(options?: {
   };
 }
 
+function stubGlobalAudioContext(ctx: AudioContext): void {
+  const MockAudioContext = function MockAudioContext(): AudioContext {
+    return ctx;
+  };
+  vi.stubGlobal("AudioContext", MockAudioContext);
+}
+
 describe("MusicEngine & SynthAudio atmospheric adaptive soundtrack and SFX", () => {
   afterEach(() => {
+    vi.unstubAllGlobals();
     vi.useRealTimers();
   });
 
@@ -708,5 +719,106 @@ describe("MusicEngine & SynthAudio atmospheric adaptive soundtrack and SFX", () 
       audio.playFloodRumble();
       audio.playStinger("ko");
     }).not.toThrow();
+  });
+
+  it("forwards setMusicContext, setMusicTheme, and playStinger with apexBonus cleanly through SynthAudio", () => {
+    vi.useFakeTimers();
+    const harness = createMockAudioContext({ minimal: false });
+    stubGlobalAudioContext(harness.ctx);
+    const audio = new SynthAudio();
+
+    audio.unlockAndStartMusic();
+
+    const partialContext: Partial<MusicGameplayContext> = {
+      mood: "battle",
+      theme: "canyon_arch",
+      round: 3,
+      isShotFlight: true,
+      windSpeed: 12,
+    };
+    audio.setMusicContext(partialContext);
+    expect(audio.getMusicMood()).toBe("battle");
+
+    audio.setMusicTheme("mountain_spine");
+    // Reverb wet gain reflects Shot Cam expansion forwarded via setMusicContext
+    const reverbWetGain = harness.gains[5];
+    expect(reverbWetGain?.gain.value ?? 0).toBeGreaterThan(0.4);
+
+    // playStinger forwards apexBonus cleanly to MusicEngine
+    const oscBeforeBase = harness.oscillators.length;
+    audio.playStinger("evolution", false);
+    const baseOscCount = harness.oscillators.length - oscBeforeBase;
+
+    const oscBeforeApex = harness.oscillators.length;
+    audio.playStinger("evolution", true);
+    const apexOscCount = harness.oscillators.length - oscBeforeApex;
+
+    expect(baseOscCount).toBeGreaterThan(0);
+    expect(apexOscCount).toBeGreaterThan(baseOscCount);
+
+    audio.dispose();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("plays only the tactile latch click in playShopBuy when music is active, and adds D-major triad only when music is muted (Review Focus #4)", () => {
+    vi.useFakeTimers();
+    const harness = createMockAudioContext({ minimal: false });
+    stubGlobalAudioContext(harness.ctx);
+    const audio = new SynthAudio();
+    audio.unlockAndStartMusic();
+
+    // Music unmuted: latch click ONLY (1 oscillator, 0 D-major triad oscillators)
+    expect(audio.isMusicMuted()).toBe(false);
+    const oscBeforeUnmutedBuy = harness.oscillators.length;
+    audio.playShopBuy();
+    expect(harness.oscillators.length - oscBeforeUnmutedBuy).toBe(1);
+
+    // Music muted (master unmuted): latch click + fallback D-major triad (> 3 oscillators)
+    audio.setMusicMuted(true);
+    expect(audio.isMusicMuted()).toBe(true);
+    expect(audio.isMuted()).toBe(false);
+    const oscBeforeMutedBuy = harness.oscillators.length;
+    audio.playShopBuy();
+    expect(harness.oscillators.length - oscBeforeMutedBuy).toBeGreaterThan(3);
+
+    audio.dispose();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("routes both SFX masterGain and MusicEngine output through a shared safety limiter when supported", () => {
+    vi.useFakeTimers();
+    const harness = createMockAudioContext({ minimal: false });
+    stubGlobalAudioContext(harness.ctx);
+    const audio = new SynthAudio();
+
+    // Even when starting with music muted, unlockAndStartMusic starts ambience safely
+    audio.setMusicMuted(true);
+    audio.unlockAndStartMusic();
+
+    // compressors[0] = SynthAudio sharedSafetyLimiter; compressors[1] = MusicEngine glue compressor
+    expect(harness.compressors.length).toBe(2);
+    const sharedLimiter = harness.compressors[0];
+    const musicGlueCompressor = harness.compressors[1];
+    const sfxMasterGain = harness.gains[0];
+
+    expect(sharedLimiter).toBeDefined();
+    expect(sharedLimiter?.threshold.value).toBe(-2);
+    expect(sharedLimiter?.knee.value).toBe(6);
+    expect(sharedLimiter?.ratio.value).toBe(10);
+    expect(sharedLimiter?.attack.value).toBe(0.003);
+    expect(sharedLimiter?.release.value).toBe(0.12);
+    expect(sharedLimiter?.connect).toHaveBeenCalledWith(harness.ctx.destination);
+
+    expect(sfxMasterGain?.connect).toHaveBeenCalledWith(sharedLimiter);
+    expect(musicGlueCompressor?.connect).toHaveBeenCalledWith(sharedLimiter);
+
+    // Ambience loop sources start even when musicMuted === true
+    const ambienceSources = harness.bufferSources.filter((src) => src.loop);
+    expect(ambienceSources.length).toBe(3);
+
+    audio.dispose();
+    expect(sfxMasterGain?.disconnect).toHaveBeenCalled();
+    expect(sharedLimiter?.disconnect).toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
   });
 });
