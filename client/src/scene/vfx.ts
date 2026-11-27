@@ -1,10 +1,21 @@
 import * as THREE from "three";
 import {
+  GALE_SCATTER_CONE_MIN_DOT,
+  GALE_SCATTER_REACH,
   SDF_DIMS,
   type EvoPodState,
+  type GadgetId,
   type PrismWallState,
   type Vec3,
 } from "@critter/shared";
+
+export interface ProjectileVisualOptions {
+  readonly gadgetId?: GadgetId;
+  readonly direction?: Vec3;
+  readonly boring?: boolean;
+  readonly targetPos?: Vec3 | null;
+  readonly dtSec?: number;
+}
 
 const WORLD_SPAN_X = SDF_DIMS.nx * SDF_DIMS.voxelSize;
 const WORLD_SPAN_Y = SDF_DIMS.ny * SDF_DIMS.voxelSize;
@@ -18,6 +29,10 @@ const SMOKE_SPRITE_POOL_CAPACITY = 64;
 const ZERO_MATRIX = new THREE.Matrix4().makeScale(0, 0, 0);
 const WHITE_COLOR = new THREE.Color(0xffffff);
 const FORWARD_Z = new THREE.Vector3(0, 0, 1);
+const UP_Y = new THREE.Vector3(0, 1, 0);
+const GALE_SCATTER_CONE_TAN = Math.tan(Math.acos(GALE_SCATTER_CONE_MIN_DOT));
+const GPS_LOCK_CYAN = new THREE.Color(0x38f5ff);
+const GPS_LOCK_CRIMSON = new THREE.Color(0xff3b5c);
 
 const ROCK_SHARD_PALETTE: readonly number[] = [
   0xb96c43,
@@ -143,6 +158,36 @@ function disposeObjectTree(root: THREE.Object3D): void {
   for (const m of mats) {
     m.dispose();
   }
+}
+
+function disposeObjectMaterialsOnly(root: THREE.Object3D): void {
+  const mats = new Set<THREE.Material>();
+  root.traverse((obj) => {
+    if (obj instanceof THREE.Mesh || obj instanceof THREE.Line) {
+      if (Array.isArray(obj.material)) {
+        for (const item of obj.material) {
+          mats.add(item);
+        }
+      } else {
+        mats.add(obj.material);
+      }
+    } else if (obj instanceof THREE.Sprite) {
+      mats.add(obj.material);
+    }
+  });
+  for (const m of mats) {
+    m.dispose();
+  }
+}
+
+function buildOrthonormalBasis(
+  dir: THREE.Vector3,
+  outRight: THREE.Vector3,
+  outUp: THREE.Vector3,
+): void {
+  const ref = Math.abs(dir.y) > 0.92 ? FORWARD_Z : UP_Y;
+  outRight.crossVectors(dir, ref).normalize();
+  outUp.crossVectors(outRight, dir).normalize();
 }
 
 function wrapCoord(v: number, min: number, max: number): number {
@@ -405,6 +450,10 @@ export class VfxSystem {
     spark: THREE.OctahedronGeometry;
     ribbon: THREE.CylinderGeometry;
     grappleBeam: THREE.CylinderGeometry;
+    hookCollar: THREE.CylinderGeometry;
+    hookShankRing: THREE.TorusGeometry;
+    hookProngCurve: THREE.TubeGeometry;
+    hookProngTip: THREE.ConeGeometry;
   };
 
   private readonly dodecaShardPool: InstancedParticlePool;
@@ -419,6 +468,12 @@ export class VfxSystem {
   private readonly dummyObj = new THREE.Object3D();
   private readonly scratchColor = new THREE.Color();
   private readonly tempVec = new THREE.Vector3();
+  private readonly tempDir = new THREE.Vector3();
+  private readonly tempRight = new THREE.Vector3();
+  private readonly tempUp = new THREE.Vector3();
+  private readonly tempTarget = new THREE.Vector3();
+  private readonly tempOrigin = new THREE.Vector3();
+  private readonly tempQuat = new THREE.Quaternion();
 
   private readonly particles: DynamicParticle[] = [];
   private readonly evoPods: Map<string, EvoPodVisual> = new Map();
@@ -429,12 +484,31 @@ export class VfxSystem {
   private readonly projectileCoreMat: THREE.MeshStandardMaterial;
   private readonly projectileRingMat: THREE.MeshBasicMaterial;
   private readonly projectileHalo: THREE.Sprite;
+  private readonly bombGroup: THREE.Group;
+  private readonly bombFlameSprite: THREE.Sprite;
+  private readonly bombFlameCoreSprite: THREE.Sprite;
+  private readonly bombWickTipLocal = new THREE.Vector3(0.18, 0.45, 0.08);
+  private readonly missileGroup: THREE.Group;
+  private readonly missileThrusterSprite: THREE.Sprite;
+  private readonly gpsLockBeam: THREE.Mesh;
+  private readonly drillGroup: THREE.Group;
+  private readonly drillSpinPivot: THREE.Group;
+  private readonly drillThrusterSprite: THREE.Sprite;
   private lastProjectilePos: THREE.Vector3 | null = null;
+  private readonly lastProjectileDir = new THREE.Vector3(0, 1, 0);
   private trailEmitCounter = 0;
+  private drillIsBoring = false;
+  private bombRotatedThisTick = false;
+  private drillSpunThisTick = false;
+  private flamePhase = 0;
 
   private readonly dronePingGroup: THREE.Group;
   private readonly droneOuterRing: THREE.Mesh;
   private readonly droneInnerRing: THREE.Mesh;
+  private readonly droneLockReticleGroup: THREE.Group;
+  private readonly droneLockInnerRing: THREE.Mesh;
+  private readonly droneLockInnerMat: THREE.MeshBasicMaterial;
+  private droneLockMode = false;
 
   private pseudoSeed = 1337;
   private worldSpanX = WORLD_SPAN_X;
@@ -472,6 +546,13 @@ export class VfxSystem {
     const ribbonGeo = new THREE.CylinderGeometry(0.02, 0.062, 4.6, 6, 1, true);
     ribbonGeo.rotateX(Math.PI * 0.5);
 
+    const hookCurve = new THREE.CatmullRomCurve3([
+      new THREE.Vector3(0, 0.06, 0.06),
+      new THREE.Vector3(0, 0.14, 0.21),
+      new THREE.Vector3(0, -0.02, 0.29),
+      new THREE.Vector3(0, -0.15, 0.21),
+    ]);
+
     this.sharedGeos = {
       shardDodeca: new THREE.DodecahedronGeometry(0.18, 0),
       shardTetra: new THREE.TetrahedronGeometry(0.18, 0),
@@ -480,6 +561,10 @@ export class VfxSystem {
       spark: new THREE.OctahedronGeometry(0.085, 0),
       ribbon: ribbonGeo,
       grappleBeam: new THREE.CylinderGeometry(0.06, 0.06, 1.0, 8, 1, false),
+      hookCollar: new THREE.CylinderGeometry(0.105, 0.082, 0.22, 10),
+      hookShankRing: new THREE.TorusGeometry(0.082, 0.022, 6, 14),
+      hookProngCurve: new THREE.TubeGeometry(hookCurve, 12, 0.024, 6, false),
+      hookProngTip: new THREE.ConeGeometry(0.032, 0.13, 8),
     };
 
     // Pooled InstancedMesh rock chips, additive sparks, and glossy water droplets (zero per-blast churn)
@@ -676,7 +761,43 @@ export class VfxSystem {
     this.projectileGroup.add(projCore, projRing, this.projectileHalo);
     this.group.add(this.projectileGroup);
 
-    // Glowing cyan drone recon target ping
+    // Signature 3D Projectile Visuals: Gale Mortar black bomb, Seeker Firefly GPS missile + lock beam, Burrow Bore auger drill
+    const bombBuilt = this.createBombVisual();
+    this.bombGroup = bombBuilt.group;
+    this.bombFlameSprite = bombBuilt.flameSprite;
+    this.bombFlameCoreSprite = bombBuilt.flameCoreSprite;
+    this.bombGroup.visible = false;
+    this.group.add(this.bombGroup);
+
+    const missileBuilt = this.createMissileVisual();
+    this.missileGroup = missileBuilt.group;
+    this.missileThrusterSprite = missileBuilt.thrusterSprite;
+    this.missileGroup.visible = false;
+    this.group.add(this.missileGroup);
+
+    this.gpsLockBeam = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.028, 0.028, 1.0, 8, 1, true),
+      new THREE.MeshBasicMaterial({
+        color: 0x38f5ff,
+        transparent: true,
+        opacity: 0.36,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+      }),
+    );
+    this.gpsLockBeam.name = "vfx_gps_lock_beam";
+    this.gpsLockBeam.visible = false;
+    this.group.add(this.gpsLockBeam);
+
+    const drillBuilt = this.createDrillVisual();
+    this.drillGroup = drillBuilt.group;
+    this.drillSpinPivot = drillBuilt.spinPivot;
+    this.drillThrusterSprite = drillBuilt.thrusterSprite;
+    this.drillGroup.visible = false;
+    this.group.add(this.drillGroup);
+
+    // Glowing cyan drone recon target ping + GPS target-lock crosshair reticle
     this.dronePingGroup = new THREE.Group();
     this.dronePingGroup.name = "vfx_drone_ping";
     this.dronePingGroup.visible = false;
@@ -717,7 +838,18 @@ export class VfxSystem {
     );
     pingBeam.position.y = 1.65;
 
-    this.dronePingGroup.add(this.droneOuterRing, this.droneInnerRing, pingBeam);
+    const reticleBuilt = this.createDroneLockReticle();
+    this.droneLockReticleGroup = reticleBuilt.group;
+    this.droneLockInnerRing = reticleBuilt.innerRing;
+    this.droneLockInnerMat = reticleBuilt.innerMat;
+    this.droneLockReticleGroup.visible = false;
+
+    this.dronePingGroup.add(
+      this.droneOuterRing,
+      this.droneInnerRing,
+      pingBeam,
+      this.droneLockReticleGroup,
+    );
     this.group.add(this.dronePingGroup);
   }
 
@@ -1295,8 +1427,8 @@ export class VfxSystem {
   }
 
   /**
-   * Maintain a live taut glowing 3D vine tether between a gliding critter and its cliff anchor
-   * during the 0.42s animated grapple reel-up / rappel. Pass `from = null` to release & dispose.
+   * Maintain a live taut glowing 3D vine tether with a sculpted 3-prong grappling hook claw head
+   * anchored at `to` and oriented along `from -> to`. Pass `from = null` to release & dispose.
    */
   public setGrappleTether(
     id: string,
@@ -1309,18 +1441,14 @@ export class VfxSystem {
     if (!from || !to) {
       if (existing) {
         this.group.remove(existing);
-        existing.traverse((obj) => {
-          if (obj instanceof THREE.Mesh) {
-            disposeMaterial(obj.material);
-          }
-        });
+        disposeObjectMaterialsOnly(existing);
       }
       return;
     }
 
-    const start = new THREE.Vector3(from.x, from.y + 0.55, from.z);
-    const end = new THREE.Vector3(to.x, to.y + 0.45, to.z);
-    const delta = end.clone().sub(start);
+    const start = this.tempOrigin.set(from.x, from.y + 0.55, from.z);
+    const end = this.tempTarget.set(to.x, to.y + 0.45, to.z);
+    const delta = this.tempVec.subVectors(end, start);
     const dist = delta.length();
     if (!Number.isFinite(dist) || dist < 0.08) {
       this.setGrappleTether(id, null);
@@ -1354,15 +1482,53 @@ export class VfxSystem {
         }),
       );
       coreMesh.name = "tether_core";
-      tetherGroup.add(outerMesh, coreMesh);
+
+      // Sculpted 3-prong metallic grappling hook claw head anchored right at `to`
+      const hookHead = new THREE.Group();
+      hookHead.name = "grapple_hook_head";
+      const ironMat = new THREE.MeshStandardMaterial({
+        color: 0x475569,
+        roughness: 0.3,
+        metalness: 0.78,
+      });
+      const brassMat = new THREE.MeshStandardMaterial({
+        color: 0xd97706,
+        roughness: 0.32,
+        metalness: 0.72,
+        emissive: 0x451a03,
+        emissiveIntensity: 0.18,
+      });
+
+      const collar = new THREE.Mesh(this.sharedGeos.hookCollar, brassMat);
+      collar.name = "grapple_hook_collar";
+      collar.position.set(0, -0.02, 0);
+      hookHead.add(collar);
+
+      const shankRing = new THREE.Mesh(this.sharedGeos.hookShankRing, ironMat);
+      shankRing.name = "grapple_hook_ring";
+      shankRing.position.set(0, -0.15, 0);
+      hookHead.add(shankRing);
+
+      for (let i = 0; i < 3; i++) {
+        const prongGroup = new THREE.Group();
+        prongGroup.name = `grapple_hook_prong_${i}`;
+        prongGroup.rotation.y = (i * Math.PI * 2) / 3;
+
+        const arm = new THREE.Mesh(this.sharedGeos.hookProngCurve, ironMat);
+        const tip = new THREE.Mesh(this.sharedGeos.hookProngTip, ironMat);
+        tip.position.set(0, -0.18, 0.19);
+        tip.rotation.x = Math.PI * 0.82;
+        prongGroup.add(arm, tip);
+        hookHead.add(prongGroup);
+      }
+
+      tetherGroup.add(outerMesh, coreMesh, hookHead);
       this.group.add(tetherGroup);
     }
 
-    const dir = delta.clone().divideScalar(dist);
-    const mid = start.clone().addScaledVector(delta, 0.5);
-    const upY = new THREE.Vector3(0, 1, 0);
-    tetherGroup.position.copy(mid);
-    tetherGroup.quaternion.setFromUnitVectors(upY, dir);
+    const dir = this.tempDir.copy(delta).divideScalar(dist);
+    tetherGroup.position.copy(start).addScaledVector(delta, 0.5);
+    tetherGroup.quaternion.setFromUnitVectors(UP_Y, dir);
 
     const outer = tetherGroup.getObjectByName("tether_outer");
     if (outer) {
@@ -1371,6 +1537,326 @@ export class VfxSystem {
     const core = tetherGroup.getObjectByName("tether_core");
     if (core) {
       core.scale.set(0.42, dist, 0.42);
+    }
+    const hookHead = tetherGroup.getObjectByName("grapple_hook_head");
+    if (hookHead) {
+      hookHead.position.set(0, dist * 0.5, 0);
+    }
+  }
+
+  /** Emit a crisp emerald/gold metallic latch spark burst + small shock ring when a grappling hook locks onto rock or an Evo Pod. */
+  public spawnGrappleLatchSpark(position: Vec3): void {
+    const px = Number.isFinite(position.x) ? position.x : 0;
+    const py = Number.isFinite(position.y) ? position.y : 0;
+    const pz = Number.isFinite(position.z) ? position.z : 0;
+
+    const ringMat = new THREE.MeshBasicMaterial({
+      color: 0x6ee7b7,
+      transparent: true,
+      opacity: 0.94,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    });
+    const ringMesh = new THREE.Mesh(this.sharedGeos.shockRing, ringMat);
+    ringMesh.position.set(px, py + 0.35, pz);
+    ringMesh.rotation.x = Math.PI * 0.5;
+    this.particleGroup.add(ringMesh);
+    this.particles.push({
+      mesh: ringMesh,
+      material: ringMat,
+      velocity: new THREE.Vector3(0, 0.15, 0),
+      spin: new THREE.Vector3(0, 0, 0),
+      gravity: 0,
+      age: 0,
+      maxAge: 0.34,
+      startScale: 0.25,
+      endScale: 1.38,
+      baseScaleVec: new THREE.Vector3(1, 1, 1),
+      baseOpacity: 0.94,
+      kind: "shockwave",
+    });
+
+    this.emitSpriteFromPool(this.glowSpritePool, {
+      x: px,
+      y: py + 0.35,
+      z: pz,
+      vx: 0,
+      vy: 0.2,
+      vz: 0,
+      gravity: 0,
+      maxAge: 0.22,
+      startScale: 0.65,
+      endScale: 1.45,
+      colorHex: 0xfde047,
+      baseOpacity: 0.9,
+      rotationSpeed: 0,
+    });
+
+    for (let i = 0; i < 12; i++) {
+      const a = (i / 12) * Math.PI * 2 + this.nextRand() * 0.35;
+      const spd = 2.8 + this.nextRand() * 4.2;
+      this.emitInstanceFromPool(this.sparkPool, {
+        x: px,
+        y: py + 0.35,
+        z: pz,
+        vx: Math.cos(a) * spd,
+        vy: 2.0 + this.nextRand() * 3.4,
+        vz: Math.sin(a) * spd,
+        spinX: 9,
+        spinY: 11,
+        spinZ: 8,
+        gravity: 11.5,
+        maxAge: 0.28 + this.nextRand() * 0.2,
+        startScale: 1.15,
+        endScale: 0.1,
+        sx: 1,
+        sy: 1,
+        sz: 1,
+        colorHex: i % 3 === 0 ? 0xfde047 : i % 2 === 0 ? 0x34d399 : 0x6ee7b7,
+      });
+    }
+  }
+
+  /** Spray jagged rock shards, hot orange drill sparks, and warm dust plumes backward out of a Burrow Bore tunnel. */
+  public spawnBoreDebris(position: Vec3, direction: Vec3): void {
+    const px = Number.isFinite(position.x) ? position.x : 0;
+    const py = Number.isFinite(position.y) ? position.y : 0;
+    const pz = Number.isFinite(position.z) ? position.z : 0;
+
+    const dir = this.resolveUnitDirection(direction, this.tempDir);
+    buildOrthonormalBasis(dir, this.tempRight, this.tempUp);
+
+    // Pooled jagged rock chips ejected backward (-dir + radial spray)
+    for (let i = 0; i < 7; i++) {
+      const pool = i % 2 === 0 ? this.dodecaShardPool : this.tetraShardPool;
+      const colorHex =
+        ROCK_SHARD_PALETTE[i % ROCK_SHARD_PALETTE.length] ?? 0x9a5938;
+      const angle = (i / 7) * Math.PI * 2 + this.nextRand() * 0.5;
+      const radial = 0.28 + this.nextRand() * 0.58;
+      const speed = 3.8 + this.nextRand() * 4.6;
+      const cosA = Math.cos(angle) * radial;
+      const sinA = Math.sin(angle) * radial;
+      const vx = (-dir.x + this.tempRight.x * cosA + this.tempUp.x * sinA) * speed;
+      const vy =
+        (-dir.y + this.tempRight.y * cosA + this.tempUp.y * sinA) * speed + 1.6;
+      const vz = (-dir.z + this.tempRight.z * cosA + this.tempUp.z * sinA) * speed;
+
+      this.emitInstanceFromPool(pool, {
+        x: px - dir.x * 0.25,
+        y: py - dir.y * 0.25,
+        z: pz - dir.z * 0.25,
+        vx,
+        vy,
+        vz,
+        spinX: (this.nextRand() - 0.5) * 18,
+        spinY: (this.nextRand() - 0.5) * 18,
+        spinZ: (this.nextRand() - 0.5) * 18,
+        gravity: 17.5,
+        maxAge: 0.52 + this.nextRand() * 0.34,
+        startScale: 0.72,
+        endScale: 0.1,
+        sx: 0.55 + this.nextRand() * 0.65,
+        sy: 0.45 + this.nextRand() * 0.55,
+        sz: 0.5 + this.nextRand() * 0.6,
+        colorHex,
+      });
+    }
+
+    // Bright hot orange/gold auger friction sparks spraying backward
+    for (let i = 0; i < 9; i++) {
+      const angle = this.nextRand() * Math.PI * 2;
+      const radial = 0.35 + this.nextRand() * 0.72;
+      const speed = 5.2 + this.nextRand() * 5.8;
+      const cosA = Math.cos(angle) * radial;
+      const sinA = Math.sin(angle) * radial;
+      const vx = (-dir.x + this.tempRight.x * cosA + this.tempUp.x * sinA) * speed;
+      const vy =
+        (-dir.y + this.tempRight.y * cosA + this.tempUp.y * sinA) * speed + 1.1;
+      const vz = (-dir.z + this.tempRight.z * cosA + this.tempUp.z * sinA) * speed;
+
+      this.emitInstanceFromPool(this.sparkPool, {
+        x: px - dir.x * 0.2,
+        y: py - dir.y * 0.2,
+        z: pz - dir.z * 0.2,
+        vx,
+        vy,
+        vz,
+        spinX: 12,
+        spinY: 14,
+        spinZ: 10,
+        gravity: 12.0,
+        maxAge: 0.26 + this.nextRand() * 0.22,
+        startScale: 1.15,
+        endScale: 0.1,
+        sx: 1,
+        sy: 1,
+        sz: 1,
+        colorHex: i % 3 === 0 ? 0xfde047 : 0xff7b1a,
+      });
+    }
+
+    // Warm earthen rock-dust plumes billowing out of the bore hole
+    for (let i = 0; i < 4; i++) {
+      const angle = (i / 4) * Math.PI * 2 + this.nextRand() * 0.6;
+      const radial = 0.35 + this.nextRand() * 0.35;
+      const speed = 1.6 + this.nextRand() * 1.4;
+      const cosA = Math.cos(angle) * radial;
+      const sinA = Math.sin(angle) * radial;
+
+      this.emitSpriteFromPool(this.smokeSpritePool, {
+        x: px - dir.x * 0.35,
+        y: py - dir.y * 0.35,
+        z: pz - dir.z * 0.35,
+        vx: (-dir.x + this.tempRight.x * cosA + this.tempUp.x * sinA) * speed,
+        vy:
+          (-dir.y + this.tempRight.y * cosA + this.tempUp.y * sinA) * speed + 0.9,
+        vz: (-dir.z + this.tempRight.z * cosA + this.tempUp.z * sinA) * speed,
+        gravity: -0.35,
+        maxAge: 0.55 + this.nextRand() * 0.3,
+        startScale: 0.55,
+        endScale: 1.85,
+        colorHex: i % 2 === 0 ? 0xc7a37e : 0x9e8268,
+        baseOpacity: 0.5,
+        rotationSpeed: (this.nextRand() - 0.5) * 1.4,
+      });
+    }
+  }
+
+  /**
+   * Spawn a directional Gale Scatter wind-shotgun blast along `direction`:
+   * 4 staggered expanding white-cyan/rose wind-gust torus rings calibrated to GALE_SCATTER_CONE_MIN_DOT,
+   * 16 high-speed diverging air-streak sparks, and 6 swirling mist/dust puffs.
+   */
+  public spawnWindShotgunBlast(
+    origin: Vec3,
+    direction: Vec3,
+    reach = GALE_SCATTER_REACH,
+  ): void {
+    const ox = Number.isFinite(origin.x) ? origin.x : 0;
+    const oy = Number.isFinite(origin.y) ? origin.y : 0;
+    const oz = Number.isFinite(origin.z) ? origin.z : 0;
+    const safeReach =
+      Number.isFinite(reach) && reach > 0.5 ? reach : GALE_SCATTER_REACH;
+
+    const dir = this.resolveUnitDirection(direction, this.tempDir);
+    buildOrthonormalBasis(dir, this.tempRight, this.tempUp);
+
+    const ringQuat = this.tempQuat.setFromUnitVectors(FORWARD_Z, dir);
+    const ringColors: readonly number[] = [0xe0faff, 0x7ef9ff, 0xfda4af, 0xf8fafc];
+
+    // 4 staggered expanding wind-gust torus rings rushing forward across the scatter cone
+    for (let i = 0; i < 4; i++) {
+      const frac = i / 3;
+      const maxAge = 0.22 + frac * 0.2;
+      const travelDist = safeReach * (0.5 + frac * 0.5);
+      const speed = travelDist / maxAge;
+      const coneEndRadius = travelDist * GALE_SCATTER_CONE_TAN;
+      const ringMat = new THREE.MeshBasicMaterial({
+        color: ringColors[i] ?? 0xe0faff,
+        transparent: true,
+        opacity: 0.8 - frac * 0.12,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+      });
+      const ringMesh = new THREE.Mesh(this.sharedGeos.shockRing, ringMat);
+      ringMesh.position.set(
+        ox + dir.x * (0.35 + frac * 0.4),
+        oy + dir.y * (0.35 + frac * 0.4),
+        oz + dir.z * (0.35 + frac * 0.4),
+      );
+      ringMesh.quaternion.copy(ringQuat);
+      this.particleGroup.add(ringMesh);
+      this.particles.push({
+        mesh: ringMesh,
+        material: ringMat,
+        velocity: new THREE.Vector3(dir.x * speed, dir.y * speed, dir.z * speed),
+        spin: new THREE.Vector3(0, 0, 0),
+        gravity: 0,
+        age: 0,
+        maxAge,
+        startScale: 0.38 + frac * 0.16,
+        endScale: Math.max(1.25, coneEndRadius * 2.0),
+        baseScaleVec: new THREE.Vector3(1, 1, 1),
+        baseOpacity: 0.8 - frac * 0.12,
+        kind: "shockwave",
+      });
+    }
+
+    // Bright directional wind-muzzle flash sprite at blast mouth
+    this.emitSpriteFromPool(this.glowSpritePool, {
+      x: ox + dir.x * 0.45,
+      y: oy + dir.y * 0.45,
+      z: oz + dir.z * 0.45,
+      vx: dir.x * 2.2,
+      vy: dir.y * 2.2,
+      vz: dir.z * 2.2,
+      gravity: 0,
+      maxAge: 0.2,
+      startScale: 0.85,
+      endScale: 2.1,
+      colorHex: 0xbef8ff,
+      baseOpacity: 0.78,
+      rotationSpeed: 0,
+    });
+
+    // 16 high-speed diverging air-streak sparks fanning across the forward cone
+    for (let i = 0; i < 16; i++) {
+      const angle = (i / 16) * Math.PI * 2 + this.nextRand() * 0.32;
+      const radialMag = (0.18 + this.nextRand() * 0.82) * GALE_SCATTER_CONE_TAN;
+      const cosA = Math.cos(angle) * radialMag;
+      const sinA = Math.sin(angle) * radialMag;
+      const rawX = dir.x + this.tempRight.x * cosA + this.tempUp.x * sinA;
+      const rawY = dir.y + this.tempRight.y * cosA + this.tempUp.y * sinA;
+      const rawZ = dir.z + this.tempRight.z * cosA + this.tempUp.z * sinA;
+      const norm = Math.hypot(rawX, rawY, rawZ) || 1;
+      const speed = 13.5 + this.nextRand() * 11.5;
+
+      this.emitInstanceFromPool(this.sparkPool, {
+        x: ox + dir.x * 0.35,
+        y: oy + dir.y * 0.35,
+        z: oz + dir.z * 0.35,
+        vx: (rawX / norm) * speed,
+        vy: (rawY / norm) * speed,
+        vz: (rawZ / norm) * speed,
+        spinX: 6,
+        spinY: 8,
+        spinZ: 7,
+        gravity: 0.6,
+        maxAge: 0.2 + this.nextRand() * 0.18,
+        startScale: 1.2,
+        endScale: 0.14,
+        sx: 0.75,
+        sy: 0.75,
+        sz: 1.9,
+        colorHex:
+          i % 4 === 0 ? 0xfda4af : i % 2 === 0 ? 0xffffff : 0x7ef9ff,
+      });
+    }
+
+    // 6 swirling wind mist/dust puffs fanning across the forward cone
+    for (let i = 0; i < 6; i++) {
+      const angle = (i / 6) * Math.PI * 2 + this.nextRand() * 0.5;
+      const radialMag = (0.25 + this.nextRand() * 0.65) * GALE_SCATTER_CONE_TAN;
+      const cosA = Math.cos(angle) * radialMag;
+      const sinA = Math.sin(angle) * radialMag;
+      const speed = 6.5 + this.nextRand() * 5.2;
+
+      this.emitSpriteFromPool(this.smokeSpritePool, {
+        x: ox + dir.x * 0.55,
+        y: oy + dir.y * 0.55,
+        z: oz + dir.z * 0.55,
+        vx: (dir.x + this.tempRight.x * cosA + this.tempUp.x * sinA) * speed,
+        vy:
+          (dir.y + this.tempRight.y * cosA + this.tempUp.y * sinA) * speed + 0.45,
+        vz: (dir.z + this.tempRight.z * cosA + this.tempUp.z * sinA) * speed,
+        gravity: -0.4,
+        maxAge: 0.36 + this.nextRand() * 0.2,
+        startScale: 0.65,
+        endScale: 2.25,
+        colorHex: i % 3 === 0 ? 0xffe4e6 : 0xe8fcff,
+        baseOpacity: 0.44,
+        rotationSpeed: (this.nextRand() - 0.5) * 2.2,
+      });
     }
   }
 
@@ -1643,15 +2129,150 @@ export class VfxSystem {
     }
   }
 
-  /** Position the glowing artillery shell + comet halo and emit pooled comet sparks & soft trail puffs. */
+  /**
+   * Position the active 3D projectile visual (Gale Mortar black bomb, Seeker Firefly GPS missile + lock beam,
+   * Burrow Bore spinning auger drill, or glowing comet orb) and emit gadget-specific trails.
+   */
   public setProjectileVisual(
     position: Vec3 | null,
     gadgetColor?: number,
+    options?: ProjectileVisualOptions,
   ): void {
     if (!position) {
       this.projectileGroup.visible = false;
+      this.bombGroup.visible = false;
+      this.missileGroup.visible = false;
+      this.drillGroup.visible = false;
+      this.gpsLockBeam.visible = false;
       this.lastProjectilePos = null;
       this.trailEmitCounter = 0;
+      this.drillIsBoring = false;
+      this.bombRotatedThisTick = false;
+      this.drillSpunThisTick = false;
+      return;
+    }
+
+    const px = Number.isFinite(position.x) ? position.x : 0;
+    const py = Number.isFinite(position.y) ? position.y : 0;
+    const pz = Number.isFinite(position.z) ? position.z : 0;
+    const safeDt =
+      options?.dtSec !== undefined && Number.isFinite(options.dtSec)
+        ? Math.max(0, Math.min(options.dtSec, 0.1))
+        : 0;
+    const gadgetId = options?.gadgetId;
+
+    // Infer fallback travel direction from previous position if caller omitted direction
+    let fallbackDir: THREE.Vector3 | undefined;
+    if (this.lastProjectilePos) {
+      this.tempVec.set(
+        px - this.lastProjectilePos.x,
+        py - this.lastProjectilePos.y,
+        pz - this.lastProjectilePos.z,
+      );
+      if (this.tempVec.lengthSq() > 1e-5) {
+        fallbackDir = this.tempVec.normalize();
+      }
+    }
+
+    const movedEnough =
+      !this.lastProjectilePos ||
+      this.lastProjectilePos.distanceToSquared(
+        this.tempOrigin.set(px, py, pz),
+      ) > 0.04;
+
+    this.projectileGroup.visible = false;
+    this.bombGroup.visible = false;
+    this.missileGroup.visible = false;
+    this.drillGroup.visible = false;
+    this.gpsLockBeam.visible = false;
+
+    if (gadgetId === "gale_mortar") {
+      this.bombGroup.visible = true;
+      this.bombGroup.position.set(px, py, pz);
+      if (safeDt > 0) {
+        this.bombGroup.rotation.x += safeDt * 6.5;
+        this.bombGroup.rotation.z += safeDt * 4.2;
+        this.flamePhase += safeDt * 24.0;
+        this.bombRotatedThisTick = true;
+      }
+      const flicker = 0.56 + Math.sin(this.flamePhase) * 0.14;
+      this.bombFlameSprite.scale.set(flicker, flicker * 1.12, 1);
+      this.bombFlameCoreSprite.scale.set(flicker * 0.52, flicker * 0.58, 1);
+
+      if (movedEnough) {
+        this.spawnBombTrail(px, py, pz);
+        this.lastProjectilePos = new THREE.Vector3(px, py, pz);
+      }
+      return;
+    }
+
+    if (gadgetId === "seeker_firefly") {
+      const dir = this.resolveUnitDirection(
+        options?.direction,
+        this.tempDir,
+        fallbackDir ?? this.lastProjectileDir,
+      );
+      this.lastProjectileDir.copy(dir);
+      this.missileGroup.visible = true;
+      this.missileGroup.position.set(px, py, pz);
+      this.missileGroup.quaternion.setFromUnitVectors(UP_Y, dir);
+
+      const target = options?.targetPos;
+      if (
+        target &&
+        Number.isFinite(target.x) &&
+        Number.isFinite(target.y) &&
+        Number.isFinite(target.z)
+      ) {
+        const noseStart = this.tempOrigin.set(
+          px + dir.x * 0.56,
+          py + dir.y * 0.56,
+          pz + dir.z * 0.56,
+        );
+        const lockEnd = this.tempTarget.set(target.x, target.y, target.z);
+        const beamDelta = this.tempVec.subVectors(lockEnd, noseStart);
+        const beamLen = beamDelta.length();
+        if (Number.isFinite(beamLen) && beamLen > 0.12) {
+          this.gpsLockBeam.visible = true;
+          this.gpsLockBeam.position
+            .copy(noseStart)
+            .addScaledVector(beamDelta, 0.5);
+          beamDelta.divideScalar(beamLen);
+          this.gpsLockBeam.quaternion.setFromUnitVectors(UP_Y, beamDelta);
+          this.gpsLockBeam.scale.set(1, beamLen, 1);
+        }
+      }
+
+      if (movedEnough) {
+        this.spawnMissileTrail(px, py, pz, dir);
+        this.lastProjectilePos = new THREE.Vector3(px, py, pz);
+      }
+      return;
+    }
+
+    if (gadgetId === "burrow_bore") {
+      const dir = this.resolveUnitDirection(
+        options?.direction,
+        this.tempDir,
+        fallbackDir ?? this.lastProjectileDir,
+      );
+      this.lastProjectileDir.copy(dir);
+      this.drillIsBoring = Boolean(options?.boring);
+      this.drillGroup.visible = true;
+      this.drillGroup.position.set(px, py, pz);
+      this.drillGroup.quaternion.setFromUnitVectors(UP_Y, dir);
+      if (safeDt > 0) {
+        const spinRate = this.drillIsBoring ? 55 : 28;
+        this.drillSpinPivot.rotation.y += safeDt * spinRate;
+        this.drillSpunThisTick = true;
+      }
+      const thrustScale = this.drillIsBoring ? 1.18 : 0.72;
+      this.drillThrusterSprite.scale.set(thrustScale, thrustScale, 1);
+
+      if (movedEnough) {
+        this.spawnDrillTrail(px, py, pz, dir, this.drillIsBoring);
+        this.lastProjectilePos = new THREE.Vector3(px, py, pz);
+      }
       return;
     }
 
@@ -1662,25 +2283,32 @@ export class VfxSystem {
     this.projectileHalo.material.color.setHex(color);
 
     this.projectileGroup.visible = true;
-    this.projectileGroup.position.set(position.x, position.y, position.z);
+    this.projectileGroup.position.set(px, py, pz);
 
-    if (
-      !this.lastProjectilePos ||
-      this.lastProjectilePos.distanceToSquared(this.projectileGroup.position) > 0.04
-    ) {
-      this.spawnProjectileSpark(position, color);
-      this.lastProjectilePos = this.projectileGroup.position.clone();
+    if (movedEnough) {
+      this.spawnProjectileSpark({ x: px, y: py, z: pz }, color);
+      this.lastProjectilePos = new THREE.Vector3(px, py, pz);
     }
   }
 
-  /** Show or hide the glowing cyan Drone Recon ground target ring. */
-  public setDronePing(position: Vec3 | null): void {
+  /** Show or hide the glowing cyan Drone Recon ground target ring, or animated GPS target-lock crosshair when `lockedMode` is true. */
+  public setDronePing(position: Vec3 | null, lockedMode?: boolean): void {
     if (!position) {
       this.dronePingGroup.visible = false;
+      this.droneLockMode = false;
+      this.droneLockReticleGroup.visible = false;
       return;
     }
+    const px = Number.isFinite(position.x) ? position.x : 0;
+    const py = Number.isFinite(position.y) ? position.y : 0;
+    const pz = Number.isFinite(position.z) ? position.z : 0;
     this.dronePingGroup.visible = true;
-    this.dronePingGroup.position.set(position.x, position.y, position.z);
+    this.dronePingGroup.position.set(px, py, pz);
+
+    this.droneLockMode = Boolean(lockedMode);
+    this.droneLockReticleGroup.visible = this.droneLockMode;
+    this.droneOuterRing.visible = !this.droneLockMode;
+    this.droneInnerRing.visible = !this.droneLockMode;
   }
 
   /** Advance active VFX particle lifetimes, pooled shards/sprites, sunlit pollen drift, and cleanup. */
@@ -1773,10 +2401,53 @@ export class VfxSystem {
       this.projectileHalo.scale.set(haloPulse, haloPulse, 1);
     }
 
+    if (this.bombGroup.visible) {
+      if (!this.bombRotatedThisTick) {
+        this.bombGroup.rotation.x += safeDt * 6.5;
+        this.bombGroup.rotation.z += safeDt * 4.2;
+      }
+      this.bombRotatedThisTick = false;
+      const flicker = 0.56 + Math.sin(t * 28.0) * 0.14 + Math.cos(t * 41.0) * 0.06;
+      this.bombFlameSprite.scale.set(flicker, flicker * 1.15, 1);
+      this.bombFlameCoreSprite.scale.set(flicker * 0.5, flicker * 0.56, 1);
+    }
+
+    if (this.missileGroup.visible) {
+      const thrustPulse = 0.74 + Math.sin(t * 26.0) * 0.16;
+      this.missileThrusterSprite.scale.set(thrustPulse, thrustPulse, 1);
+      if (
+        this.gpsLockBeam.visible &&
+        this.gpsLockBeam.material instanceof THREE.MeshBasicMaterial
+      ) {
+        this.gpsLockBeam.material.opacity = 0.3 + Math.sin(t * 14.0) * 0.12;
+      }
+    }
+
+    if (this.drillGroup.visible) {
+      if (!this.drillSpunThisTick) {
+        const spinRate = this.drillIsBoring ? 55 : 28;
+        this.drillSpinPivot.rotation.y += safeDt * spinRate;
+      }
+      this.drillSpunThisTick = false;
+      const baseThrust = this.drillIsBoring ? 1.15 : 0.72;
+      const drillPulse = baseThrust + Math.sin(t * 24.0) * 0.14;
+      this.drillThrusterSprite.scale.set(drillPulse, drillPulse, 1);
+    }
+
     if (this.dronePingGroup.visible) {
-      const pulse = 1.0 + Math.sin(t * 5.2) * 0.12;
-      this.droneOuterRing.scale.set(pulse, pulse, 1);
-      this.droneInnerRing.rotation.z = t * 2.4;
+      if (this.droneLockMode && this.droneLockReticleGroup.visible) {
+        this.droneLockReticleGroup.rotation.y += safeDt * 2.6;
+        const lockPulse = 0.5 + 0.5 * Math.sin(t * 9.0);
+        const innerScale = 0.88 + lockPulse * 0.24;
+        this.droneLockInnerRing.scale.set(innerScale, innerScale, 1);
+        this.droneLockInnerMat.color
+          .copy(GPS_LOCK_CYAN)
+          .lerp(GPS_LOCK_CRIMSON, lockPulse);
+      } else {
+        const pulse = 1.0 + Math.sin(t * 5.2) * 0.12;
+        this.droneOuterRing.scale.set(pulse, pulse, 1);
+        this.droneInnerRing.rotation.z = t * 2.4;
+      }
     }
   }
 
@@ -1795,11 +2466,7 @@ export class VfxSystem {
       const child = this.group.children[i];
       if (child && child.userData.isGrappleTether === true) {
         this.group.remove(child);
-        child.traverse((obj) => {
-          if (obj instanceof THREE.Mesh) {
-            disposeMaterial(obj.material);
-          }
-        });
+        disposeObjectMaterialsOnly(child);
       }
     }
 
@@ -1827,6 +2494,10 @@ export class VfxSystem {
     this.group.remove(this.pollenPoints);
 
     disposeObjectTree(this.projectileGroup);
+    disposeObjectTree(this.bombGroup);
+    disposeObjectTree(this.missileGroup);
+    disposeObjectTree(this.drillGroup);
+    disposeObjectTree(this.gpsLockBeam);
     disposeObjectTree(this.dronePingGroup);
 
     for (const mat of this.shardPaletteMaterials) {
@@ -1841,6 +2512,10 @@ export class VfxSystem {
     this.sharedGeos.spark.dispose();
     this.sharedGeos.ribbon.dispose();
     this.sharedGeos.grappleBeam.dispose();
+    this.sharedGeos.hookCollar.dispose();
+    this.sharedGeos.hookShankRing.dispose();
+    this.sharedGeos.hookProngCurve.dispose();
+    this.sharedGeos.hookProngTip.dispose();
 
     this.glowTexture.dispose();
     this.smokeTexture.dispose();
@@ -2391,6 +3066,672 @@ export class VfxSystem {
     group.add(groundPoolMesh);
 
     return { group, podCore, parachuteGroup, beaconMesh, groundPoolMesh };
+  }
+
+  private resolveUnitDirection(
+    direction: Vec3 | undefined,
+    out: THREE.Vector3,
+    fallback?: THREE.Vector3,
+  ): THREE.Vector3 {
+    if (
+      direction &&
+      Number.isFinite(direction.x) &&
+      Number.isFinite(direction.y) &&
+      Number.isFinite(direction.z)
+    ) {
+      const len = Math.hypot(direction.x, direction.y, direction.z);
+      if (len > 1e-5) {
+        return out.set(direction.x / len, direction.y / len, direction.z / len);
+      }
+    }
+    if (fallback && fallback.lengthSq() > 1e-8) {
+      return out.copy(fallback).normalize();
+    }
+    return out.set(0, 1, 0);
+  }
+
+  private createBombVisual(): {
+    group: THREE.Group;
+    flameSprite: THREE.Sprite;
+    flameCoreSprite: THREE.Sprite;
+  } {
+    const group = new THREE.Group();
+    group.name = "vfx_projectile_bomb";
+
+    const ironBody = new THREE.Mesh(
+      new THREE.SphereGeometry(0.28, 18, 14),
+      new THREE.MeshStandardMaterial({
+        color: 0x1c1f26,
+        emissive: 0x141822,
+        emissiveIntensity: 0.28,
+        roughness: 0.42,
+        metalness: 0.55,
+      }),
+    );
+    ironBody.name = "bomb_body";
+    ironBody.castShadow = true;
+    group.add(ironBody);
+
+    const castSeam = new THREE.Mesh(
+      new THREE.TorusGeometry(0.282, 0.015, 6, 22),
+      new THREE.MeshStandardMaterial({
+        color: 0x2d3340,
+        roughness: 0.35,
+        metalness: 0.68,
+      }),
+    );
+    castSeam.rotation.x = Math.PI * 0.5;
+    group.add(castSeam);
+
+    const fuseCollar = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.088, 0.108, 0.085, 12),
+      new THREE.MeshStandardMaterial({
+        color: 0xd97706,
+        emissive: 0x451a03,
+        emissiveIntensity: 0.2,
+        roughness: 0.3,
+        metalness: 0.72,
+      }),
+    );
+    fuseCollar.name = "bomb_fuse_collar";
+    fuseCollar.position.y = 0.27;
+    group.add(fuseCollar);
+
+    const wickCurve = new THREE.CatmullRomCurve3([
+      new THREE.Vector3(0, 0.3, 0),
+      new THREE.Vector3(0.04, 0.4, 0.02),
+      new THREE.Vector3(0.12, 0.47, 0.05),
+      new THREE.Vector3(
+        this.bombWickTipLocal.x,
+        this.bombWickTipLocal.y,
+        this.bombWickTipLocal.z,
+      ),
+    ]);
+    const wickMesh = new THREE.Mesh(
+      new THREE.TubeGeometry(wickCurve, 12, 0.026, 6, false),
+      new THREE.MeshStandardMaterial({
+        color: 0xa38255,
+        roughness: 0.9,
+        metalness: 0.02,
+      }),
+    );
+    wickMesh.name = "bomb_wick";
+    group.add(wickMesh);
+
+    const wickEmber = new THREE.Mesh(
+      new THREE.SphereGeometry(0.032, 8, 6),
+      new THREE.MeshStandardMaterial({
+        color: 0xff6b1a,
+        emissive: 0xff4500,
+        emissiveIntensity: 1.9,
+        roughness: 0.2,
+      }),
+    );
+    wickEmber.position.copy(this.bombWickTipLocal);
+    group.add(wickEmber);
+
+    const flameSprite = new THREE.Sprite(
+      new THREE.SpriteMaterial({
+        map: this.glowTexture,
+        color: 0xff9922,
+        transparent: true,
+        opacity: 0.95,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+      }),
+    );
+    flameSprite.name = "bomb_wick_flame";
+    flameSprite.position.set(
+      this.bombWickTipLocal.x,
+      this.bombWickTipLocal.y + 0.02,
+      this.bombWickTipLocal.z,
+    );
+    flameSprite.scale.set(0.58, 0.64, 1);
+    group.add(flameSprite);
+
+    const flameCoreSprite = new THREE.Sprite(
+      new THREE.SpriteMaterial({
+        map: this.glowTexture,
+        color: 0xfde047,
+        transparent: true,
+        opacity: 0.98,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+      }),
+    );
+    flameCoreSprite.name = "bomb_wick_flame_core";
+    flameCoreSprite.position.copy(flameSprite.position);
+    flameCoreSprite.scale.set(0.3, 0.34, 1);
+    group.add(flameCoreSprite);
+
+    return { group, flameSprite, flameCoreSprite };
+  }
+
+  private createMissileVisual(): {
+    group: THREE.Group;
+    thrusterSprite: THREE.Sprite;
+  } {
+    const group = new THREE.Group();
+    group.name = "vfx_projectile_missile";
+
+    const fuselage = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.102, 0.114, 0.62, 14),
+      new THREE.MeshStandardMaterial({
+        color: 0xe2e8f0,
+        roughness: 0.26,
+        metalness: 0.42,
+      }),
+    );
+    fuselage.name = "missile_fuselage";
+    fuselage.castShadow = true;
+    group.add(fuselage);
+
+    const slateBand = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.112, 0.113, 0.095, 14),
+      new THREE.MeshStandardMaterial({
+        color: 0x334155,
+        roughness: 0.38,
+        metalness: 0.55,
+      }),
+    );
+    slateBand.position.y = -0.05;
+    group.add(slateBand);
+
+    const noseCone = new THREE.Mesh(
+      new THREE.ConeGeometry(0.102, 0.28, 14),
+      new THREE.MeshStandardMaterial({
+        color: 0xef4444,
+        emissive: 0x7f1d1d,
+        emissiveIntensity: 0.24,
+        roughness: 0.26,
+        metalness: 0.34,
+      }),
+    );
+    noseCone.name = "missile_nose";
+    noseCone.position.y = 0.45;
+    group.add(noseCone);
+
+    const seekerRing = new THREE.Mesh(
+      new THREE.TorusGeometry(0.102, 0.022, 8, 20),
+      new THREE.MeshStandardMaterial({
+        color: 0x38f5ff,
+        emissive: 0x06b6d4,
+        emissiveIntensity: 1.85,
+        roughness: 0.18,
+        metalness: 0.2,
+      }),
+    );
+    seekerRing.name = "missile_gps_ring";
+    seekerRing.rotation.x = Math.PI * 0.5;
+    seekerRing.position.y = 0.31;
+    group.add(seekerRing);
+
+    const seekerDome = new THREE.Mesh(
+      new THREE.SphereGeometry(0.048, 10, 8),
+      new THREE.MeshBasicMaterial({ color: 0x7ef9ff }),
+    );
+    seekerDome.name = "missile_gps_dome";
+    seekerDome.position.y = 0.56;
+    group.add(seekerDome);
+
+    // 4 swept aerodynamic stabilizing tail fins (ExtrudeGeometry, zero BoxGeometry)
+    const finShape = new THREE.Shape();
+    finShape.moveTo(0.09, 0.14);
+    finShape.lineTo(0.27, -0.08);
+    finShape.lineTo(0.27, -0.2);
+    finShape.lineTo(0.09, -0.16);
+    finShape.closePath();
+
+    const finGeo = new THREE.ExtrudeGeometry(finShape, {
+      depth: 0.024,
+      bevelEnabled: false,
+    });
+    finGeo.translate(0, 0, -0.012);
+    const finMat = new THREE.MeshStandardMaterial({
+      color: 0x334155,
+      roughness: 0.38,
+      metalness: 0.55,
+    });
+    for (let i = 0; i < 4; i++) {
+      const fin = new THREE.Mesh(finGeo, finMat);
+      fin.name = `missile_fin_${i}`;
+      fin.position.y = -0.15;
+      fin.rotation.y = (i * Math.PI) / 2;
+      group.add(fin);
+    }
+
+    const nozzle = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.088, 0.064, 0.1, 12),
+      new THREE.MeshStandardMaterial({
+        color: 0x1e293b,
+        roughness: 0.42,
+        metalness: 0.68,
+      }),
+    );
+    nozzle.position.y = -0.35;
+    group.add(nozzle);
+
+    const thrusterCore = new THREE.Mesh(
+      new THREE.SphereGeometry(0.072, 10, 8),
+      new THREE.MeshBasicMaterial({ color: 0x38f5ff }),
+    );
+    thrusterCore.position.y = -0.4;
+    group.add(thrusterCore);
+
+    const thrusterSprite = new THREE.Sprite(
+      new THREE.SpriteMaterial({
+        map: this.glowTexture,
+        color: 0x38f5ff,
+        transparent: true,
+        opacity: 0.9,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+      }),
+    );
+    thrusterSprite.name = "missile_thruster_glow";
+    thrusterSprite.position.y = -0.46;
+    thrusterSprite.scale.set(0.76, 0.76, 1);
+    group.add(thrusterSprite);
+
+    return { group, thrusterSprite };
+  }
+
+  private createDrillVisual(): {
+    group: THREE.Group;
+    spinPivot: THREE.Group;
+    thrusterSprite: THREE.Sprite;
+  } {
+    const group = new THREE.Group();
+    group.name = "vfx_projectile_drill";
+
+    const spinPivot = new THREE.Group();
+    spinPivot.name = "vfx_drill_spin_pivot";
+    group.add(spinPivot);
+
+    const augerCone = new THREE.Mesh(
+      new THREE.ConeGeometry(0.18, 0.72, 16),
+      new THREE.MeshStandardMaterial({
+        color: 0x94a3b8,
+        roughness: 0.28,
+        metalness: 0.78,
+      }),
+    );
+    augerCone.name = "drill_auger_cone";
+    augerCone.position.y = 0.14;
+    augerCone.castShadow = true;
+    spinPivot.add(augerCone);
+
+    const hotTip = new THREE.Mesh(
+      new THREE.ConeGeometry(0.064, 0.18, 12),
+      new THREE.MeshStandardMaterial({
+        color: 0xf97316,
+        emissive: 0xff6b00,
+        emissiveIntensity: 1.55,
+        roughness: 0.22,
+        metalness: 0.45,
+      }),
+    );
+    hotTip.name = "drill_tip";
+    hotTip.position.y = 0.48;
+    spinPivot.add(hotTip);
+
+    // Sculpted 2.5-turn helical spiral auger flute wrapping the tapered cone
+    const helixPts: THREE.Vector3[] = [];
+    const helixSteps = 26;
+    for (let i = 0; i <= helixSteps; i++) {
+      const u = i / helixSteps;
+      const y = -0.18 + u * 0.6;
+      const radius = 0.185 * (1 - u) + 0.052 * u;
+      const theta = u * Math.PI * 5.0;
+      helixPts.push(
+        new THREE.Vector3(Math.cos(theta) * radius, y, Math.sin(theta) * radius),
+      );
+    }
+    const helixCurve = new THREE.CatmullRomCurve3(helixPts);
+    const helixFlute = new THREE.Mesh(
+      new THREE.TubeGeometry(helixCurve, 36, 0.024, 6, false),
+      new THREE.MeshStandardMaterial({
+        color: 0xcbd5e1,
+        emissive: 0xf97316,
+        emissiveIntensity: 0.45,
+        roughness: 0.26,
+        metalness: 0.8,
+      }),
+    );
+    helixFlute.name = "drill_helix_flute";
+    spinPivot.add(helixFlute);
+
+    // 3 tilted glowing auger bands reinforcing rapid rotational readability
+    const bandMat = new THREE.MeshStandardMaterial({
+      color: 0xf97316,
+      emissive: 0xea580c,
+      emissiveIntensity: 1.15,
+      roughness: 0.28,
+      metalness: 0.52,
+    });
+    const bandConfigs: ReadonlyArray<readonly [number, number]> = [
+      [-0.1, 0.175],
+      [0.08, 0.14],
+      [0.26, 0.1],
+    ];
+    for (let i = 0; i < bandConfigs.length; i++) {
+      const cfg = bandConfigs[i];
+      if (!cfg) continue;
+      const band = new THREE.Mesh(
+        new THREE.TorusGeometry(cfg[1], 0.02, 6, 18),
+        bandMat,
+      );
+      band.position.y = cfg[0];
+      band.rotation.x = Math.PI * 0.5 + 0.22;
+      band.rotation.y = (i * Math.PI) / 3;
+      spinPivot.add(band);
+    }
+
+    const rearCollar = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.19, 0.175, 0.14, 14),
+      new THREE.MeshStandardMaterial({
+        color: 0x334155,
+        roughness: 0.4,
+        metalness: 0.72,
+      }),
+    );
+    rearCollar.name = "drill_collar";
+    rearCollar.position.y = -0.26;
+    spinPivot.add(rearCollar);
+
+    const tailThruster = new THREE.Mesh(
+      new THREE.ConeGeometry(0.11, 0.18, 12),
+      new THREE.MeshStandardMaterial({
+        color: 0xf97316,
+        emissive: 0xff7b1a,
+        emissiveIntensity: 1.6,
+        roughness: 0.2,
+      }),
+    );
+    tailThruster.position.y = -0.38;
+    tailThruster.rotation.x = Math.PI;
+    spinPivot.add(tailThruster);
+
+    const thrusterSprite = new THREE.Sprite(
+      new THREE.SpriteMaterial({
+        map: this.glowTexture,
+        color: 0xff8c24,
+        transparent: true,
+        opacity: 0.88,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+      }),
+    );
+    thrusterSprite.name = "drill_thruster_glow";
+    thrusterSprite.position.y = -0.46;
+    thrusterSprite.scale.set(0.75, 0.75, 1);
+    group.add(thrusterSprite);
+
+    return { group, spinPivot, thrusterSprite };
+  }
+
+  private createDroneLockReticle(): {
+    group: THREE.Group;
+    innerRing: THREE.Mesh;
+    innerMat: THREE.MeshBasicMaterial;
+  } {
+    const group = new THREE.Group();
+    group.name = "vfx_gps_lock_reticle";
+
+    const arcGeo = new THREE.TorusGeometry(1.12, 0.048, 8, 14, Math.PI * 0.34);
+    const arcMat = new THREE.MeshBasicMaterial({
+      color: 0xff3b5c,
+      transparent: true,
+      opacity: 0.92,
+      depthWrite: false,
+    });
+
+    const tickGeo = new THREE.CylinderGeometry(0.03, 0.03, 0.38, 8);
+    const tickMat = new THREE.MeshBasicMaterial({
+      color: 0x38f5ff,
+      transparent: true,
+      opacity: 0.96,
+      depthWrite: false,
+    });
+
+    for (let i = 0; i < 4; i++) {
+      const a = (i * Math.PI) / 2;
+
+      const arc = new THREE.Mesh(arcGeo, arcMat);
+      arc.name = `gps_lock_arc_${i}`;
+      arc.rotation.x = Math.PI * 0.5;
+      arc.rotation.z = a + 0.24;
+      arc.position.y = 0.14;
+      group.add(arc);
+
+      const tick = new THREE.Mesh(tickGeo, tickMat);
+      tick.name = `gps_lock_tick_${i}`;
+      tick.position.set(Math.cos(a) * 0.96, 0.16, Math.sin(a) * 0.96);
+      tick.rotation.z = Math.PI * 0.5;
+      tick.rotation.y = -a;
+      group.add(tick);
+    }
+
+    const innerMat = new THREE.MeshBasicMaterial({
+      color: 0x38f5ff,
+      transparent: true,
+      opacity: 0.94,
+      depthWrite: false,
+    });
+    const innerRing = new THREE.Mesh(
+      new THREE.TorusGeometry(0.54, 0.046, 8, 28),
+      innerMat,
+    );
+    innerRing.name = "gps_lock_inner_ring";
+    innerRing.rotation.x = Math.PI * 0.5;
+    innerRing.position.y = 0.16;
+    group.add(innerRing);
+
+    const centerPip = new THREE.Mesh(
+      new THREE.OctahedronGeometry(0.11, 0),
+      new THREE.MeshBasicMaterial({
+        color: 0xff3b5c,
+        transparent: true,
+        opacity: 0.92,
+        depthWrite: false,
+      }),
+    );
+    centerPip.name = "gps_lock_pip";
+    centerPip.position.y = 0.36;
+    group.add(centerPip);
+
+    return { group, innerRing, innerMat };
+  }
+
+  private spawnBombTrail(px: number, py: number, pz: number): void {
+    this.trailEmitCounter += 1;
+
+    // Emit burning wick ember sparks from rotated wick tip
+    this.tempVec
+      .copy(this.bombWickTipLocal)
+      .applyEuler(this.bombGroup.rotation)
+      .add(this.tempOrigin.set(px, py, pz));
+
+    for (let i = 0; i < 2; i++) {
+      this.emitInstanceFromPool(this.sparkPool, {
+        x: this.tempVec.x + (this.nextRand() - 0.5) * 0.08,
+        y: this.tempVec.y + (this.nextRand() - 0.5) * 0.08,
+        z: this.tempVec.z + (this.nextRand() - 0.5) * 0.08,
+        vx: (this.nextRand() - 0.5) * 2.2,
+        vy: 0.9 + this.nextRand() * 1.4,
+        vz: (this.nextRand() - 0.5) * 2.2,
+        spinX: 8,
+        spinY: 9,
+        spinZ: 7,
+        gravity: 5.5,
+        maxAge: 0.24 + this.nextRand() * 0.14,
+        startScale: 0.95,
+        endScale: 0.1,
+        sx: 1,
+        sy: 1,
+        sz: 1,
+        colorHex: i === 0 ? 0xfde047 : 0xff7b1a,
+      });
+    }
+
+    if (this.trailEmitCounter % 2 === 0) {
+      this.emitSpriteFromPool(this.smokeSpritePool, {
+        x: this.tempVec.x,
+        y: this.tempVec.y,
+        z: this.tempVec.z,
+        vx: (this.nextRand() - 0.5) * 0.45,
+        vy: 0.6 + this.nextRand() * 0.35,
+        vz: (this.nextRand() - 0.5) * 0.45,
+        gravity: -0.25,
+        maxAge: 0.46,
+        startScale: 0.36,
+        endScale: 1.05,
+        colorHex: 0x646b78,
+        baseOpacity: 0.36,
+        rotationSpeed: (this.nextRand() - 0.5) * 1.2,
+      });
+    }
+  }
+
+  private spawnMissileTrail(
+    px: number,
+    py: number,
+    pz: number,
+    dir: THREE.Vector3,
+  ): void {
+    this.trailEmitCounter += 1;
+    const tx = px - dir.x * 0.44;
+    const ty = py - dir.y * 0.44;
+    const tz = pz - dir.z * 0.44;
+
+    // Bright cyan/orange thruster sparks shooting behind the tail nozzle
+    this.emitInstanceFromPool(this.sparkPool, {
+      x: tx,
+      y: ty,
+      z: tz,
+      vx: -dir.x * 2.4 + (this.nextRand() - 0.5) * 0.9,
+      vy: -dir.y * 2.4 + (this.nextRand() - 0.5) * 0.9,
+      vz: -dir.z * 2.4 + (this.nextRand() - 0.5) * 0.9,
+      spinX: 6,
+      spinY: 7,
+      spinZ: 6,
+      gravity: 0.5,
+      maxAge: 0.24,
+      startScale: 1.05,
+      endScale: 0.1,
+      sx: 1,
+      sy: 1,
+      sz: 1,
+      colorHex: this.trailEmitCounter % 2 === 0 ? 0x38f5ff : 0xff9922,
+    });
+
+    this.emitSpriteFromPool(this.glowSpritePool, {
+      x: tx,
+      y: ty,
+      z: tz,
+      vx: -dir.x * 0.8,
+      vy: -dir.y * 0.8,
+      vz: -dir.z * 0.8,
+      gravity: 0,
+      maxAge: 0.18,
+      startScale: 0.58,
+      endScale: 0.14,
+      colorHex: 0x38f5ff,
+      baseOpacity: 0.72,
+      rotationSpeed: 0,
+    });
+
+    // Crisp billowing white smoke contrail puffs tracing the curved homing arc
+    this.emitSpriteFromPool(this.smokeSpritePool, {
+      x: tx,
+      y: ty,
+      z: tz,
+      vx: (this.nextRand() - 0.5) * 0.35,
+      vy: 0.25 + this.nextRand() * 0.25,
+      vz: (this.nextRand() - 0.5) * 0.35,
+      gravity: -0.18,
+      maxAge: 0.65,
+      startScale: 0.42,
+      endScale: 1.45,
+      colorHex: 0xf8fafc,
+      baseOpacity: 0.52,
+      rotationSpeed: (this.nextRand() - 0.5) * 1.0,
+    });
+  }
+
+  private spawnDrillTrail(
+    px: number,
+    py: number,
+    pz: number,
+    dir: THREE.Vector3,
+    boring: boolean,
+  ): void {
+    this.trailEmitCounter += 1;
+    const tx = px - dir.x * 0.42;
+    const ty = py - dir.y * 0.42;
+    const tz = pz - dir.z * 0.42;
+
+    if (boring) {
+      // Intense orange friction sparks + warm earthen rock-dust plumes while chewing through rock
+      for (let i = 0; i < 3; i++) {
+        this.emitInstanceFromPool(this.sparkPool, {
+          x: px + (this.nextRand() - 0.5) * 0.16,
+          y: py + (this.nextRand() - 0.5) * 0.16,
+          z: pz + (this.nextRand() - 0.5) * 0.16,
+          vx: -dir.x * 3.8 + (this.nextRand() - 0.5) * 3.2,
+          vy: -dir.y * 3.8 + 1.2 + this.nextRand() * 2.2,
+          vz: -dir.z * 3.8 + (this.nextRand() - 0.5) * 3.2,
+          spinX: 12,
+          spinY: 14,
+          spinZ: 10,
+          gravity: 11.5,
+          maxAge: 0.28 + this.nextRand() * 0.16,
+          startScale: 1.15,
+          endScale: 0.1,
+          sx: 1,
+          sy: 1,
+          sz: 1,
+          colorHex: i === 0 ? 0xfde047 : 0xf97316,
+        });
+      }
+
+      this.emitSpriteFromPool(this.smokeSpritePool, {
+        x: tx,
+        y: ty,
+        z: tz,
+        vx: -dir.x * 1.4 + (this.nextRand() - 0.5) * 1.1,
+        vy: -dir.y * 1.4 + 0.75 + this.nextRand() * 0.55,
+        vz: -dir.z * 1.4 + (this.nextRand() - 0.5) * 1.1,
+        gravity: -0.25,
+        maxAge: 0.52,
+        startScale: 0.52,
+        endScale: 1.65,
+        colorHex: this.trailEmitCounter % 2 === 0 ? 0xc7a37e : 0x9e8268,
+        baseOpacity: 0.48,
+        rotationSpeed: (this.nextRand() - 0.5) * 1.5,
+      });
+      return;
+    }
+
+    this.emitInstanceFromPool(this.sparkPool, {
+      x: tx,
+      y: ty,
+      z: tz,
+      vx: -dir.x * 1.8 + (this.nextRand() - 0.5) * 0.7,
+      vy: -dir.y * 1.8 + 0.2,
+      vz: -dir.z * 1.8 + (this.nextRand() - 0.5) * 0.7,
+      spinX: 8,
+      spinY: 9,
+      spinZ: 7,
+      gravity: 1.8,
+      maxAge: 0.24,
+      startScale: 0.95,
+      endScale: 0.1,
+      sx: 1,
+      sy: 1,
+      sz: 1,
+      colorHex: 0xf97316,
+    });
   }
 
   private nextRand(): number {
