@@ -112,6 +112,7 @@ export interface HudCallbacks {
   onUiFireStart?: () => void;
   onUiFireRelease?: () => void;
   onUiFireCancel?: () => void;
+  onDronePingCritter?: (critterId: string) => void;
 }
 
 /** Per-frame dynamic HUD input during an active match. */
@@ -873,6 +874,21 @@ export class HudController {
     this.droneMarkersEl = this.droneOverlay.querySelector(
       '[data-ref="drone-markers"]',
     ) as HTMLDivElement;
+    this.droneMarkersEl.addEventListener("mousedown", (e) => {
+      const target = e.target as HTMLElement | null;
+      if (target?.closest(".cs-dm-clickable")) {
+        e.stopPropagation();
+      }
+    });
+    this.droneMarkersEl.addEventListener("click", (e) => {
+      const target = e.target as HTMLElement | null;
+      const markerEl = target?.closest<HTMLElement>("[data-critter-id]");
+      const critterId = markerEl?.dataset.critterId;
+      if (critterId) {
+        e.stopPropagation();
+        this.callbacks.onDronePingCritter?.(critterId);
+      }
+    });
     this.droneBadgeEl = this.droneOverlay.querySelector(
       '[data-ref="drone-badge"]',
     ) as HTMLDivElement;
@@ -1422,7 +1438,14 @@ export class HudController {
       }
 
       const accentColor = m.isLocal ? "#facc15" : m.color;
-      el.className = `cs-drone-marker${m.isLocal ? " cs-dm-local" : ""}${m.isActiveTurn ? " cs-dm-active" : ""}${m.offscreen ? " cs-dm-offscreen" : ""}`;
+      el.className = `cs-drone-marker${m.isLocal ? " cs-dm-local" : " cs-dm-clickable"}${m.isActiveTurn ? " cs-dm-active" : ""}${m.offscreen ? " cs-dm-offscreen" : ""}`;
+      if (m.isLocal) {
+        delete el.dataset.critterId;
+        el.title = "";
+      } else {
+        el.dataset.critterId = m.id;
+        el.title = "Click to GPS-lock Seeker Firefly";
+      }
       el.style.setProperty("--dm-color", accentColor);
       el.style.transform = `translate3d(${m.screenX.toFixed(1)}px, ${m.screenY.toFixed(1)}px, 0) translate(-50%, -100%)`;
 

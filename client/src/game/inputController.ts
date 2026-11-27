@@ -7,7 +7,7 @@ export interface InputCallbacks {
   onUtility: () => void;
   onRetreatBurrow: () => void;
   onDroneNudge: (dir: Vec3) => void;
-  onDronePing: (point: Vec3) => void;
+  onDronePing: (point: Vec3 | null, rayOrigin: Vec3, rayDir: Vec3) => void;
   onSelectGadgetIndex: (index: number) => void;
   onToggleDrone: () => void;
   onFirstPersonChange: (active: boolean) => void;
@@ -924,9 +924,6 @@ export class InputController {
   }
 
   private tryDronePingRaycast(clientX: number, clientY: number): void {
-    if (this.raycastTargets.length === 0) {
-      return;
-    }
     const rect = this.canvas.getBoundingClientRect();
     if (rect.width <= 0 || rect.height <= 0) {
       return;
@@ -937,17 +934,31 @@ export class InputController {
     this.ndc.set(ndcX, ndcY);
 
     this.raycaster.setFromCamera(this.ndc, this.camera);
-    const hits = this.raycaster.intersectObjects(
-      this.raycastTargets as THREE.Object3D[],
-      true,
-    );
+    const hits =
+      this.raycastTargets.length > 0
+        ? this.raycaster.intersectObjects(
+            this.raycastTargets as THREE.Object3D[],
+            true,
+          )
+        : [];
     const firstHit = hits[0];
-    if (firstHit) {
-      this.callbacks.onDronePing({
-        x: firstHit.point.x,
-        y: firstHit.point.y,
-        z: firstHit.point.z,
-      });
-    }
+    const hitPoint: Vec3 | null = firstHit
+      ? {
+          x: firstHit.point.x,
+          y: firstHit.point.y,
+          z: firstHit.point.z,
+        }
+      : null;
+    const rayOrigin: Vec3 = {
+      x: this.raycaster.ray.origin.x,
+      y: this.raycaster.ray.origin.y,
+      z: this.raycaster.ray.origin.z,
+    };
+    const rayDir: Vec3 = {
+      x: this.raycaster.ray.direction.x,
+      y: this.raycaster.ray.direction.y,
+      z: this.raycaster.ray.direction.z,
+    };
+    this.callbacks.onDronePing(hitPoint, rayOrigin, rayDir);
   }
 }

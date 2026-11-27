@@ -1473,6 +1473,18 @@
         z-index: 3;
       }
 
+      .cs-drone-marker.cs-dm-clickable {
+        pointer-events: auto;
+        cursor: crosshair;
+      }
+
+      .cs-drone-marker.cs-dm-clickable:hover .cs-dm-pill {
+        border-color: #38f5ff;
+        box-shadow: 0 0 22px rgba(56, 245, 255, 0.72),
+          0 6px 18px rgba(4, 10, 22, 0.58);
+        filter: brightness(1.12);
+      }
+
       .cs-dm-pill {
         display: inline-flex;
         align-items: center;

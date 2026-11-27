@@ -29,7 +29,17 @@ import {
 import { SynthAudio, type MusicGameplayContext } from "./audio/synthAudio.js";
 import { CameraRig, type CameraMode } from "./game/cameraRig.js";
 import { evaluateCountdownCue } from "./game/countdownCue.js";
-import { projectDroneMarkers } from "./game/droneProjection.js";
+import {
+  projectDroneMarkers,
+  resolveDronePingTarget,
+} from "./game/droneProjection.js";
+import {
+  capturePreImpactCritters,
+  isShotVisualFreezeActive,
+  releaseShotVisualFreeze,
+  resolveCritterVisualState,
+  type PreImpactCritterSnapshot,
+} from "./game/shotVisualFreeze.js";
 import {
   createGrappleAnimState,
   shouldExitDroneForGrapple,
@@ -160,6 +170,8 @@ interface ShotPlayback {
     lastGrindMs: number;
   } | null;
   scatterBlastDone?: boolean;
+  preImpactCritters: ReadonlyMap<string, PreImpactCritterSnapshot>;
+  impactReleased: boolean;
 }
 
 /** SessionStorage key preserving ?server= WebSocket URL across page reloads. */
@@ -500,6 +512,7 @@ class CritterSiegeApp {
   private previewTheme: ThemeId = "emerald_spire";
   private selectedGadget: GadgetId = "gale_mortar";
   private dronePing: Vec3 | null = null;
+  private dronePingCritterId: string | null = null;
 
   // Local critter movement kinematics (WASD + Auto-Hop + Double-Tap Space Backflip)
   private readonly localPos = new THREE.Vector3(WORLD_CENTER_X, 10, WORLD_CENTER_Z);
@@ -872,6 +885,7 @@ class CritterSiegeApp {
       onUiFireCancel: () => {
         this.input.cancelCharge();
       },
+      onDronePingCritter: (critterId) => this.handleDronePingCritter(critterId),
     });
 
     // Gameplay Input Controller
@@ -883,7 +897,8 @@ class CritterSiegeApp {
         onUtility: () => this.handleUtilityAction(),
         onRetreatBurrow: () => this.handleRetreatBurrow(),
         onDroneNudge: (dir) => this.handleDroneNudge(dir),
-        onDronePing: (point) => this.handleDronePing(point),
+        onDronePing: (point, rayOrigin, rayDir) =>
+          this.handleDronePing(point, rayOrigin, rayDir),
         onSelectGadgetIndex: (idx) => this.selectGadgetByIndex(idx),
         onToggleDrone: () => {
           if (!this.inMatch) return;
@@ -979,6 +994,7 @@ class CritterSiegeApp {
     this.rewardedMatchId = null;
     this.essenceBreakdown = null;
     this.dronePing = null;
+    this.dronePingCritterId = null;
     this.lastMatchRound = 0;
     this.quickStartMoved = false;
     this.quickStartFired = false;
@@ -1024,6 +1040,7 @@ class CritterSiegeApp {
     this.lastCountdownKey = "";
     this.clearGrappleGlides();
     this.dronePing = null;
+    this.dronePingCritterId = null;
     this.essenceBreakdown = null;
     this.vfx.setDronePing(null);
     this.vfx.syncDronePlayerBeacons([], false, 0);
@@ -1160,6 +1177,7 @@ class CritterSiegeApp {
       this.environmentProps.syncHazards(state.hazards ?? [], this.elapsedSec);
 
       this.dronePing = null;
+      this.dronePingCritterId = null;
       this.vfx.setDronePing(null);
       this.shotPlayback = null;
       this.lastLocalShotAim = null;
@@ -1176,6 +1194,7 @@ class CritterSiegeApp {
         roundSnappedWater = true;
 
         this.dronePing = null;
+        this.dronePingCritterId = null;
         this.vfx.setDronePing(null);
         this.shotPlayback = null;
         this.lastLocalShotAim = null;
@@ -1245,10 +1264,12 @@ class CritterSiegeApp {
         (this.localPos.y - localCritter.position.y) ** 2 +
         (this.localPos.z - localCritter.position.z) ** 2;
 
+      const freezeLocalPos = isShotVisualFreezeActive(this.shotPlayback);
       if (
-        !isControlling ||
-        turnKey !== this.localTurnKey ||
-        (!localGliding && distSq > 2.8 * 2.8)
+        !freezeLocalPos &&
+        (!isControlling ||
+          turnKey !== this.localTurnKey ||
+          (!localGliding && distSq > 2.8 * 2.8))
       ) {
         this.localPos.set(
           localCritter.position.x,
@@ -1377,6 +1398,11 @@ class CritterSiegeApp {
               ? (path[path.length - 1] ?? this.dronePing)
               : null;
 
+          const preImpactCritters = capturePreImpactCritters(
+            this.matchState?.critters ?? [],
+            this.collectLiveCritterPositions(),
+          );
+
           this.shotPlayback = {
             gadgetId: ev.gadgetId,
             path,
@@ -1402,6 +1428,8 @@ class CritterSiegeApp {
             seekerTargetPos,
             boreCapsule,
             scatterBlastDone: ev.gadgetId === "quake_club",
+            preImpactCritters,
+            impactReleased: ev.gadgetId === "quake_club",
           };
 
           if (ev.gadgetId === "quake_club") {
@@ -1970,14 +1998,83 @@ class CritterSiegeApp {
     this.gameClient.sendDroneNudge({ x: dir.x * 1.5, y: 0, z: dir.z * 1.5 });
   }
 
-  private handleDronePing(point: Vec3): void {
-    this.dronePing = { x: point.x, y: point.y, z: point.z };
+  private collectLiveCritterPositions(): Map<string, Vec3> {
+    const positions = new Map<string, Vec3>();
+    for (const [id, rig] of this.critterRigs.entries()) {
+      positions.set(id, {
+        x: rig.root.position.x,
+        y: rig.root.position.y,
+        z: rig.root.position.z,
+      });
+    }
+    return positions;
+  }
+
+  private handleDronePing(
+    point: Vec3 | null,
+    rayOrigin: Vec3,
+    rayDir: Vec3,
+  ): void {
+    const state = this.matchState;
+    const localId = this.gameClient.getPlayerId();
+    const resolved = resolveDronePingTarget(
+      point,
+      rayOrigin,
+      rayDir,
+      state?.critters ?? [],
+      localId,
+      this.collectLiveCritterPositions(),
+    );
+    if (!resolved) {
+      return;
+    }
+    this.dronePing = {
+      x: resolved.point.x,
+      y: resolved.point.y,
+      z: resolved.point.z,
+    };
+    this.dronePingCritterId = resolved.lockedCritterId;
     this.vfx.setDronePing(
       this.dronePing,
       this.selectedGadget === "seeker_firefly",
     );
     this.audio.playUiClick();
-    this.hud.showToast("Drone target ping locked for Seeker Firefly!", "success");
+    if (resolved.lockedCritterName) {
+      this.hud.showToast(`GPS Lock: ${resolved.lockedCritterName}!`, "success");
+    } else {
+      this.hud.showToast(
+        "Drone target ping locked for Seeker Firefly!",
+        "success",
+      );
+    }
+  }
+
+  private handleDronePingCritter(critterId: string): void {
+    const state = this.matchState;
+    const localId = this.gameClient.getPlayerId();
+    if (!state || critterId === localId) {
+      return;
+    }
+    const critter = state.critters.find((c) => c.id === critterId && c.alive);
+    if (!critter) {
+      return;
+    }
+    const rig = this.critterRigs.get(critter.id);
+    const pos: Vec3 = rig
+      ? {
+          x: rig.root.position.x,
+          y: rig.root.position.y,
+          z: rig.root.position.z,
+        }
+      : critter.position;
+    this.dronePing = { x: pos.x, y: pos.y + 0.4, z: pos.z };
+    this.dronePingCritterId = critter.id;
+    this.vfx.setDronePing(
+      this.dronePing,
+      this.selectedGadget === "seeker_firefly",
+    );
+    this.audio.playUiClick();
+    this.hud.showToast(`GPS Lock: ${critter.name}!`, "success");
   }
 
   private selectGadgetByIndex(index: number): void {
@@ -2142,6 +2239,37 @@ class CritterSiegeApp {
     // Update Shot Cam projectile flight animation
     const shotPos = this.advanceShotPlayback(dtSec, state);
 
+    // Keep locked rival GPS ping synced while the rival is still moving (e.g. during their turn/RETREAT)
+    if (
+      this.dronePingCritterId !== null &&
+      !isShotVisualFreezeActive(this.shotPlayback)
+    ) {
+      const lockedRival = state.critters.find(
+        (c) => c.id === this.dronePingCritterId && c.alive,
+      );
+      if (!lockedRival) {
+        this.dronePingCritterId = null;
+      } else if (
+        !isMyTurn ||
+        (state.phase === "RETREAT" &&
+          state.activePlayerId === this.dronePingCritterId)
+      ) {
+        const lockedRig = this.critterRigs.get(lockedRival.id);
+        const lockedPos: Vec3 = lockedRig
+          ? {
+              x: lockedRig.root.position.x,
+              y: lockedRig.root.position.y,
+              z: lockedRig.root.position.z,
+            }
+          : lockedRival.position;
+        this.dronePing = {
+          x: lockedPos.x,
+          y: lockedPos.y + 0.4,
+          z: lockedPos.z,
+        };
+      }
+    }
+
     // Sync Seeker Firefly GPS target-lock crosshair mode vs standard Drone Recon ring
     const seekerLocked =
       (this.selectedGadget === "seeker_firefly" && this.dronePing !== null) ||
@@ -2225,11 +2353,15 @@ class CritterSiegeApp {
       isMyTurn && localCritter
         ? localCritter
         : activeCritter ?? localCritter;
+    const focusVisual = focusCritter
+      ? resolveCritterVisualState(focusCritter, this.shotPlayback)
+      : null;
     const focusPos: Vec3 =
       canMove && localCritter
         ? { x: this.localPos.x, y: this.localPos.y, z: this.localPos.z }
         : focusCritter
-          ? activeGlidePositions.get(focusCritter.id) ?? focusCritter.position
+          ? activeGlidePositions.get(focusCritter.id) ??
+            (focusVisual ? focusVisual.position : focusCritter.position)
           : { x: this.activeWorld.centerX, y: 9, z: this.activeWorld.centerZ };
     this.shadowFocusPos =
       state.phase === "RESOLVING" && shotPos ? shotPos : focusPos;
@@ -2262,12 +2394,20 @@ class CritterSiegeApp {
       const rig = this.critterRigs.get(c.id);
       if (!rig) continue;
 
+      const visual = resolveCritterVisualState(c, this.shotPlayback);
       const isLocalControlled = canMove && c.id === localId;
       const glidePos = activeGlidePositions.get(c.id);
       let moving = false;
       let vy = 0;
 
-      if (glidePos) {
+      if (visual.frozen) {
+        rig.root.position.set(
+          visual.position.x,
+          visual.position.y,
+          visual.position.z,
+        );
+        rig.root.rotation.y = c.yaw;
+      } else if (glidePos) {
         const prevX = rig.root.position.x;
         const prevY = rig.root.position.y;
         const prevZ = rig.root.position.z;
@@ -2297,7 +2437,7 @@ class CritterSiegeApp {
         rig.root.rotation.y = c.yaw;
       }
 
-      if (c.alive) {
+      if (visual.alive) {
         const livePos: Vec3 = {
           x: rig.root.position.x,
           y: rig.root.position.y,
@@ -2313,14 +2453,14 @@ class CritterSiegeApp {
         });
       }
 
-      rig.setHp(c.hp, c.maxHp, c.alive);
+      rig.setHp(visual.hp, visual.maxHp, visual.alive);
       if (
         effectiveCamMode === "first_person" &&
         (c.id === trackedCritterId || c.id === localId)
       ) {
         rig.root.visible = false;
       } else {
-        rig.root.visible = c.alive;
+        rig.root.visible = visual.alive;
       }
       if (rig.root.visible) {
         const shadowGroundY = findDropShadowGroundY(
@@ -2630,7 +2770,28 @@ class CritterSiegeApp {
       );
     }
 
+    const releaseImpactFreeze = (): void => {
+      if (pb.impactReleased) {
+        return;
+      }
+      releaseShotVisualFreeze(pb);
+      const localId = this.gameClient.getPlayerId();
+      if (localId && pb.hits?.some((h) => h.critterId === localId)) {
+        const localC = state.critters.find((c) => c.id === localId);
+        if (localC) {
+          this.localPos.set(
+            localC.position.x,
+            localC.position.y,
+            localC.position.z,
+          );
+          this.localVel.set(0, 0, 0);
+          this.lastSyncedPos.copy(this.localPos);
+        }
+      }
+    };
+
     const emitHitPopups = (): void => {
+      releaseImpactFreeze();
       if (pb.hitsPopupsDone || !pb.hits || pb.hits.length === 0) {
         return;
       }
@@ -2661,6 +2822,7 @@ class CritterSiegeApp {
 
     const triggerImpact = (imp: ScheduledImpact): void => {
       imp.triggered = true;
+      releaseImpactFreeze();
       if (pb.isPrismIntercept && imp.carveOp === null && imp.baseDamage === 0) {
         this.vfx.spawnPrismShatter(imp.position);
         this.audio.playMutationChime();
@@ -2702,6 +2864,7 @@ class CritterSiegeApp {
 
     if (!inFlight && !pb.splashesDone) {
       pb.splashesDone = true;
+      releaseImpactFreeze();
       this.flushPendingCarves(state);
       for (const imp of pb.impacts) {
         if (!imp.triggered) {
@@ -2719,6 +2882,7 @@ class CritterSiegeApp {
       pb.elapsedSec >= pb.durationSec + pb.holdAfterSec ||
       (!pb.allowOutsideResolving && state.phase !== "RESOLVING")
     ) {
+      releaseImpactFreeze();
       emitHitPopups();
       this.flushPendingCarves(state);
       this.vfx.setProjectileVisual(null);
@@ -3220,7 +3384,8 @@ class CritterSiegeApp {
         this.critterRoot.add(rig.root);
         this.critterRigs.set(c.id, rig);
       }
-      rig.setHp(c.hp, c.maxHp, c.alive);
+      const visual = resolveCritterVisualState(c, this.shotPlayback);
+      rig.setHp(visual.hp, visual.maxHp, visual.alive);
       rig.applyMutations(c.equipped, c.apex);
     }
 

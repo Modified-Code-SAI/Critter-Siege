@@ -4281,4 +4281,75 @@ describe("Phase 1 Overhaul: 5-Round Persistent Map, Two-Stage Tide & Siege Coin 
     expect(rP1After?.grappleUsedThisTurn).toBe(true);
     expect(rP1After?.position).toEqual(predictedRappel);
   });
+
+  it("Seeker Firefly GPS lock regression: firing seeker_firefly with droneTarget locked onto a rival behind terrain/distance hits that exact rival", () => {
+    const engine = new MatchEngine(
+      makeBaseConfig({
+        seed: 4242,
+        theme: "emerald_spire",
+        players: [
+          {
+            id: "p1",
+            name: "Milo",
+            species: "mole",
+            team: 0,
+            isBot: false,
+            color: "#e67e22",
+            startingLoadout: ["gale_mortar", "seeker_firefly"],
+          },
+          {
+            id: "p2",
+            name: "Remy",
+            species: "norway_rat",
+            team: 1,
+            isBot: false,
+            color: "#3498db",
+          },
+        ],
+      }),
+    );
+
+    const beforeSnap = engine.getSnapshot();
+    const shooter = beforeSnap.critters.find((c) => c.id === "p1");
+    const rival = beforeSnap.critters.find((c) => c.id === "p2");
+    expect(shooter).toBeDefined();
+    expect(rival).toBeDefined();
+    if (!shooter || !rival) return;
+
+    // Confirm rival is separated by distance (> 15m) and terrain obstruction on Turn 1
+    const dist = Math.hypot(
+      rival.position.x - shooter.position.x,
+      rival.position.z - shooter.position.z,
+    );
+    expect(dist).toBeGreaterThan(15);
+
+    const lockedTarget = {
+      x: rival.position.x,
+      y: rival.position.y + 0.4,
+      z: rival.position.z,
+    };
+    // High skyward launch clears the dividing central spire while GPS guidance dives onto the locked rival
+    const launchDir = {
+      x: 0.25,
+      y: 0.94,
+      z: -0.25,
+    };
+
+    const events = engine.applyFire("p1", {
+      gadgetId: "seeker_firefly",
+      direction: launchDir,
+      power: 0.75,
+      droneTarget: lockedTarget,
+    });
+    const shotEv = events.find((e) => e.type === "SHOT_RESOLVED");
+    expect(shotEv).toBeDefined();
+    if (!shotEv || shotEv.type !== "SHOT_RESOLVED") return;
+
+    const rivalHit = shotEv.simulation.hits.find((h) => h.critterId === "p2");
+    expect(rivalHit).toBeDefined();
+    expect(rivalHit?.damage).toBeGreaterThan(0);
+    expect(engine.getSnapshot().critters.find((c) => c.id === "p2")?.hp).toBeLessThan(
+      rival.hp,
+    );
+  });
 });

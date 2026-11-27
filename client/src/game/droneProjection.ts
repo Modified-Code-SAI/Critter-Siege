@@ -10,6 +10,11 @@ const EDGE_MARGIN_X = 56;
 const EDGE_MARGIN_TOP = 76;
 const EDGE_MARGIN_BOTTOM = 86;
 const MARKER_HEAD_OFFSET_Y = 2.35;
+const CRITTER_CENTER_OFFSET_Y = 0.7;
+const CRITTER_LOCK_OFFSET_Y = 0.4;
+const DRONE_RAY_SNAP_RADIUS_M = 2.2;
+const DRONE_TERRAIN_SNAP_RADIUS_M = 2.6;
+const DRONE_RAY_TIE_EPSILON = 1e-4;
 
 const _projVec = new THREE.Vector3();
 
@@ -184,4 +189,128 @@ export function projectDroneMarkers(
   }
 
   return markers;
+}
+
+/** Resolved 3D world ping coordinate and optional locked rival critter metadata. */
+export interface DronePingResolution {
+  readonly point: Vec3;
+  readonly lockedCritterId: string | null;
+  readonly lockedCritterName: string | null;
+}
+
+/**
+ * Resolve a Drone Recon click into either a dead-center GPS snap-lock onto an alive
+ * rival critter (via oblique ray proximity or nearby terrain hit) or a plain terrain ping.
+ */
+export function resolveDronePingTarget(
+  terrainHit: Vec3 | null,
+  rayOrigin: Vec3,
+  rayDir: Vec3,
+  critters: readonly CritterState[],
+  localPlayerId: string | null,
+  livePositions?: ReadonlyMap<string, Vec3>,
+): DronePingResolution | null {
+  const dirLen = Math.hypot(rayDir.x, rayDir.y, rayDir.z);
+  const hasValidRay =
+    Number.isFinite(dirLen) &&
+    dirLen > 1e-6 &&
+    Number.isFinite(rayOrigin.x) &&
+    Number.isFinite(rayOrigin.y) &&
+    Number.isFinite(rayOrigin.z);
+  const nx = hasValidRay ? rayDir.x / dirLen : 0;
+  const ny = hasValidRay ? rayDir.y / dirLen : 0;
+  const nz = hasValidRay ? rayDir.z / dirLen : 0;
+
+  let bestRayCritter: { id: string; name: string; pos: Vec3 } | null = null;
+  let bestRayPerp = Number.POSITIVE_INFINITY;
+  let bestRayT = Number.POSITIVE_INFINITY;
+
+  let bestTerrainCritter: { id: string; name: string; pos: Vec3 } | null = null;
+  let bestTerrainDist = Number.POSITIVE_INFINITY;
+
+  for (let i = 0; i < critters.length; i++) {
+    const c = critters[i];
+    if (!c || !c.alive || c.id === localPlayerId) {
+      continue;
+    }
+
+    const pos = livePositions?.get(c.id) ?? c.position;
+    if (
+      !Number.isFinite(pos.x) ||
+      !Number.isFinite(pos.y) ||
+      !Number.isFinite(pos.z)
+    ) {
+      continue;
+    }
+
+    const cx = pos.x;
+    const cy = pos.y + CRITTER_CENTER_OFFSET_Y;
+    const cz = pos.z;
+
+    if (hasValidRay) {
+      const vx = cx - rayOrigin.x;
+      const vy = cy - rayOrigin.y;
+      const vz = cz - rayOrigin.z;
+      const t = vx * nx + vy * ny + vz * nz;
+      if (t > 0) {
+        const px = vx - nx * t;
+        const py = vy - ny * t;
+        const pz = vz - nz * t;
+        const perpDist = Math.hypot(px, py, pz);
+        if (perpDist <= DRONE_RAY_SNAP_RADIUS_M) {
+          const betterPerp = perpDist < bestRayPerp - DRONE_RAY_TIE_EPSILON;
+          const tiedCloser =
+            Math.abs(perpDist - bestRayPerp) <= DRONE_RAY_TIE_EPSILON &&
+            t < bestRayT;
+          if (betterPerp || tiedCloser) {
+            bestRayPerp = perpDist;
+            bestRayT = t;
+            bestRayCritter = { id: c.id, name: c.name, pos };
+          }
+        }
+      }
+    }
+
+    if (terrainHit !== null) {
+      const terrainDist = Math.hypot(
+        terrainHit.x - cx,
+        terrainHit.y - cy,
+        terrainHit.z - cz,
+      );
+      if (
+        terrainDist <= DRONE_TERRAIN_SNAP_RADIUS_M &&
+        terrainDist < bestTerrainDist
+      ) {
+        bestTerrainDist = terrainDist;
+        bestTerrainCritter = { id: c.id, name: c.name, pos };
+      }
+    }
+  }
+
+  const matched = bestRayCritter ?? bestTerrainCritter;
+  if (matched) {
+    return {
+      point: {
+        x: matched.pos.x,
+        y: matched.pos.y + CRITTER_LOCK_OFFSET_Y,
+        z: matched.pos.z,
+      },
+      lockedCritterId: matched.id,
+      lockedCritterName: matched.name,
+    };
+  }
+
+  if (terrainHit !== null) {
+    return {
+      point: {
+        x: terrainHit.x,
+        y: terrainHit.y,
+        z: terrainHit.z,
+      },
+      lockedCritterId: null,
+      lockedCritterName: null,
+    };
+  }
+
+  return null;
 }

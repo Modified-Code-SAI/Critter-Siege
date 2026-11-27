@@ -6,7 +6,10 @@ import {
   type GadgetId,
   type Vec3,
 } from "@critter/shared";
-import { projectDroneMarkers } from "../src/game/droneProjection.js";
+import {
+  projectDroneMarkers,
+  resolveDronePingTarget,
+} from "../src/game/droneProjection.js";
 import { VfxSystem, type DroneBeaconInput } from "../src/scene/vfx.js";
 
 function makeCritter(
@@ -257,5 +260,157 @@ describe("Task 4: Drone View 3D Player Beacons & Screen-Space Callout Markers", 
     // Clean disposal
     expect(() => vfx.dispose()).not.toThrow();
     expect(beaconGroup?.children).toHaveLength(0);
+  });
+
+  it("resolveDronePingTarget snaps dead-center onto rival under ray instead of distant hill behind them", () => {
+    const critters: CritterState[] = [
+      makeCritter({
+        id: "me",
+        name: "LocalMole",
+        position: { x: 10, y: 10, z: 10 },
+      }),
+      makeCritter({
+        id: "rival-1",
+        name: "RidgeBadger",
+        position: { x: 30, y: 10, z: 30 },
+      }),
+      makeCritter({
+        id: "dead-rival",
+        name: "FallenRat",
+        alive: false,
+        hp: 0,
+        position: { x: 30, y: 10, z: 35 },
+      }),
+    ];
+
+    // Oblique drone camera at (30, 34, 52) clicking right on rival-1's body center (30, 10.7, 30),
+    // while the terrain ray continues through them onto a distant hill behind them at (30, 2, 10)
+    const rayOrigin: Vec3 = { x: 30, y: 34, z: 52 };
+    const rayDir: Vec3 = { x: 0, y: 10.7 - 34, z: 30 - 52 };
+    const distantHillHit: Vec3 = { x: 30, y: 2, z: 10 };
+
+    const res = resolveDronePingTarget(
+      distantHillHit,
+      rayOrigin,
+      rayDir,
+      critters,
+      "me",
+    );
+    expect(res).toEqual({
+      point: { x: 30, y: 10.4, z: 30 },
+      lockedCritterId: "rival-1",
+      lockedCritterName: "RidgeBadger",
+    });
+
+    // Live rig position override takes precedence over stale CritterState.position
+    const liveOverrides = new Map<string, Vec3>([
+      ["rival-1", { x: 31, y: 11, z: 30 }],
+    ]);
+    const liveRayDir: Vec3 = { x: 1, y: 11.7 - 34, z: 30 - 52 };
+    const resLive = resolveDronePingTarget(
+      distantHillHit,
+      rayOrigin,
+      liveRayDir,
+      critters,
+      "me",
+      liveOverrides,
+    );
+    expect(resLive).toEqual({
+      point: { x: 31, y: 11.4, z: 30 },
+      lockedCritterId: "rival-1",
+      lockedCritterName: "RidgeBadger",
+    });
+  });
+
+  it("resolveDronePingTarget locks silhouetted rivals with terrainHit=null, falls back to terrainHit when far, and ignores local & dead critters", () => {
+    const critters: CritterState[] = [
+      makeCritter({
+        id: "me",
+        name: "LocalMole",
+        position: { x: 20, y: 10, z: 20 },
+      }),
+      makeCritter({
+        id: "dead-1",
+        name: "Fallen",
+        alive: false,
+        hp: 0,
+        position: { x: 35, y: 14, z: 20 },
+      }),
+      makeCritter({
+        id: "sky-rival",
+        name: "CliffSquirrel",
+        position: { x: 45, y: 20, z: 15 },
+      }),
+    ];
+
+    // Silhouette click (no terrain behind rival -> terrainHit: null) still locks rival
+    const skyOrigin: Vec3 = { x: 45, y: 22, z: 40 };
+    const skyDir: Vec3 = { x: 0, y: 20.7 - 22, z: 15 - 40 };
+    const skyLock = resolveDronePingTarget(
+      null,
+      skyOrigin,
+      skyDir,
+      critters,
+      "me",
+    );
+    expect(skyLock).toEqual({
+      point: { x: 45, y: 20.4, z: 15 },
+      lockedCritterId: "sky-rival",
+      lockedCritterName: "CliffSquirrel",
+    });
+
+    // Clicking empty sky away from any rival returns null
+    const missSky = resolveDronePingTarget(
+      null,
+      skyOrigin,
+      { x: 1, y: 0.4, z: 0 },
+      critters,
+      "me",
+    );
+    expect(missSky).toBeNull();
+
+    // Clicking directly on local player or dead critter ignores them and falls back to terrainHit
+    const localTerrainHit: Vec3 = { x: 20, y: 10, z: 20 };
+    const clickLocal = resolveDronePingTarget(
+      localTerrainHit,
+      { x: 20, y: 30, z: 40 },
+      { x: 0, y: -19.3, z: -20 },
+      critters,
+      "me",
+    );
+    expect(clickLocal).toEqual({
+      point: localTerrainHit,
+      lockedCritterId: null,
+      lockedCritterName: null,
+    });
+
+    const deadTerrainHit: Vec3 = { x: 35, y: 14, z: 20 };
+    const clickDead = resolveDronePingTarget(
+      deadTerrainHit,
+      { x: 35, y: 30, z: 40 },
+      { x: 0, y: -15.3, z: -20 },
+      critters,
+      "me",
+    );
+    expect(clickDead).toEqual({
+      point: deadTerrainHit,
+      lockedCritterId: null,
+      lockedCritterName: null,
+    });
+
+    // Clicking ground within 2.6m of rival snaps onto rival even if ray slightly outside 2.2m
+    const nearFootHit: Vec3 = { x: 47.3, y: 20.7, z: 15 };
+    const nearLock = resolveDronePingTarget(
+      nearFootHit,
+      { x: 47.3, y: 40, z: 15 },
+      { x: 0, y: -1, z: 0 },
+      critters,
+      "me",
+    );
+    expect(nearLock).toEqual({
+      point: { x: 45, y: 20.4, z: 15 },
+      lockedCritterId: "sky-rival",
+      lockedCritterName: "CliffSquirrel",
+    });
   });
 });

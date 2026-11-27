@@ -356,7 +356,11 @@ describe("CameraRig", () => {
       onDroneNudge: () => {
         nudgeCalls += 1;
       },
-      onDronePing: (pt) => dronePings.push(pt),
+      onDronePing: (pt) => {
+        if (pt) {
+          dronePings.push(pt);
+        }
+      },
       onSelectGadgetIndex: (idx) => selectedIndices.push(idx),
       onToggleDrone: () => {
         toggleDroneCalls += 1;
