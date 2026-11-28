@@ -507,38 +507,58 @@ describe("SdfWorld & Surface Nets smooth terrain mesher", () => {
     }
   }, 15000);
 
-  it("sculpts distinct mountain_spine multi-story Swiss-cheese caves, stacked stone bridges, and obstructed spawns", () => {
-    const mountain = new SdfWorld(4242, "mountain_spine", "duel");
-    const pillars = new SdfWorld(4242, "twin_pillars", "duel");
+  it("sculpts distinct mountain_spine Dragon's Backbone Ridge with 5 serrated vertebrae peaks, open ocean flanks, 3 pass-through rib-tunnels, and obstructed spawns", () => {
+    for (const scale of ["duel", "grand"] as const) {
+      const mountain = new SdfWorld(4242, "mountain_spine", scale);
+      const cx = mountain.centerX;
+      const cz = mountain.centerZ;
+      const halfSpan = mountain.worldWidth * 0.44;
+      const h = mountain.worldHeight;
 
-    // Must be distinctly sculpted from twin_pillars
-    let diffSamples = 0;
-    for (let x = 10; x <= 50; x += 8) {
-      for (let z = 10; z <= 50; z += 8) {
-        if (Math.abs(mountain.sample(x, 12, z) - pillars.sample(x, 12, z)) > 0.5) {
-          diffSamples += 1;
-        }
+      const spineWorld = (along: number, cross: number): { x: number; z: number } => {
+        const rc = cross + 0.14 * Math.sin(along * Math.PI * 1.05);
+        const u = (along + rc) * Math.SQRT1_2;
+        const v = (rc - along) * Math.SQRT1_2;
+        return { x: cx + u * halfSpan, z: cz + v * halfSpan };
+      };
+
+      // 5 serrated vertebrae peaks along the curving SW-to-NE spine rising to 58-74% worldHeight
+      const peakAlongs = [-0.74, -0.37, 0.0, 0.37, 0.74] as const;
+      for (const a of peakAlongs) {
+        const p = spineWorld(a, 0);
+        const topY = mountain.getSurfaceY(p.x, p.z);
+        expect(topY).not.toBeNull();
+        expect(topY ?? 0).toBeGreaterThan(h * 0.54);
       }
-    }
-    expect(diffSamples).toBeGreaterThan(8);
 
-    // Multi-story stacked caves through central mountain peak:
-    // Lower cavern air around tunnelY (~5.4m), solid mid rock (~8.8m), upper cross-cave air (~11.4m), solid peak above (~16.5m)
-    const cx = mountain.centerX;
-    const cz = mountain.centerZ;
-    expect(mountain.sample(cx, mountain.worldHeight * 0.2, cz)).toBeGreaterThan(0);
-    expect(mountain.sample(cx, mountain.worldHeight * 0.42, cz)).toBeGreaterThan(0);
-    expect(mountain.sample(cx, mountain.worldHeight * 0.62, cz)).toBeLessThan(0);
+      // 3 deep pass-through rib-tunnels piercing cleanly across the backbone with solid peaks overhead
+      const tunnels: ReadonlyArray<readonly [number, number]> = [
+        [-0.37, 0.2],
+        [0.0, 0.23],
+        [0.37, 0.27],
+      ];
+      for (const [a, yFrac] of tunnels) {
+        const center = spineWorld(a, 0);
+        expect(mountain.sample(center.x, h * yFrac, center.z)).toBeGreaterThan(0);
+        expect(mountain.sample(center.x, h * 0.56, center.z)).toBeLessThan(0);
+      }
 
-    // Every pair of spawns obstructed in both duel and grand
-    const duelSpawns = mountain.findSpawnPoints(4);
-    expect(duelSpawns).toHaveLength(4);
-    for (let i = 0; i < duelSpawns.length; i++) {
-      for (let j = i + 1; j < duelSpawns.length; j++) {
-        const a = duelSpawns[i];
-        const b = duelSpawns[j];
-        if (a && b) {
-          expect(mountain.hasDirectLineOfSight(a, b, 1.1)).toBe(false);
+      // Dramatic open ocean air at the off-spine far NW and SE outer corners
+      const farNW = { x: cx - 0.88 * halfSpan, z: cz - 0.88 * halfSpan };
+      const farSE = { x: cx + 0.88 * halfSpan, z: cz + 0.88 * halfSpan };
+      expect(mountain.getSurfaceY(farNW.x, farNW.z)).toBeNull();
+      expect(mountain.getSurfaceY(farSE.x, farSE.z)).toBeNull();
+
+      // Every pair of spawns obstructed in both duel and grand
+      const spawns = mountain.findSpawnPoints(4);
+      expect(spawns).toHaveLength(4);
+      for (let i = 0; i < spawns.length; i++) {
+        for (let j = i + 1; j < spawns.length; j++) {
+          const a = spawns[i];
+          const b = spawns[j];
+          if (a && b) {
+            expect(mountain.hasDirectLineOfSight(a, b, 1.1)).toBe(false);
+          }
         }
       }
     }
@@ -587,7 +607,7 @@ describe("SdfWorld & Surface Nets smooth terrain mesher", () => {
     expect(elapsedMs).toBeLessThan(2000);
   });
 
-  it("enforces multi-turn spawn spacing (>= 54m on grand), seals dividing bastion gate passes with destructible plugs, and places Blast Barrels near gate seams", () => {
+  it("enforces multi-turn spawn spacing (>= 54m on grand), preserves emerald_spire destructible gate plugs & coastal walls, and places >= 4 tactical Blast Barrels across all themes", () => {
     for (const theme of ALL_THEMES) {
       for (const scale of ["duel", "grand"] as const) {
         const world = new SdfWorld(9001, theme, scale);
@@ -610,55 +630,237 @@ describe("SdfWorld & Surface Nets smooth terrain mesher", () => {
         }
         expect(minDist).toBeGreaterThanOrEqual(isGrand ? 54.0 : 24.0);
 
-        const halfSpan = world.worldWidth * 0.44;
-        const passOffset = theme === "canyon_arch" ? 0.62 : 0.58;
-        const passY = world.worldHeight * 0.165;
-        const gateCenters = [
-          { x: world.centerX, y: passY, z: world.centerZ - passOffset * halfSpan },
-          { x: world.centerX, y: passY, z: world.centerZ + passOffset * halfSpan },
-          { x: world.centerX - passOffset * halfSpan, y: passY, z: world.centerZ },
-          { x: world.centerX + passOffset * halfSpan, y: passY, z: world.centerZ },
-        ];
-
-        // Each gate pass must be sealed by a solid rock gate plug prior to blasting
-        for (const g of gateCenters) {
-          expect(world.isSolid(g.x, g.y, g.z)).toBe(true);
-        }
-
-        // Outer shoreline ends of the 4 dividing walls must remain sealed (no flat coastal walk-around)
-        const coastalY = world.worldHeight * 0.18;
-        const coastDist = 0.96 * halfSpan;
-        expect(world.isSolid(world.centerX, coastalY, world.centerZ - coastDist)).toBe(true);
-        expect(world.isSolid(world.centerX, coastalY, world.centerZ + coastDist)).toBe(true);
-        expect(world.isSolid(world.centerX - coastDist, coastalY, world.centerZ)).toBe(true);
-        expect(world.isSolid(world.centerX + coastDist, coastalY, world.centerZ)).toBe(true);
-
-        // At least 1 Blast Barrel placed near each of the 4 gate seams
         const hazards = world.findHazardPoints(spawns);
         const barrels = hazards.filter((h) => h.type === "blast_barrel");
         expect(barrels.length).toBeGreaterThanOrEqual(4);
-        const maxGateBarrelDist = isGrand ? 16.0 : 9.0;
-        for (const g of gateCenters) {
-          const hasNearbyBarrel = barrels.some(
-            (b) => Math.hypot(b.position.x - g.x, b.position.z - g.z) <= maxGateBarrelDist,
-          );
-          expect(hasNearbyBarrel).toBe(true);
-        }
 
-        // Single Gale Mortar blast cleanly breaches the thin destructible gate plug!
-        const probeGate = gateCenters[0];
-        if (probeGate) {
-          const mortarRadius = isGrand ? 3.2 * 1.35 : 3.2;
-          world.applyCarve({
-            center: { x: probeGate.x, y: probeGate.y, z: probeGate.z },
-            radius: mortarRadius,
-            shape: "sphere",
-          });
-          expect(world.isSolid(probeGate.x, probeGate.y, probeGate.z)).toBe(false);
-          expect(world.isSolid(probeGate.x - 1.4, probeGate.y, probeGate.z)).toBe(false);
-          expect(world.isSolid(probeGate.x + 1.4, probeGate.y, probeGate.z)).toBe(false);
+        // emerald_spire retains its exact 4 `+` cross-wall destructible gate plugs, sealed coastal walls, and gate barrels
+        if (theme === "emerald_spire") {
+          const halfSpan = world.worldWidth * 0.44;
+          const passOffset = 0.58;
+          const passY = world.worldHeight * 0.165;
+          const gateCenters = [
+            { x: world.centerX, y: passY, z: world.centerZ - passOffset * halfSpan },
+            { x: world.centerX, y: passY, z: world.centerZ + passOffset * halfSpan },
+            { x: world.centerX - passOffset * halfSpan, y: passY, z: world.centerZ },
+            { x: world.centerX + passOffset * halfSpan, y: passY, z: world.centerZ },
+          ];
+
+          for (const g of gateCenters) {
+            expect(world.isSolid(g.x, g.y, g.z)).toBe(true);
+          }
+
+          const coastalY = world.worldHeight * 0.18;
+          const coastDist = 0.96 * halfSpan;
+          expect(world.isSolid(world.centerX, coastalY, world.centerZ - coastDist)).toBe(true);
+          expect(world.isSolid(world.centerX, coastalY, world.centerZ + coastDist)).toBe(true);
+          expect(world.isSolid(world.centerX - coastDist, coastalY, world.centerZ)).toBe(true);
+          expect(world.isSolid(world.centerX + coastDist, coastalY, world.centerZ)).toBe(true);
+
+          const maxGateBarrelDist = isGrand ? 16.0 : 9.0;
+          for (const g of gateCenters) {
+            const hasNearbyBarrel = barrels.some(
+              (b) => Math.hypot(b.position.x - g.x, b.position.z - g.z) <= maxGateBarrelDist,
+            );
+            expect(hasNearbyBarrel).toBe(true);
+          }
+
+          const probeGate = gateCenters[0];
+          if (probeGate) {
+            const mortarRadius = isGrand ? 3.2 * 1.35 : 3.2;
+            world.applyCarve({
+              center: { x: probeGate.x, y: probeGate.y, z: probeGate.z },
+              radius: mortarRadius,
+              shape: "sphere",
+            });
+            expect(world.isSolid(probeGate.x, probeGate.y, probeGate.z)).toBe(false);
+            expect(world.isSolid(probeGate.x - 1.4, probeGate.y, probeGate.z)).toBe(false);
+            expect(world.isSolid(probeGate.x + 1.4, probeGate.y, probeGate.z)).toBe(false);
+          }
         }
       }
     }
   }, 15000);
+
+  it("gives every pair among the 4 themes a strongly distinct 3D physical island structure", () => {
+    const worlds = ALL_THEMES.map((theme) => ({
+      theme,
+      world: new SdfWorld(4242, theme, "duel"),
+    }));
+
+    // Check all 6 unordered pairs across a 3D lattice of solid/air classifications
+    for (let i = 0; i < worlds.length; i++) {
+      for (let j = i + 1; j < worlds.length; j++) {
+        const a = worlds[i];
+        const b = worlds[j];
+        if (!a || !b) continue;
+
+        let totalSamples = 0;
+        let unionSolidSamples = 0;
+        let signDisagreements = 0;
+        for (let x = 6; x <= 54; x += 6) {
+          for (let y = 4; y <= 18; y += 3.5) {
+            for (let z = 6; z <= 54; z += 6) {
+              totalSamples += 1;
+              const solidA = a.world.isSolid(x, y, z);
+              const solidB = b.world.isSolid(x, y, z);
+              if (solidA || solidB) {
+                unionSolidSamples += 1;
+              }
+              if (solidA !== solidB) {
+                signDisagreements += 1;
+              }
+            }
+          }
+        }
+        // Every pair of maps must physically differ on > 15% of total 3D bounding volume
+        // and > 35% of their combined solid island footprint (zero cookie-cutter twins)
+        expect(signDisagreements / totalSamples).toBeGreaterThan(0.15);
+        expect(unionSolidSamples).toBeGreaterThan(50);
+        expect(signDisagreements / unionSolidSamples).toBeGreaterThan(0.35);
+      }
+    }
+  });
+
+  it("sculpts canyon_arch as a Grand Split Redrock Gorge with open central chasm, tall opposing West/East mesas, and 2 soaring overhead arches", () => {
+    for (const scale of ["duel", "grand"] as const) {
+      const world = new SdfWorld(2026, "canyon_arch", scale);
+      const cx = world.centerX;
+      const cz = world.centerZ;
+      const halfSpan = world.worldWidth * 0.44;
+      const h = world.worldHeight;
+
+      // Deep open central canyon abyss right down the center (air from near waterline up through mid-canyon)
+      expect(world.sample(cx, h * 0.12, cz)).toBeGreaterThan(0);
+      expect(world.sample(cx, h * 0.3, cz)).toBeGreaterThan(0);
+      expect(world.sample(cx, h * 0.5, cz)).toBeGreaterThan(0);
+
+      // Tall opposing West and East sandstone rim mesas (~44-54% worldHeight)
+      const westRimY = world.getSurfaceY(cx - 0.68 * halfSpan, cz - 0.6 * halfSpan);
+      const eastRimY = world.getSurfaceY(cx + 0.68 * halfSpan, cz + 0.6 * halfSpan);
+      expect(westRimY).not.toBeNull();
+      expect(eastRimY).not.toBeNull();
+      expect(westRimY ?? 0).toBeGreaterThan(h * 0.42);
+      expect(eastRimY ?? 0).toBeGreaterThan(h * 0.42);
+
+      // 2 soaring natural stone arches spanning North (v = -0.38) and South (v = +0.38) over open canyon air
+      const northArchX = cx + -0.17 * halfSpan;
+      const northArchZ = cz + -0.38 * halfSpan;
+      expect(world.sample(northArchX, h * 0.28, northArchZ)).toBeGreaterThan(0);
+      expect(world.sample(northArchX, h * 0.59, northArchZ)).toBeLessThan(0);
+
+      const southArchX = cx + 0.17 * halfSpan;
+      const southArchZ = cz + 0.38 * halfSpan;
+      expect(world.sample(southArchX, h * 0.28, southArchZ)).toBeGreaterThan(0);
+      expect(world.sample(southArchX, h * 0.6, southArchZ)).toBeLessThan(0);
+    }
+  });
+
+  it("sculpts twin_pillars as a true Two-Story Pillared Sky-Citadel with lower plaza, open colonnade air gap, overhead sky-decks, continuous pillars, and two-story spawns", () => {
+    for (const scale of ["duel", "grand"] as const) {
+      const world = new SdfWorld(9001, "twin_pillars", scale);
+      const cx = world.centerX;
+      const cz = world.centerZ;
+      const halfSpan = world.worldWidth * 0.44;
+      const h = world.worldHeight;
+
+      // True vertical two-story column check under both West and East Sky-Decks:
+      // solid Story 1 lower plaza -> wide open colonnade air gap -> solid Story 2 sky-deck overhead
+      const deckCenters: ReadonlyArray<readonly [number, number]> = [
+        [-0.44, -0.04],
+        [0.44, 0.04],
+      ];
+      for (const [du, dv] of deckCenters) {
+        const px = cx + du * halfSpan;
+        const pz = cz + dv * halfSpan;
+        expect(world.isSolid(px, h * 0.14, pz)).toBe(true);
+        expect(world.sample(px, h * 0.35, pz)).toBeGreaterThan(0);
+        expect(world.isSolid(px, h * 0.55, pz)).toBe(true);
+      }
+
+      // Towering support pillars rising continuously from Story 1 through colonnade air into Story 2
+      const probePillars: ReadonlyArray<readonly [number, number]> = [
+        [-0.58, -0.26],
+        [-0.3, 0.2],
+        [0.3, -0.2],
+        [0.58, 0.26],
+      ];
+      for (const [pu, pv] of probePillars) {
+        const px = cx + pu * halfSpan;
+        const pz = cz + pv * halfSpan;
+        expect(world.isSolid(px, h * 0.16, pz)).toBe(true);
+        expect(world.isSolid(px, h * 0.35, pz)).toBe(true);
+        expect(world.isSolid(px, h * 0.5, pz)).toBe(true);
+      }
+
+      // Open ocean drop shafts (North & South moon-wells) + Central Sky-Bridge over open colonnade air
+      expect(world.getSurfaceY(cx, cz - 0.58 * halfSpan)).toBeNull();
+      expect(world.getSurfaceY(cx, cz + 0.58 * halfSpan)).toBeNull();
+      expect(world.sample(cx, h * 0.35, cz)).toBeGreaterThan(0);
+      expect(world.isSolid(cx, h * 0.68, cz)).toBe(true);
+
+      // Spawns occupy both Story 1 lower wings and Story 2 upper sky-decks
+      const spawns = world.findSpawnPoints(4);
+      expect(spawns).toHaveLength(4);
+      const upperSpawns = spawns.filter((sp) => sp.y >= h * 0.48);
+      const lowerSpawns = spawns.filter((sp) => sp.y <= h * 0.32);
+      expect(upperSpawns.length).toBeGreaterThanOrEqual(2);
+      expect(lowerSpawns.length).toBeGreaterThanOrEqual(2);
+    }
+  });
+
+  it("guarantees valid 4-quadrant spawns with separation and zero Turn-1 LOS across many seeds on all 4 themes", () => {
+    const duelSeeds = [9001, 4242, 2026, 7331, 31415, 888, 555, 606, 101, 303, 404];
+    const grandSeeds = [9001, 4242, 2026];
+
+    for (const theme of ALL_THEMES) {
+      for (const seed of duelSeeds) {
+        const world = new SdfWorld(seed, theme, "duel");
+        const spawns = world.findSpawnPoints(4);
+        expect(spawns).toHaveLength(4);
+        const quads = new Set<string>();
+        for (const sp of spawns) {
+          expect(sp.y).toBeGreaterThanOrEqual(4.0);
+          expect(world.sampleNormal(sp.x, sp.y, sp.z).y).toBeGreaterThanOrEqual(0.65);
+          expect(world.sample(sp.x, sp.y + 1.0, sp.z)).toBeGreaterThan(0);
+          quads.add(`${sp.x < world.centerX ? "W" : "E"}${sp.z < world.centerZ ? "N" : "S"}`);
+        }
+        expect(quads.size).toBe(4);
+        for (let i = 0; i < spawns.length; i++) {
+          for (let j = i + 1; j < spawns.length; j++) {
+            const a = spawns[i];
+            const b = spawns[j];
+            if (a && b) {
+              expect(Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z)).toBeGreaterThanOrEqual(24.0);
+              expect(world.hasDirectLineOfSight(a, b, 1.1)).toBe(false);
+            }
+          }
+        }
+      }
+
+      for (const seed of grandSeeds) {
+        const world = new SdfWorld(seed, theme, "grand");
+        const spawns = world.findSpawnPoints(4);
+        expect(spawns).toHaveLength(4);
+        const quads = new Set<string>();
+        for (const sp of spawns) {
+          expect(sp.y).toBeGreaterThanOrEqual(4.0);
+          expect(world.sampleNormal(sp.x, sp.y, sp.z).y).toBeGreaterThanOrEqual(0.65);
+          expect(world.sample(sp.x, sp.y + 1.0, sp.z)).toBeGreaterThan(0);
+          quads.add(`${sp.x < world.centerX ? "W" : "E"}${sp.z < world.centerZ ? "N" : "S"}`);
+        }
+        expect(quads.size).toBe(4);
+        for (let i = 0; i < spawns.length; i++) {
+          for (let j = i + 1; j < spawns.length; j++) {
+            const a = spawns[i];
+            const b = spawns[j];
+            if (a && b) {
+              expect(Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z)).toBeGreaterThanOrEqual(54.0);
+              expect(world.hasDirectLineOfSight(a, b, 1.1)).toBe(false);
+            }
+          }
+        }
+      }
+    }
+  }, 45000);
 });

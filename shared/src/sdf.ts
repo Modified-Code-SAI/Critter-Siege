@@ -782,328 +782,132 @@ function evaluateThemeSdf(
   }
 
   if (theme === "canyon_arch") {
-    // Grand Redrock Gatehouse Canyon: 4 terraced sandstone mesas framing a towering
-    // central redrock massif, 4 arched stone gatehouses dividing the quadrants, and
-    // sweeping natural stone arches overhead.
-    const mesaBotR = 0.23 * halfSpan;
-    const mesaTopR = 0.36 * halfSpan;
-    const nwMesa = sdTaperedPlateau(
+    // Grand Split Redrock Gorge: massive deep S-curved canyon slicing North-to-South
+    // between towering opposing tiered sandstone rim mesas, bridged by 2 soaring open
+    // natural stone arches with shadowed cliffside alcoves and Monument Valley rim buttes.
+    const canyonU = 0.22 * Math.sin(v * Math.PI * 0.95);
+    const canyonSlope = 0.22 * Math.PI * 0.95 * Math.cos(v * Math.PI * 0.95);
+    const canyonDistNorm = Math.abs(u - canyonU) / Math.hypot(1.0, canyonSlope);
+    const canyonDist = canyonDistNorm * halfSpan;
+
+    const mesaBaseTop = worldHeight * 0.475;
+    const rawSide = (u - canyonU) * 5.0;
+    const sideBlend = rawSide / (1.0 + Math.abs(rawSide));
+    const eastWeight = 0.5 + 0.5 * sideBlend;
+    const mesaTopY =
+      mesaBaseTop +
+      sideBlend * 0.38 * hScale +
+      ((1 - eastWeight) * j.westHeight + eastWeight * j.eastHeight) *
+        0.32 *
+        hScale;
+
+    // Broad sculpted opposing sandstone mesa body + 4 outer headland promontories
+    const mainMesa = sdRoundedSlab(
       x,
       y,
       z,
-      wx(-0.6),
-      wz(-0.6),
+      cx,
+      cz,
       bottomY,
-      spawnTopY + 0.3 + j.westHeight * 0.45,
-      mesaBotR,
-      mesaTopR,
+      mesaTopY,
+      0.94 * halfSpan,
+      0.95 * halfSpan,
       bevel,
+      0.16,
     );
-    const neMesa = sdTaperedPlateau(
+    const headRx = 0.33 * halfSpan;
+    const headRz = 0.31 * halfSpan;
+    const nwHead = sdRoundedSlab(
       x,
       y,
       z,
-      wx(0.6),
-      wz(-0.6),
+      wx(-0.66),
+      wz(-0.62),
       bottomY,
-      spawnTopY + 0.4 + j.eastHeight * 0.45,
-      mesaBotR,
-      mesaTopR,
-      bevel,
+      mesaBaseTop - 0.35 * hScale + j.westHeight * 0.3 * hScale,
+      headRx,
+      headRz,
+      bevel * 0.9,
+      0.18,
     );
-    const swMesa = sdTaperedPlateau(
+    const neHead = sdRoundedSlab(
       x,
       y,
       z,
-      wx(-0.6),
-      wz(0.6),
+      wx(0.66),
+      wz(-0.62),
       bottomY,
-      spawnTopY + 0.1 + j.eastHeight * 0.35,
-      mesaBotR,
-      mesaTopR,
-      bevel,
+      mesaBaseTop + 0.35 * hScale + j.eastHeight * 0.3 * hScale,
+      headRx,
+      headRz,
+      bevel * 0.9,
+      0.18,
     );
-    const seMesa = sdTaperedPlateau(
+    const swHead = sdRoundedSlab(
       x,
       y,
       z,
-      wx(0.6),
-      wz(0.6),
+      wx(-0.66),
+      wz(0.62),
       bottomY,
-      spawnTopY + 0.2 + j.westHeight * 0.35,
-      mesaBotR,
-      mesaTopR,
-      bevel,
+      mesaBaseTop - 0.25 * hScale + j.eastHeight * 0.25 * hScale,
+      headRx,
+      headRz,
+      bevel * 0.9,
+      0.18,
     );
-
-    // Low sandy canyon valley floor & switchback ledges inside the gorges
-    const valleyTop = Math.max(bottomY + 1.25, worldHeight * 0.125);
-    const switchTop = worldHeight * 0.235;
-    const valleyFloor = sdTaperedPlateau(
+    const seHead = sdRoundedSlab(
       x,
       y,
       z,
-      cx,
-      cz,
-      bottomY - 0.15,
-      valleyTop,
-      0.34 * halfSpan,
-      0.4 * halfSpan,
-      bevel * 0.75,
-    );
-    const nwSwitch = sdTaperedPlateau(
-      x,
-      y,
-      z,
-      wx(-0.34),
-      wz(-0.34),
+      wx(0.66),
+      wz(0.62),
       bottomY,
-      switchTop,
-      0.13 * halfSpan,
-      0.19 * halfSpan,
-      bevel * 0.8,
-    );
-    const neSwitch = sdTaperedPlateau(
-      x,
-      y,
-      z,
-      wx(0.34),
-      wz(-0.34),
-      bottomY,
-      switchTop,
-      0.13 * halfSpan,
-      0.19 * halfSpan,
-      bevel * 0.8,
-    );
-    const swSwitch = sdTaperedPlateau(
-      x,
-      y,
-      z,
-      wx(-0.34),
-      wz(0.34),
-      bottomY,
-      switchTop,
-      0.13 * halfSpan,
-      0.19 * halfSpan,
-      bevel * 0.8,
-    );
-    const seSwitch = sdTaperedPlateau(
-      x,
-      y,
-      z,
-      wx(0.34),
-      wz(0.34),
-      bottomY,
-      switchTop,
-      0.13 * halfSpan,
-      0.19 * halfSpan,
-      bevel * 0.8,
+      mesaBaseTop + 0.3 * hScale + j.westHeight * 0.25 * hScale,
+      headRx,
+      headRz,
+      bevel * 0.9,
+      0.18,
     );
 
-    // Massive Central Redrock Citadel Massif (64-68% of worldHeight)
-    const centralMassif = sdTaperedPlateau(
-      x,
-      y,
-      z,
-      cx,
-      cz,
-      bottomY,
-      centralPeakY - 0.2 + j.archBoost * 0.35,
-      0.22 * halfSpan,
-      0.26 * halfSpan,
-      bevel,
-    );
+    let d = smin(mainMesa, nwHead, unionK * 0.85);
+    d = smin(d, neHead, unionK * 0.85);
+    d = smin(d, swHead, unionK * 0.85);
+    d = smin(d, seHead, unionK * 0.85);
 
-    // 4 Towering Full-Width Redrock Stone Gatehouse Walls extending out into sheer coastal cliffs
-    const gateTop = wallTopY + 0.35;
-    const northGate = sdBastionWall(
-      x,
-      y,
-      z,
-      cx,
-      wz(-0.08),
-      cx,
-      wz(-1.07),
-      wallBottomY,
-      gateTop,
-      wallBaseThick * 1.06,
-      wallTopThick * 1.02,
-      wallBevel,
-      0.2,
+    // Carve massive S-curved canyon gorge with stepped inner sandstone balconies
+    const balconyY = worldHeight * 0.3;
+    const floorY = bottomY + 1.15;
+    const upperT = Math.max(
+      0,
+      Math.min(1, (y - balconyY) / (worldHeight * 0.12)),
     );
-    const southGate = sdBastionWall(
-      x,
-      y,
-      z,
-      cx,
-      wz(0.08),
-      cx,
-      wz(1.07),
-      wallBottomY,
-      gateTop,
-      wallBaseThick * 1.06,
-      wallTopThick * 1.02,
-      wallBevel,
-      0.2,
+    const upperSmooth = upperT * upperT * (3 - 2 * upperT);
+    const lowerT = Math.max(
+      0,
+      Math.min(1, (y - floorY) / Math.max(0.5, balconyY - floorY)),
     );
-    const westGate = sdBastionWall(
-      x,
-      y,
-      z,
-      wx(-0.08),
-      cz,
-      wx(-1.07),
-      cz,
-      wallBottomY,
-      gateTop,
-      wallBaseThick * 1.06,
-      wallTopThick * 1.02,
-      wallBevel,
-      0.2,
-    );
-    const eastGate = sdBastionWall(
-      x,
-      y,
-      z,
-      wx(0.08),
-      cz,
-      wx(1.07),
-      cz,
-      wallBottomY,
-      gateTop,
-      wallBaseThick * 1.06,
-      wallTopThick * 1.02,
-      wallBevel,
-      0.2,
-    );
+    const lowerSmooth = lowerT * lowerT * (3 - 2 * lowerT);
+    const gorgeHalfW =
+      (0.15 + 0.045 * lowerSmooth + 0.075 * upperSmooth) * halfSpan;
+    const gorgeCut = Math.min(gorgeHalfW - canyonDist, y - floorY);
+    d = smax(d, gorgeCut, isGrand ? 1.15 : 0.7);
 
-    // Sweeping natural canyon arches spanning North & South gorges
-    const grandArchS = sdStoneArch(
-      x,
-      y,
-      z,
-      wx(-0.56),
-      wz(0.46),
-      wx(0.56),
-      wz(0.46),
-      spawnTopY + 0.8,
-      centralPeakY + 0.2 + j.archBoost * 0.3,
-      isGrand ? 4.4 : 2.35,
-      isGrand ? 2.4 : 1.45,
-    );
-    const grandArchN = sdStoneArch(
-      x,
-      y,
-      z,
-      wx(-0.56),
-      wz(-0.46),
-      wx(0.56),
-      wz(-0.46),
-      spawnTopY + 0.8,
-      centralPeakY - 0.3,
-      isGrand ? 4.2 : 2.25,
-      isGrand ? 2.3 : 1.4,
-    );
+    // Narrow sinuous river abyss channel carved right down the center of the gorge floor
+    const riverAbyssCut = 0.078 * halfSpan - canyonDist;
+    d = smax(d, riverAbyssCut, isGrand ? 0.9 : 0.55);
 
-    let d = smin(nwMesa, neMesa, unionK);
-    d = smin(d, swMesa, unionK);
-    d = smin(d, seMesa, unionK);
-    d = smin(d, valleyFloor, unionK * 0.7);
-    d = smin(d, nwSwitch, unionK * 0.75);
-    d = smin(d, neSwitch, unionK * 0.75);
-    d = smin(d, swSwitch, unionK * 0.75);
-    d = smin(d, seSwitch, unionK * 0.75);
-    d = smin(d, centralMassif, unionK * 0.9);
-    d = smin(d, northGate, unionK * 0.7);
-    d = smin(d, southGate, unionK * 0.7);
-    d = smin(d, westGate, unionK * 0.7);
-    d = smin(d, eastGate, unionK * 0.7);
-    d = smin(d, grandArchS, unionK * 0.6);
-    d = smin(d, grandArchN, unionK * 0.6);
-
-    // Lower cave bypass tunnel running beneath the central redrock citadel
-    const canyonCaveR = isGrand ? 3.5 : 2.1;
-    const caveEW =
-      distToSegment(
-        x,
-        y,
-        z,
-        wx(-0.34),
-        tunnelY,
-        cz,
-        wx(0.34),
-        tunnelY,
-        cz,
-      ) - canyonCaveR;
-    d = smax(d, -caveEW, isGrand ? 1.0 : 0.65);
-
-    // Carved lower stone gatehouse doorways beneath the 4 dividing walls, sealed with destructible plugs
-    const gDoorN =
-      distToSegment(
-        x,
-        y,
-        z,
-        wx(-0.2),
-        passY,
-        wz(-0.62),
-        wx(0.2),
-        passY,
-        wz(-0.62),
-      ) - passRadius;
-    const gDoorS =
-      distToSegment(
-        x,
-        y,
-        z,
-        wx(-0.2),
-        passY,
-        wz(0.62),
-        wx(0.2),
-        passY,
-        wz(0.62),
-      ) - passRadius;
-    const gDoorW =
-      distToSegment(
-        x,
-        y,
-        z,
-        wx(-0.62),
-        passY,
-        wz(-0.2),
-        wx(-0.62),
-        passY,
-        wz(0.2),
-      ) - passRadius;
-    const gDoorE =
-      distToSegment(
-        x,
-        y,
-        z,
-        wx(0.62),
-        passY,
-        wz(-0.2),
-        wx(0.62),
-        passY,
-        wz(0.2),
-      ) - passRadius;
-
-    d = smax(d, -gDoorN, 0.7);
-    d = smax(d, -gDoorS, 0.7);
-    d = smax(d, -gDoorW, 0.7);
-    d = smax(d, -gDoorE, 0.7);
-    d = smin(d, evalGatePlugs(0.62), isGrand ? 0.5 : 0.35);
-
-    // Sheltered carved canyon wall alcoves inside the inner mesa flanks
-    const alcoveRX = 0.12 * halfSpan;
-    const alcoveRY = 0.08 * worldHeight;
-    const alcoveRZ = 0.14 * halfSpan;
+    // Hollowed shadowed alcoves carved into the steep opposing gorge faces
+    const alcoveRX = 0.11 * halfSpan;
+    const alcoveRY = 0.085 * worldHeight;
+    const alcoveRZ = 0.13 * halfSpan;
     const westAlcove = sdEllipsoid(
       x,
       y,
       z,
-      wx(-0.36),
-      passY + 1.2 * hScale,
-      wz(0.0),
+      wx(CANYON_WEST_ALCOVE_U),
+      worldHeight * 0.25,
+      wz(0.14),
       alcoveRX,
       alcoveRY,
       alcoveRZ,
@@ -1112,793 +916,954 @@ function evaluateThemeSdf(
       x,
       y,
       z,
-      wx(0.36),
-      passY + 1.2 * hScale,
-      wz(0.0),
+      wx(CANYON_EAST_ALCOVE_U),
+      worldHeight * 0.25,
+      wz(-0.14),
       alcoveRX,
       alcoveRY,
       alcoveRZ,
     );
-    d = smax(d, -westAlcove, 0.8);
-    d = smax(d, -eastAlcove, 0.8);
+    d = smax(d, -westAlcove, isGrand ? 1.0 : 0.65);
+    d = smax(d, -eastAlcove, isGrand ? 1.0 : 0.65);
+
+    // Towering Monument Valley redrock butte outcrops on West & East rims (natural sightline cover)
+    const westButte = sdTaperedPlateau(
+      x,
+      y,
+      z,
+      wx(-0.62),
+      wz(0.02),
+      bottomY,
+      worldHeight * 0.68 + j.westHeight * 0.25 * hScale,
+      0.24 * halfSpan,
+      0.21 * halfSpan,
+      bevel * 0.85,
+    );
+    const westCoastSpur = sdTaperedPlateau(
+      x,
+      y,
+      z,
+      wx(-0.88),
+      wz(0.0),
+      bottomY,
+      worldHeight * 0.61 + j.westHeight * 0.2 * hScale,
+      0.16 * halfSpan,
+      0.14 * halfSpan,
+      bevel * 0.75,
+    );
+    const westBendShoulder = sdTaperedPlateau(
+      x,
+      y,
+      z,
+      wx(-0.34),
+      wz(0.24),
+      mesaBaseTop - 1.4 * hScale,
+      worldHeight * 0.62 + j.eastHeight * 0.2 * hScale,
+      0.15 * halfSpan,
+      0.13 * halfSpan,
+      bevel * 0.75,
+    );
+
+    const eastButte = sdTaperedPlateau(
+      x,
+      y,
+      z,
+      wx(0.62),
+      wz(-0.02),
+      bottomY,
+      worldHeight * 0.7 + j.eastHeight * 0.25 * hScale,
+      0.24 * halfSpan,
+      0.21 * halfSpan,
+      bevel * 0.85,
+    );
+    const eastCoastSpur = sdTaperedPlateau(
+      x,
+      y,
+      z,
+      wx(0.88),
+      wz(0.0),
+      bottomY,
+      worldHeight * 0.62 + j.eastHeight * 0.2 * hScale,
+      0.16 * halfSpan,
+      0.14 * halfSpan,
+      bevel * 0.75,
+    );
+    const eastBendShoulder = sdTaperedPlateau(
+      x,
+      y,
+      z,
+      wx(0.34),
+      wz(-0.24),
+      mesaBaseTop - 1.4 * hScale,
+      worldHeight * 0.63 + j.westHeight * 0.2 * hScale,
+      0.15 * halfSpan,
+      0.13 * halfSpan,
+      bevel * 0.75,
+    );
+
+    // Sculpted sandstone rim crag fins framing the inner canyon lips of all 4 mesas
+    const cragBaseT = isGrand ? 4.3 : 2.15;
+    const cragTopT = isGrand ? 2.5 : 1.3;
+    const cragBottomY = mesaBaseTop - 1.8 * hScale;
+    const cragTopY = worldHeight * 0.62;
+    const nwRimCrag = sdBastionWall(
+      x,
+      y,
+      z,
+      wx(-0.5),
+      wz(-0.84),
+      wx(-0.48),
+      wz(-0.42),
+      cragBottomY,
+      cragTopY + j.westHeight * 0.2 * hScale,
+      cragBaseT,
+      cragTopT,
+      wallBevel * 0.8,
+      0.08,
+    );
+    const neRimCrag = sdBastionWall(
+      x,
+      y,
+      z,
+      wx(0.38),
+      wz(-0.84),
+      wx(0.36),
+      wz(-0.46),
+      cragBottomY,
+      cragTopY + 0.3 * hScale + j.eastHeight * 0.2 * hScale,
+      cragBaseT,
+      cragTopT,
+      wallBevel * 0.8,
+      0.08,
+    );
+    const swRimCrag = sdBastionWall(
+      x,
+      y,
+      z,
+      wx(-0.38),
+      wz(0.84),
+      wx(-0.36),
+      wz(0.46),
+      cragBottomY,
+      cragTopY + j.eastHeight * 0.2 * hScale,
+      cragBaseT,
+      cragTopT,
+      wallBevel * 0.8,
+      0.08,
+    );
+    const seRimCrag = sdBastionWall(
+      x,
+      y,
+      z,
+      wx(0.5),
+      wz(0.84),
+      wx(0.48),
+      wz(0.42),
+      cragBottomY,
+      cragTopY + 0.25 * hScale + j.westHeight * 0.2 * hScale,
+      cragBaseT,
+      cragTopT,
+      wallBevel * 0.8,
+      0.08,
+    );
+
+    d = smin(d, westButte, unionK * 0.75);
+    d = smin(d, westCoastSpur, unionK * 0.65);
+    d = smin(d, westBendShoulder, unionK * 0.65);
+    d = smin(d, eastButte, unionK * 0.75);
+    d = smin(d, eastCoastSpur, unionK * 0.65);
+    d = smin(d, eastBendShoulder, unionK * 0.65);
+    d = smin(d, nwRimCrag, unionK * 0.55);
+    d = smin(d, neRimCrag, unionK * 0.55);
+    d = smin(d, swRimCrag, unionK * 0.55);
+    d = smin(d, seRimCrag, unionK * 0.55);
+
+    // 2 Soaring Natural Stone Arches bridging high above the open canyon gorge
+    const archW = isGrand ? 4.3 : 2.15;
+    const archT = isGrand ? 2.1 : 1.25;
+    const northArch = sdStoneArch(
+      x,
+      y,
+      z,
+      wx(-0.52),
+      wz(-0.38),
+      wx(0.18),
+      wz(-0.38),
+      mesaBaseTop - 0.35 * hScale,
+      worldHeight * 0.6 + j.archBoost * 0.22 * hScale,
+      archW,
+      archT,
+    );
+    const southArch = sdStoneArch(
+      x,
+      y,
+      z,
+      wx(-0.18),
+      wz(0.38),
+      wx(0.52),
+      wz(0.38),
+      mesaBaseTop - 0.35 * hScale,
+      worldHeight * 0.61 - j.archBoost * 0.22 * hScale,
+      archW,
+      archT,
+    );
+    d = smin(d, northArch, unionK * 0.5);
+    d = smin(d, southArch, unionK * 0.5);
+
+    // Subtle floating-island cliff skirt taper near outer shoreline
+    const radialNorm = Math.hypot(u, v);
+    const skirtCut =
+      wallBottomY - y + Math.max(0, radialNorm - 0.96) * halfSpan * 0.34;
+    d = smax(d, skirtCut, 0.85);
 
     return d + organicNoise;
   }
 
   if (theme === "mountain_spine") {
-    // 'mountain_spine' (Swiss Cheese Multi-Story Mountain Corridor):
-    // Winding narrow alpine spine with steep ocean flank drop-offs, staggered terraced
-    // mountain perches, multi-story stacked caves, 2 stacked stone bridges, and thick
-    // destructible rock peaks between every player.
-    const ledgeBotR = 0.2 * halfSpan;
-    const ledgeTopR = 0.32 * halfSpan;
-    const nwLedge = sdTaperedPlateau(
-      x,
-      y,
-      z,
-      wx(-0.6 + j.northShift * 0.025),
-      wz(-0.59),
-      bottomY,
-      spawnTopY - 0.1 + j.westHeight * 0.35,
-      ledgeBotR,
-      ledgeTopR,
-      bevel * 0.85,
-    );
-    const neLedge = sdTaperedPlateau(
-      x,
-      y,
-      z,
-      wx(0.6 + j.southShift * 0.025),
-      wz(-0.58),
-      bottomY,
-      spawnTopY + 0.55 + j.eastHeight * 0.35,
-      ledgeBotR,
-      ledgeTopR,
-      bevel * 0.85,
-    );
-    const swLedge = sdTaperedPlateau(
-      x,
-      y,
-      z,
-      wx(-0.6 - j.southShift * 0.02),
-      wz(0.58),
-      bottomY,
-      spawnTopY + 0.4 + j.eastHeight * 0.3,
-      ledgeBotR,
-      ledgeTopR,
-      bevel * 0.85,
-    );
-    const seLedge = sdTaperedPlateau(
-      x,
-      y,
-      z,
-      wx(0.6 - j.northShift * 0.02),
-      wz(0.59),
-      bottomY,
-      spawnTopY + 0.15 + j.westHeight * 0.3,
-      ledgeBotR,
-      ledgeTopR,
-      bevel * 0.85,
-    );
+    // Dragon's Backbone Ridge: dramatic diagonal S-curved alpine spine sweeping SW-to-NE
+    // over open ocean, crowned by 5 jagged serrated vertebrae crags, 4 staggered cantilevered
+    // cliffside rib-terraces overhanging the sea, and 3 deep pass-through rib-tunnels.
+    const along = (u - v) * Math.SQRT1_2;
+    const rawCross = (u + v) * Math.SQRT1_2;
+    const spineAngle = along * Math.PI * 1.05;
+    const spineCurve = 0.14 * Math.sin(spineAngle);
+    const cross = rawCross - spineCurve;
+    const spineSlope = 0.14 * Math.PI * 1.05 * Math.cos(spineAngle);
+    const crossDist = (Math.abs(cross) / Math.hypot(1.0, spineSlope)) * halfSpan;
 
-    // Narrow terraced alpine switchbacks hugging the inner gorge
-    const lowTerraceY = Math.max(bottomY + 1.35, worldHeight * 0.14);
-    const midTerraceY = worldHeight * 0.26;
-    const nwTerrace = sdTaperedPlateau(
-      x,
-      y,
-      z,
-      wx(-0.35),
-      wz(-0.32),
-      bottomY - 0.1,
-      lowTerraceY,
-      0.13 * halfSpan,
-      0.18 * halfSpan,
-      bevel * 0.65,
-    );
-    const seTerrace = sdTaperedPlateau(
-      x,
-      y,
-      z,
-      wx(0.35),
-      wz(0.32),
-      bottomY - 0.1,
-      lowTerraceY,
-      0.13 * halfSpan,
-      0.18 * halfSpan,
-      bevel * 0.65,
-    );
-    const neTerrace = sdTaperedPlateau(
-      x,
-      y,
-      z,
-      wx(0.34),
-      wz(-0.36),
-      bottomY,
-      midTerraceY,
-      0.12 * halfSpan,
-      0.17 * halfSpan,
-      bevel * 0.7,
-    );
-    const swTerrace = sdTaperedPlateau(
-      x,
-      y,
-      z,
-      wx(-0.34),
-      wz(0.36),
-      bottomY,
-      midTerraceY,
-      0.12 * halfSpan,
-      0.17 * halfSpan,
-      bevel * 0.7,
-    );
+    // Continuous steep diagonal alpine mountain mass along |along| <= 1.0
+    const spineTopY = worldHeight * (0.49 - 0.11 * Math.min(1.0, along * along));
+    const spineH = Math.max(1.0, spineTopY - bottomY);
+    const spineT = Math.max(0, Math.min(1, (y - bottomY) / spineH));
+    const spineSmoothT = spineT * spineT * (3 - 2 * spineT);
+    const spineHalfW = (0.31 - 0.16 * spineSmoothT) * halfSpan;
+    const spineAlongTrim = (Math.abs(along) - 1.0) * halfSpan;
+    const spineHoriz = Math.max(crossDist - spineHalfW, spineAlongTrim);
+    const spineMidY = (bottomY + spineTopY) * 0.5;
+    const spineVert = Math.abs(y - spineMidY) - spineH * 0.5;
+    const spineCore =
+      Math.hypot(Math.max(spineHoriz, 0), Math.max(spineVert, 0)) +
+      Math.min(Math.max(spineHoriz, spineVert), 0);
 
-    // Towering Central Alpine Summit Crag + Winding S-Curve Spine Shoulders
-    const summitPeak = sdTaperedPlateau(
-      x,
-      y,
-      z,
-      cx,
-      cz,
-      bottomY,
-      Math.min(worldHeight - 2.6 * hScale, centralPeakY + 1.25 * hScale + j.archBoost * 0.25),
-      0.21 * halfSpan,
-      0.24 * halfSpan,
-      bevel * 0.9,
-    );
-    const westShoulder = sdTaperedPlateau(
-      x,
-      y,
-      z,
-      wx(-0.24),
-      wz(0.16),
-      bottomY,
-      centralPeakY + 0.3 * hScale + j.westHeight * 0.25,
-      0.15 * halfSpan,
-      0.19 * halfSpan,
-      bevel * 0.85,
-    );
-    const eastShoulder = sdTaperedPlateau(
-      x,
-      y,
-      z,
-      wx(0.24),
-      wz(-0.16),
-      bottomY,
-      centralPeakY + 0.45 * hScale + j.eastHeight * 0.25,
-      0.15 * halfSpan,
-      0.19 * halfSpan,
-      bevel * 0.85,
-    );
+    // 5 Jagged Serrated "Vertebrae" Crag Peaks along the dragon's crest (zero per-voxel alloc)
+    const peakCeiling = worldHeight - 2.6 * hScale;
+    const peakBevel = bevel * 0.8;
+    const peakK = unionK * 0.72;
+    let d = spineCore;
+    for (let i = 0; i < SPINE_PEAKS.length; i++) {
+      const pk = SPINE_PEAKS[i];
+      if (!pk) continue;
+      const jitterVal =
+        pk.jitterKind === 0
+          ? j.westHeight
+          : pk.jitterKind === 1
+            ? j.eastHeight
+            : j.archBoost;
+      const peak = sdTaperedPlateau(
+        x,
+        y,
+        z,
+        wx(pk.u),
+        wz(pk.v),
+        bottomY,
+        Math.min(peakCeiling, worldHeight * pk.heightFrac + jitterVal * 0.25 * hScale),
+        pk.botR * halfSpan,
+        pk.topR * halfSpan,
+        peakBevel,
+      );
+      d = smin(d, peak, peakK);
+    }
 
-    // Thick winding spine ridge linking the shoulders across the central summit
-    const spineCoreWall = sdBastionWall(
-      x,
-      y,
-      z,
-      wx(-0.28),
-      wz(0.18),
-      wx(0.28),
-      wz(-0.18),
-      wallBottomY,
-      centralPeakY + 0.4 * hScale,
-      wallBaseThick * 1.18,
-      wallTopThick * 1.1,
-      wallBevel,
-      0.1,
-    );
+    // 4 Staggered Cantilevered Cliffside "Rib" Terraces overhanging open ocean in all 4 quadrants
+    const nwTerraceTop = worldHeight * 0.34 + j.westHeight * 0.28 * hScale;
+    const seTerraceTop = worldHeight * 0.37 + j.eastHeight * 0.28 * hScale;
+    const swTerraceTop = worldHeight * 0.31 + j.eastHeight * 0.25 * hScale;
+    const neTerraceTop = worldHeight * 0.41 + j.westHeight * 0.25 * hScale;
 
-    // 4 Towering Full-Width Destructible Mountain Ridge Barriers extending to sheer coastal cliffs
-    const ridgeTop = wallTopY + 0.65 * hScale;
-    const northRidge = sdBastionWall(
-      x,
-      y,
-      z,
-      cx,
-      wz(-0.08),
-      cx,
-      wz(-1.07),
-      wallBottomY,
-      ridgeTop + j.westHeight * 0.2,
-      wallBaseThick * 1.08,
-      wallTopThick * 1.02,
-      wallBevel,
-      0.18,
-    );
-    const southRidge = sdBastionWall(
-      x,
-      y,
-      z,
-      cx,
-      wz(0.08),
-      cx,
-      wz(1.07),
-      wallBottomY,
-      ridgeTop + j.eastHeight * 0.2,
-      wallBaseThick * 1.08,
-      wallTopThick * 1.02,
-      wallBevel,
-      0.18,
-    );
-    const westRidge = sdBastionWall(
-      x,
-      y,
-      z,
-      wx(-0.08),
-      cz,
-      wx(-1.07),
-      cz,
-      wallBottomY,
-      ridgeTop + j.eastHeight * 0.2,
-      wallBaseThick * 1.08,
-      wallTopThick * 1.02,
-      wallBevel,
-      0.18,
-    );
-    const eastRidge = sdBastionWall(
-      x,
-      y,
-      z,
-      wx(0.08),
-      cz,
-      wx(1.07),
-      cz,
-      wallBottomY,
-      ridgeTop + j.westHeight * 0.2,
-      wallBaseThick * 1.08,
-      wallTopThick * 1.02,
-      wallBevel,
-      0.18,
-    );
-
-    // 2 Stacked Stone Bridges: Lower canyon arch (SW <-> NE) + High sky-bridge (NW <-> SE)
-    const bridgeW = isGrand ? 3.7 : 2.05;
-    const bridgeT = isGrand ? 2.0 : 1.2;
-    const lowerBridge = sdStoneArch(
+    const nwRib = sdRoundedSlab(
       x,
       y,
       z,
       wx(-0.52),
-      wz(0.48),
-      wx(0.52),
-      wz(-0.48),
-      spawnTopY - 0.1,
-      worldHeight * 0.34,
-      bridgeW,
-      bridgeT,
+      wz(-0.5),
+      worldHeight * 0.13,
+      nwTerraceTop,
+      0.27 * halfSpan,
+      0.26 * halfSpan,
+      peakBevel,
+      0.28,
     );
-    const upperBridge = sdStoneArch(
+    const seRib = sdRoundedSlab(
       x,
       y,
       z,
-      wx(-0.54),
-      wz(-0.5),
-      wx(0.54),
+      wx(0.52),
       wz(0.5),
-      spawnTopY + 1.2 * hScale,
-      centralPeakY - 0.45 * hScale,
-      bridgeW * 0.94,
-      bridgeT,
+      worldHeight * 0.14,
+      seTerraceTop,
+      0.27 * halfSpan,
+      0.26 * halfSpan,
+      peakBevel,
+      0.28,
+    );
+    const swRib = sdRoundedSlab(
+      x,
+      y,
+      z,
+      wx(-0.64),
+      wz(0.46),
+      bottomY,
+      swTerraceTop,
+      0.26 * halfSpan,
+      0.27 * halfSpan,
+      peakBevel,
+      0.22,
+    );
+    const neRib = sdRoundedSlab(
+      x,
+      y,
+      z,
+      wx(0.64),
+      wz(-0.46),
+      bottomY,
+      neTerraceTop,
+      0.26 * halfSpan,
+      0.27 * halfSpan,
+      peakBevel,
+      0.22,
     );
 
-    let d = smin(nwLedge, neLedge, unionK * 0.9);
-    d = smin(d, swLedge, unionK * 0.9);
-    d = smin(d, seLedge, unionK * 0.9);
-    d = smin(d, nwTerrace, unionK * 0.7);
-    d = smin(d, seTerrace, unionK * 0.7);
-    d = smin(d, neTerrace, unionK * 0.7);
-    d = smin(d, swTerrace, unionK * 0.7);
-    d = smin(d, summitPeak, unionK * 0.85);
-    d = smin(d, westShoulder, unionK * 0.8);
-    d = smin(d, eastShoulder, unionK * 0.8);
-    d = smin(d, spineCoreWall, unionK * 0.75);
-    d = smin(d, northRidge, unionK * 0.65);
-    d = smin(d, southRidge, unionK * 0.65);
-    d = smin(d, westRidge, unionK * 0.65);
-    d = smin(d, eastRidge, unionK * 0.65);
-    d = smin(d, lowerBridge, unionK * 0.5);
-    d = smin(d, upperBridge, unionK * 0.5);
+    // Solid cliff rib-buttresses anchoring the cantilevered NW & SE terraces into the dragon spine
+    const nwRoot = sdRampArch(
+      x,
+      y,
+      z,
+      wx(SPINE_NW_ROOT[0]),
+      worldHeight * 0.22,
+      wz(SPINE_NW_ROOT[1]),
+      wx(-0.5),
+      nwTerraceTop - 1.2 * hScale,
+      wz(-0.48),
+      0.16 * halfSpan,
+      worldHeight * 0.11,
+      0.0,
+    );
+    const seRoot = sdRampArch(
+      x,
+      y,
+      z,
+      wx(SPINE_SE_ROOT[0]),
+      worldHeight * 0.23,
+      wz(SPINE_SE_ROOT[1]),
+      wx(0.5),
+      seTerraceTop - 1.2 * hScale,
+      wz(0.48),
+      0.16 * halfSpan,
+      worldHeight * 0.11,
+      0.0,
+    );
 
-    // Multi-story "Swiss Cheese" Stacked Caves carved straight through the alpine spine!
-    // Story 1: Lower East-West cavern tunnel at tunnelY (0.20 * worldHeight)
-    const lowerCaveR = isGrand ? 3.55 : 2.15;
-    const lowerCave =
-      distToSegment(
-        x,
-        y,
-        z,
-        wx(-0.42),
-        tunnelY,
-        cz,
-        wx(0.42),
-        tunnelY,
-        cz,
-      ) - lowerCaveR;
-    d = smax(d, -lowerCave, isGrand ? 0.95 : 0.6);
+    // Sculpted alpine flank rib-spurs jutting off Peaks 1 & 3 (natural Turn-1 LOS cover between NW<->SW and SE<->NE)
+    const nwSpur = sdBastionWall(
+      x,
+      y,
+      z,
+      wx(SPINE_NW_SPUR_BASE[0]),
+      wz(SPINE_NW_SPUR_BASE[1]),
+      wx(-0.74),
+      wz(-0.02),
+      bottomY,
+      worldHeight * 0.56 + j.westHeight * 0.2 * hScale,
+      isGrand ? 4.8 : 2.5,
+      isGrand ? 2.7 : 1.45,
+      wallBevel * 0.85,
+      0.12,
+    );
+    const seSpur = sdBastionWall(
+      x,
+      y,
+      z,
+      wx(SPINE_SE_SPUR_BASE[0]),
+      wz(SPINE_SE_SPUR_BASE[1]),
+      wx(0.74),
+      wz(0.02),
+      bottomY,
+      worldHeight * 0.58 + j.eastHeight * 0.2 * hScale,
+      isGrand ? 4.8 : 2.5,
+      isGrand ? 2.7 : 1.45,
+      wallBevel * 0.85,
+      0.12,
+    );
 
-    // Story 2: Upper North-South cross-cave gallery at 0.42 * worldHeight (leaving solid summit overhead!)
-    const upperCaveY = worldHeight * 0.42;
-    const upperCaveR = isGrand ? 3.05 : 1.85;
-    const upperCave =
-      distToSegment(
-        x,
-        y,
-        z,
-        cx,
-        upperCaveY,
-        wz(-0.38),
-        cx,
-        upperCaveY,
-        wz(0.38),
-      ) - upperCaveR;
-    d = smax(d, -upperCave, isGrand ? 0.85 : 0.55);
+    // Narrow curved stone flank ridge arches linking adjacent rib-terraces over the ocean coves
+    const flankW = isGrand ? 3.5 : 1.9;
+    const flankT = isGrand ? 1.9 : 1.15;
+    const nwSwArch = sdRampArch(
+      x,
+      y,
+      z,
+      wx(-0.56),
+      nwTerraceTop - 0.5 * hScale,
+      wz(-0.38),
+      wx(-0.62),
+      swTerraceTop - 0.4 * hScale,
+      wz(0.34),
+      flankW,
+      flankT,
+      1.6 * hScale,
+    );
+    const seNeArch = sdRampArch(
+      x,
+      y,
+      z,
+      wx(0.56),
+      seTerraceTop - 0.5 * hScale,
+      wz(0.38),
+      wx(0.62),
+      neTerraceTop - 0.4 * hScale,
+      wz(-0.34),
+      flankW,
+      flankT,
+      1.6 * hScale,
+    );
 
-    // Mid-level flank chambers hollowed inside the twin spine shoulders
-    const shoulderCaveY = worldHeight * 0.3;
-    const shoulderCaveR = isGrand ? 2.8 : 1.7;
-    const westShoulderCave =
-      distToSegment(
-        x,
-        y,
-        z,
-        wx(-0.38),
-        shoulderCaveY,
-        wz(0.06),
-        wx(-0.12),
-        shoulderCaveY,
-        wz(0.28),
-      ) - shoulderCaveR;
-    const eastShoulderCave =
-      distToSegment(
-        x,
-        y,
-        z,
-        wx(0.12),
-        shoulderCaveY,
-        wz(-0.28),
-        wx(0.38),
-        shoulderCaveY,
-        wz(-0.06),
-      ) - shoulderCaveR;
-    d = smax(d, -westShoulderCave, 0.55);
-    d = smax(d, -eastShoulderCave, 0.55);
+    d = smin(d, nwRib, unionK * 0.8);
+    d = smin(d, seRib, unionK * 0.8);
+    d = smin(d, swRib, unionK * 0.8);
+    d = smin(d, neRib, unionK * 0.8);
+    d = smin(d, nwRoot, unionK * 0.7);
+    d = smin(d, seRoot, unionK * 0.7);
+    d = smin(d, nwSpur, unionK * 0.65);
+    d = smin(d, seSpur, unionK * 0.65);
+    d = smin(d, nwSwArch, unionK * 0.45);
+    d = smin(d, seNeArch, unionK * 0.45);
 
-    // Carved lower arched mountain passes through the 4 dividing walls, sealed with destructible rock plugs
-    const mPassN =
+    // 3 Deep Carved Rib-Tunnels piercing straight through the backbone (leaving solid jagged peaks overhead!)
+    const swTunY = worldHeight * 0.2;
+    const swTunR = isGrand ? 3.4 : 2.1;
+    const swTunnel =
       distToSegment(
         x,
         y,
         z,
-        wx(-0.2),
-        passY,
-        wz(-0.58),
-        wx(0.2),
-        passY,
-        wz(-0.58),
-      ) - passRadius;
-    const mPassS =
-      distToSegment(
-        x,
-        y,
-        z,
-        wx(-0.2),
-        passY,
-        wz(0.58),
-        wx(0.2),
-        passY,
-        wz(0.58),
-      ) - passRadius;
-    const mPassW =
-      distToSegment(
-        x,
-        y,
-        z,
-        wx(-0.58),
-        passY,
-        wz(-0.2),
-        wx(-0.58),
-        passY,
-        wz(0.2),
-      ) - passRadius;
-    const mPassE =
-      distToSegment(
-        x,
-        y,
-        z,
-        wx(0.58),
-        passY,
-        wz(-0.2),
-        wx(0.58),
-        passY,
-        wz(0.2),
-      ) - passRadius;
+        wx(SPINE_SW_TUN_A[0]),
+        swTunY,
+        wz(SPINE_SW_TUN_A[1]),
+        wx(SPINE_SW_TUN_B[0]),
+        swTunY,
+        wz(SPINE_SW_TUN_B[1]),
+      ) - swTunR;
 
-    d = smax(d, -mPassN, 0.65);
-    d = smax(d, -mPassS, 0.65);
-    d = smax(d, -mPassW, 0.65);
-    d = smax(d, -mPassE, 0.65);
-    d = smin(d, evalGatePlugs(0.58), isGrand ? 0.5 : 0.35);
+    const midTunY = worldHeight * 0.23;
+    const midTunR = isGrand ? 3.7 : 2.25;
+    const midTunnel =
+      distToSegment(
+        x,
+        y,
+        z,
+        wx(SPINE_MID_TUN_A[0]),
+        midTunY,
+        wz(SPINE_MID_TUN_A[1]),
+        wx(SPINE_MID_TUN_B[0]),
+        midTunY,
+        wz(SPINE_MID_TUN_B[1]),
+      ) - midTunR;
 
-    // Steep ocean flank drop-offs along the outer corners (preserving sheer coastal divider walls)
+    const neTunY = worldHeight * 0.27;
+    const neTunR = isGrand ? 3.25 : 2.0;
+    const neTunnel =
+      distToSegment(
+        x,
+        y,
+        z,
+        wx(SPINE_NE_TUN_A[0]),
+        neTunY,
+        wz(SPINE_NE_TUN_A[1]),
+        wx(SPINE_NE_TUN_B[0]),
+        neTunY,
+        wz(SPINE_NE_TUN_B[1]),
+      ) - neTunR;
+
+    d = smax(d, -swTunnel, isGrand ? 0.9 : 0.55);
+    d = smax(d, -midTunnel, isGrand ? 0.95 : 0.6);
+    d = smax(d, -neTunnel, isGrand ? 0.85 : 0.55);
+
+    // Sheer ocean drop-offs outside the island perimeter
     const radialNorm = Math.hypot(u, v);
-    const wallAxisRelief = Math.max(
-      0,
-      1 - Math.min(Math.abs(u), Math.abs(v)) / 0.16,
-    );
-    const flankSkirtStart = 0.89 + wallAxisRelief * 0.19;
-    const flankDrop =
-      wallBottomY - y + Math.max(0, radialNorm - flankSkirtStart) * halfSpan * 0.36;
-    d = smax(d, flankDrop, 0.8);
+    const skirtCut =
+      wallBottomY - y + Math.max(0, radialNorm - 0.96) * halfSpan * 0.36;
+    d = smax(d, skirtCut, 0.8);
 
     return d + organicNoise;
   }
 
-  // 'twin_pillars' (Sky Twin Citadels): 4 outer sky-atoll basins separated by towering
-  // cliff battlement walls & sea-stacks, flanking twin cliff citadels joined by a sky-wall.
-  const atollBotR = 0.21 * halfSpan;
-  const atollTopR = 0.34 * halfSpan;
-  const nwAtoll = sdTaperedPlateau(
+  // 'twin_pillars' (Two-Story Pillared Sky-Citadel):
+  // Story 1 sunlit lower sea-level plaza & 4 outer coastal wings with open ocean moon-wells,
+  // 8 towering tapered support pillars + 2 tall central sentinel obelisks,
+  // Story 2 twin elevated sky-deck citadels overhead joined by a soaring central sky-bridge
+  // and 2 curved outer stone climb ramps connecting Story 1 to Story 2.
+  const deck1TopY = worldHeight * 0.21;
+  const deck2BottomY = worldHeight * 0.49;
+  const deck2TopY = worldHeight * 0.6;
+
+  // Story 1: Central sunlit lower temple plaza + 4 outer coastal wings
+  const lowerPlaza = sdRoundedSlab(
     x,
     y,
     z,
-    wx(-0.61),
-    wz(-0.6 + j.northShift * 0.025),
+    cx,
+    cz,
     bottomY,
-    spawnTopY - 0.1 + j.westHeight * 0.4,
-    atollBotR,
-    atollTopR,
-    bevel,
+    deck1TopY,
+    0.66 * halfSpan,
+    0.44 * halfSpan,
+    bevel * 0.85,
+    0.18,
   );
-  const neAtoll = sdTaperedPlateau(
+  const wingRx = 0.31 * halfSpan;
+  const wingRz = 0.28 * halfSpan;
+  const nwWing = sdRoundedSlab(
     x,
     y,
     z,
-    wx(0.61),
-    wz(-0.6 + j.southShift * 0.025),
+    wx(-0.62),
+    wz(-0.58),
     bottomY,
-    spawnTopY + 0.1 + j.eastHeight * 0.4,
-    atollBotR,
-    atollTopR,
-    bevel,
+    deck1TopY + 0.25 * hScale + j.westHeight * 0.2 * hScale,
+    wingRx,
+    wingRz,
+    bevel * 0.8,
+    0.2,
   );
-  const swAtoll = sdTaperedPlateau(
+  const neWing = sdRoundedSlab(
     x,
     y,
     z,
-    wx(-0.61),
-    wz(0.6 - j.southShift * 0.025),
+    wx(0.62),
+    wz(-0.58),
     bottomY,
-    spawnTopY + j.eastHeight * 0.3,
-    atollBotR,
-    atollTopR,
-    bevel,
+    deck1TopY + 0.35 * hScale + j.eastHeight * 0.2 * hScale,
+    wingRx,
+    wingRz,
+    bevel * 0.8,
+    0.2,
   );
-  const seAtoll = sdTaperedPlateau(
+  const swWing = sdRoundedSlab(
     x,
     y,
     z,
-    wx(0.61),
-    wz(0.6 - j.northShift * 0.025),
+    wx(-0.62),
+    wz(0.58),
     bottomY,
-    spawnTopY + 0.2 + j.westHeight * 0.3,
-    atollBotR,
-    atollTopR,
-    bevel,
+    deck1TopY + 0.2 * hScale + j.eastHeight * 0.2 * hScale,
+    wingRx,
+    wingRz,
+    bevel * 0.8,
+    0.2,
+  );
+  const seWing = sdRoundedSlab(
+    x,
+    y,
+    z,
+    wx(0.62),
+    wz(0.58),
+    bottomY,
+    deck1TopY + 0.3 * hScale + j.westHeight * 0.2 * hScale,
+    wingRx,
+    wingRz,
+    bevel * 0.8,
+    0.2,
   );
 
-  // Twin towering central cliff fortresses + solid central citadel sky-wall bridge
-  const westPillar = sdTaperedPlateau(
+  let d = smin(lowerPlaza, nwWing, unionK * 0.75);
+  d = smin(d, neWing, unionK * 0.75);
+  d = smin(d, swWing, unionK * 0.75);
+  d = smin(d, seWing, unionK * 0.75);
+
+  // Carve dramatic open ocean drop shafts / moon-wells through Story 1
+  const northWell = Math.hypot(x - cx, z - wz(-0.58)) - 0.23 * halfSpan;
+  const southWell = Math.hypot(x - cx, z - wz(0.58)) - 0.23 * halfSpan;
+  const centerWell = Math.hypot(x - cx, z - cz) - 0.1 * halfSpan;
+  d = smax(d, -northWell, isGrand ? 0.9 : 0.55);
+  d = smax(d, -southWell, isGrand ? 0.9 : 0.55);
+  d = smax(d, -centerWell, isGrand ? 0.75 : 0.45);
+
+  // 8 Towering Tapered Sculpted Stone Support Pillars rising from bottomY through Story 1 into Story 2
+  const pillarR = 0.092 * halfSpan;
+  const pillarBevel = isGrand ? 0.75 : 0.48;
+  const pillarTopY = deck2BottomY + 0.9 * hScale;
+  const pillarK = unionK * 0.55;
+  for (let i = 0; i < TWIN_SUPPORT_PILLARS.length; i++) {
+    const pair = TWIN_SUPPORT_PILLARS[i];
+    if (!pair) continue;
+    const col = sdCylinderPillar(
+      x,
+      y,
+      z,
+      wx(pair[0]),
+      wz(pair[1]),
+      bottomY,
+      pillarTopY,
+      pillarR,
+      pillarBevel,
+      0.14,
+    );
+    d = smin(d, col, pillarK);
+  }
+
+  // 2 Tall Sentinel Monolith Obelisks framing the central sea-colonnade (blocking lower cross-plaza LOS)
+  const obeliskR = 0.095 * halfSpan;
+  const obeliskTopY = worldHeight * 0.72 + j.archBoost * 0.2 * hScale;
+  const obeliskA = sdCylinderPillar(
     x,
     y,
     z,
-    wx(-0.17),
+    wx(0.16),
+    wz(-0.15),
+    bottomY,
+    obeliskTopY,
+    obeliskR,
+    pillarBevel,
+    0.18,
+  );
+  const obeliskB = sdCylinderPillar(
+    x,
+    y,
+    z,
+    wx(-0.16),
+    wz(0.15),
+    bottomY,
+    obeliskTopY,
+    obeliskR,
+    pillarBevel,
+    0.18,
+  );
+  d = smin(d, obeliskA, unionK * 0.5);
+  d = smin(d, obeliskB, unionK * 0.5);
+
+  // Story 2: Twin Elevated Sky-Deck Citadels overhead (~28% worldHeight open-air colonnade gap!)
+  const westDeckTopY = deck2TopY + j.westHeight * 0.22 * hScale;
+  const eastDeckTopY = deck2TopY + j.eastHeight * 0.22 * hScale;
+  const westSkyDeck = sdRoundedSlab(
+    x,
+    y,
+    z,
+    wx(-0.44),
     wz(-0.04),
-    bottomY,
-    centralPeakY + 0.25 + j.westHeight * 0.3,
-    0.16 * halfSpan,
-    0.2 * halfSpan,
-    bevel * 0.9,
+    deck2BottomY,
+    westDeckTopY,
+    0.29 * halfSpan,
+    0.36 * halfSpan,
+    bevel * 0.65,
+    0.2,
   );
-  const eastPillar = sdTaperedPlateau(
+  const eastSkyDeck = sdRoundedSlab(
     x,
     y,
     z,
-    wx(0.17),
+    wx(0.44),
     wz(0.04),
+    deck2BottomY,
+    eastDeckTopY,
+    0.29 * halfSpan,
+    0.36 * halfSpan,
+    bevel * 0.65,
+    0.2,
+  );
+  d = smin(d, westSkyDeck, unionK * 0.6);
+  d = smin(d, eastSkyDeck, unionK * 0.6);
+
+  // Sculpted stone temple parapet crags along inner corners of both Sky-Decks (natural Story 2 cover)
+  const parapetH = worldHeight * 0.73;
+  const parapetBaseT = isGrand ? 3.2 : 1.7;
+  const parapetTopT = isGrand ? 2.1 : 1.15;
+  const westParapet = sdBastionWall(
+    x,
+    y,
+    z,
+    wx(-0.24),
+    wz(-0.36),
+    wx(-0.24),
+    wz(-0.14),
+    deck2BottomY + 0.4 * hScale,
+    parapetH,
+    parapetBaseT,
+    parapetTopT,
+    wallBevel * 0.65,
+    0.06,
+  );
+  const eastParapet = sdBastionWall(
+    x,
+    y,
+    z,
+    wx(0.24),
+    wz(0.14),
+    wx(0.24),
+    wz(0.36),
+    deck2BottomY + 0.4 * hScale,
+    parapetH,
+    parapetBaseT,
+    parapetTopT,
+    wallBevel * 0.65,
+    0.06,
+  );
+  d = smin(d, westParapet, unionK * 0.4);
+  d = smin(d, eastParapet, unionK * 0.4);
+
+  // Coastal temple gate obelisks flanking the NE & SW lower climb ramp entrances
+  const gateColR = 0.085 * halfSpan;
+  const neGateCol = sdCylinderPillar(
+    x,
+    y,
+    z,
+    wx(0.42),
+    wz(-0.48),
     bottomY,
-    centralPeakY + 0.4 + j.eastHeight * 0.3,
-    0.16 * halfSpan,
-    0.2 * halfSpan,
-    bevel * 0.9,
+    worldHeight * 0.52,
+    gateColR,
+    pillarBevel,
+    0.15,
   );
-  const centralSkyWall = sdBastionWall(
+  const swGateCol = sdCylinderPillar(
     x,
     y,
     z,
-    wx(-0.2),
-    wz(-0.05),
-    wx(0.2),
-    wz(0.05),
+    wx(-0.42),
+    wz(0.48),
     bottomY,
-    centralPeakY - 0.1,
-    wallBaseThick * 1.15,
-    wallTopThick * 1.15,
-    wallBevel,
-    0.12,
+    worldHeight * 0.52,
+    gateColR,
+    pillarBevel,
+    0.15,
   );
+  d = smin(d, neGateCol, unionK * 0.45);
+  d = smin(d, swGateCol, unionK * 0.45);
 
-  // 4 Tall Full-Width Radiating Cliff Battlement Walls extending past the shoreline into sheer cliffs
-  const battlementTop = wallTopY + 0.15;
-  const nBattlement = sdBastionWall(
+  // Soaring Central Sky-Bridge Arch linking West Sky-Deck <-> East Sky-Deck across open air
+  const skyBridge = sdStoneArch(
     x,
     y,
     z,
-    cx,
-    wz(-0.08),
-    cx,
-    wz(-1.07),
-    wallBottomY,
-    battlementTop,
-    wallBaseThick,
-    wallTopThick,
-    wallBevel,
-  );
-  const sBattlement = sdBastionWall(
-    x,
-    y,
-    z,
-    cx,
-    wz(0.08),
-    cx,
-    wz(1.07),
-    wallBottomY,
-    battlementTop,
-    wallBaseThick,
-    wallTopThick,
-    wallBevel,
-  );
-  const wBattlement = sdBastionWall(
-    x,
-    y,
-    z,
-    wx(-0.08),
-    cz,
-    wx(-1.07),
-    cz,
-    wallBottomY,
-    battlementTop,
-    wallBaseThick,
-    wallTopThick,
-    wallBevel,
-  );
-  const eBattlement = sdBastionWall(
-    x,
-    y,
-    z,
-    wx(0.08),
-    cz,
-    wx(1.07),
-    cz,
-    wallBottomY,
-    battlementTop,
-    wallBaseThick,
-    wallTopThick,
-    wallBevel,
-  );
-
-  // Sandy coastal coves & scenic overhanging cliff ledges
-  const coveTop = Math.max(bottomY + 1.25, worldHeight * 0.125);
-  const nwBeach = sdTaperedPlateau(
-    x,
-    y,
-    z,
-    wx(-0.36),
-    wz(-0.34),
-    bottomY - 0.15,
-    coveTop,
-    0.14 * halfSpan,
-    0.2 * halfSpan,
-    bevel * 0.7,
-  );
-  const seBeach = sdTaperedPlateau(
-    x,
-    y,
-    z,
-    wx(0.36),
-    wz(0.34),
-    bottomY - 0.15,
-    coveTop,
-    0.14 * halfSpan,
-    0.2 * halfSpan,
-    bevel * 0.7,
-  );
-  const neLedge = sdEllipsoid(
-    x,
-    y,
-    z,
-    wx(0.38),
-    worldHeight * 0.31,
-    wz(-0.35),
-    0.16 * halfSpan,
-    0.055 * worldHeight,
-    0.15 * halfSpan,
-  );
-  const swLedge = sdEllipsoid(
-    x,
-    y,
-    z,
-    wx(-0.38),
-    worldHeight * 0.3,
-    wz(0.35),
-    0.16 * halfSpan,
-    0.055 * worldHeight,
-    0.15 * halfSpan,
-  );
-
-  // Narrow elevated stone sky-bridges linking outer atolls to the twin citadels
-  const brW = isGrand ? 3.5 : 1.95;
-  const brT = isGrand ? 2.0 : 1.2;
-  const nwBridge = sdStoneArch(
-    x,
-    y,
-    z,
-    wx(-0.55),
-    wz(-0.52),
-    wx(-0.18),
-    wz(-0.06),
-    spawnTopY + 0.5,
-    wallTopY - 1.4,
-    brW,
-    brT,
-  );
-  const swBridge = sdStoneArch(
-    x,
-    y,
-    z,
-    wx(-0.55),
-    wz(0.52),
-    wx(-0.18),
-    wz(0.02),
-    spawnTopY + 0.5,
-    wallTopY - 1.5,
-    brW,
-    brT,
-  );
-  const neBridge = sdStoneArch(
-    x,
-    y,
-    z,
-    wx(0.55),
-    wz(-0.52),
-    wx(0.18),
+    wx(-0.26),
     wz(-0.02),
-    spawnTopY + 0.5,
-    wallTopY - 1.3,
-    brW,
-    brT,
+    wx(0.26),
+    wz(0.02),
+    deck2TopY - 0.4 * hScale,
+    worldHeight * 0.69 + j.archBoost * 0.18 * hScale,
+    isGrand ? 4.2 : 2.2,
+    isGrand ? 2.1 : 1.35,
   );
-  const seBridge = sdStoneArch(
+  d = smin(d, skyBridge, unionK * 0.45);
+
+  // 2 Curved Outer Stone Climb Ramps connecting Story 1 coastal wings up onto Story 2 Sky-Decks
+  const rampW = isGrand ? 3.8 : 2.05;
+  const rampT = isGrand ? 2.0 : 1.2;
+  const northRamp = sdRampArch(
     x,
     y,
     z,
-    wx(0.55),
-    wz(0.52),
-    wx(0.18),
-    wz(0.06),
-    spawnTopY + 0.5,
-    wallTopY - 1.3,
-    brW,
-    brT,
+    wx(0.62),
+    deck1TopY - 0.1 * hScale,
+    wz(-0.56),
+    wx(0.56),
+    eastDeckTopY - 0.35 * hScale,
+    wz(-0.14),
+    rampW,
+    rampT,
+    1.1 * hScale,
   );
-
-  let d = smin(nwAtoll, neAtoll, unionK);
-  d = smin(d, swAtoll, unionK);
-  d = smin(d, seAtoll, unionK);
-  d = smin(d, westPillar, unionK * 0.85);
-  d = smin(d, eastPillar, unionK * 0.85);
-  d = smin(d, centralSkyWall, unionK * 0.75);
-  d = smin(d, nBattlement, unionK * 0.7);
-  d = smin(d, sBattlement, unionK * 0.7);
-  d = smin(d, wBattlement, unionK * 0.7);
-  d = smin(d, eBattlement, unionK * 0.7);
-  d = smin(d, nwBeach, unionK * 0.65);
-  d = smin(d, seBeach, unionK * 0.65);
-  d = smin(d, neLedge, unionK * 0.6);
-  d = smin(d, swLedge, unionK * 0.6);
-  d = smin(d, nwBridge, unionK * 0.5);
-  d = smin(d, swBridge, unionK * 0.5);
-  d = smin(d, neBridge, unionK * 0.5);
-  d = smin(d, seBridge, unionK * 0.5);
-
-  // Carved sea-cave bypass tunnels through the bases of the twin citadels & walls
-  const caveR = isGrand ? 3.3 : 2.05;
-  const centralCave =
-    distToSegment(x, y, z, wx(-0.36), tunnelY, cz, wx(0.36), tunnelY, cz) -
-    caveR;
-  d = smax(d, -centralCave, 0.7);
-
-  const bPassN =
-    distToSegment(
-      x,
-      y,
-      z,
-      wx(-0.2),
-      passY,
-      wz(-0.58),
-      wx(0.2),
-      passY,
-      wz(-0.58),
-    ) - passRadius;
-  const bPassS =
-    distToSegment(
-      x,
-      y,
-      z,
-      wx(-0.2),
-      passY,
-      wz(0.58),
-      wx(0.2),
-      passY,
-      wz(0.58),
-    ) - passRadius;
-  const bPassW =
-    distToSegment(
-      x,
-      y,
-      z,
-      wx(-0.58),
-      passY,
-      wz(-0.2),
-      wx(-0.58),
-      passY,
-      wz(0.2),
-    ) - passRadius;
-  const bPassE =
-    distToSegment(
-      x,
-      y,
-      z,
-      wx(0.58),
-      passY,
-      wz(-0.2),
-      wx(0.58),
-      passY,
-      wz(0.2),
-    ) - passRadius;
-
-  d = smax(d, -bPassN, 0.65);
-  d = smax(d, -bPassS, 0.65);
-  d = smax(d, -bPassW, 0.65);
-  d = smax(d, -bPassE, 0.65);
-  d = smin(d, evalGatePlugs(0.58), isGrand ? 0.5 : 0.35);
-
-  // Dramatic underside hollows beneath the overhanging coastal ledges
-  const underNE = sdEllipsoid(
+  const southRamp = sdRampArch(
     x,
     y,
     z,
-    wx(0.38),
-    worldHeight * 0.21,
-    wz(-0.35),
-    0.13 * halfSpan,
-    0.068 * worldHeight,
-    0.12 * halfSpan,
+    wx(-0.62),
+    deck1TopY - 0.1 * hScale,
+    wz(0.56),
+    wx(-0.56),
+    westDeckTopY - 0.35 * hScale,
+    wz(0.14),
+    rampW,
+    rampT,
+    1.1 * hScale,
   );
-  const underSW = sdEllipsoid(
-    x,
-    y,
-    z,
-    wx(-0.38),
-    worldHeight * 0.2,
-    wz(0.35),
-    0.13 * halfSpan,
-    0.068 * worldHeight,
-    0.12 * halfSpan,
-  );
-  d = smax(d, -underNE, 0.75);
-  d = smax(d, -underSW, 0.75);
+  d = smin(d, northRamp, unionK * 0.5);
+  d = smin(d, southRamp, unionK * 0.5);
 
   return d + organicNoise;
+}
+
+const CANYON_WEST_ALCOVE_U = 0.22 * Math.sin(0.14 * Math.PI * 0.95) - 0.25;
+const CANYON_EAST_ALCOVE_U = 0.22 * Math.sin(-0.14 * Math.PI * 0.95) + 0.25;
+
+function spineNormUV(along: number, cross: number): readonly [number, number] {
+  const rc = cross + 0.14 * Math.sin(along * Math.PI * 1.05);
+  return [(along + rc) * Math.SQRT1_2, (rc - along) * Math.SQRT1_2];
+}
+
+interface SpinePeakSpec {
+  readonly u: number;
+  readonly v: number;
+  readonly heightFrac: number;
+  readonly botR: number;
+  readonly topR: number;
+  readonly jitterKind: 0 | 1 | 2;
+}
+
+const SPINE_PEAKS: readonly SpinePeakSpec[] = (
+  [
+    [-0.74, 0.6, 0.165, 0.08, 0],
+    [-0.37, 0.68, 0.18, 0.088, 1],
+    [0.0, 0.73, 0.2, 0.095, 2],
+    [0.37, 0.69, 0.18, 0.088, 0],
+    [0.74, 0.61, 0.165, 0.08, 1],
+  ] as const
+).map(([along, heightFrac, botR, topR, jitterKind]) => {
+  const [u, v] = spineNormUV(along, 0);
+  return { u, v, heightFrac, botR, topR, jitterKind };
+});
+
+const SPINE_NW_ROOT = spineNormUV(-0.04, -0.14);
+const SPINE_SE_ROOT = spineNormUV(0.04, 0.14);
+const SPINE_NW_SPUR_BASE = spineNormUV(-0.37, -0.04);
+const SPINE_SE_SPUR_BASE = spineNormUV(0.37, 0.04);
+const SPINE_SW_TUN_A = spineNormUV(-0.37, -0.44);
+const SPINE_SW_TUN_B = spineNormUV(-0.37, 0.44);
+const SPINE_MID_TUN_A = spineNormUV(0.0, -0.48);
+const SPINE_MID_TUN_B = spineNormUV(0.0, 0.48);
+const SPINE_NE_TUN_A = spineNormUV(0.37, -0.44);
+const SPINE_NE_TUN_B = spineNormUV(0.37, 0.44);
+
+const TWIN_SUPPORT_PILLARS: ReadonlyArray<readonly [number, number]> = [
+  [-0.58, -0.26],
+  [-0.3, -0.24],
+  [-0.58, 0.18],
+  [-0.3, 0.2],
+  [0.3, -0.2],
+  [0.58, -0.18],
+  [0.3, 0.24],
+  [0.58, 0.26],
+];
+
+/**
+ * Smooth sculpted cylindrical stone pillar with subtle organic waist taper,
+ * zero-trig algebraic fluting, and smoothly flared base & capital rings.
+ */
+function sdCylinderPillar(
+  px: number,
+  py: number,
+  pz: number,
+  cx: number,
+  cz: number,
+  bottomY: number,
+  topY: number,
+  radius: number,
+  bevel: number,
+  waistPinch = 0.14,
+): number {
+  const h = Math.max(0.4, topY - bottomY);
+  const t = Math.max(0, Math.min(1, (py - bottomY) / h));
+  const flare = 1.0 - waistPinch * 4.0 * t * (1.0 - t);
+  const baseT = Math.max(0, Math.min(1, (0.2 - t) * 5.0));
+  const capT = Math.max(0, Math.min(1, (t - 0.8) * 5.0));
+  const baseFlare = baseT * baseT * (3 - 2 * baseT) * 0.22;
+  const capFlare = capT * capT * (3 - 2 * capT) * 0.24;
+  const dx = px - cx;
+  const dz = pz - cz;
+  const dx2 = dx * dx;
+  const dz2 = dz * dz;
+  const rSq = dx2 + dz2;
+  const flute =
+    rSq > 1e-6
+      ? 1.0 + 0.03 * (((dx2 - dz2) * (dx2 - dz2)) / (rSq * rSq) - 0.5)
+      : 1.0;
+  const effR = Math.max(
+    0.25,
+    radius * (flare + baseFlare + capFlare) * flute - bevel,
+  );
+  const radial = Math.sqrt(rSq) - effR;
+  const midY = (bottomY + topY) * 0.5;
+  const halfH = Math.max(0.25, h * 0.5 - bevel);
+  const vert = Math.abs(py - midY) - halfH;
+  const outX = Math.max(radial, 0);
+  const outY = Math.max(vert, 0);
+  return Math.hypot(outX, outY) + Math.min(Math.max(radial, vert), 0) - bevel;
+}
+
+/**
+ * Smooth elliptical stone slab / sky-deck with flat walkable top and
+ * tapered sculpted underside for floating citadels, mesas, and cantilevered terraces.
+ */
+function sdRoundedSlab(
+  px: number,
+  py: number,
+  pz: number,
+  cx: number,
+  cz: number,
+  bottomY: number,
+  topY: number,
+  rx: number,
+  rz: number,
+  bevel: number,
+  undersideTaper = 0.2,
+): number {
+  const h = Math.max(0.4, topY - bottomY);
+  const t = Math.max(0, Math.min(1, (py - bottomY) / h));
+  const smoothT = t * t * (3 - 2 * t);
+  const scale = 1.0 - undersideTaper * (1.0 - smoothT);
+  const effRx = Math.max(0.35, rx * scale - bevel);
+  const effRz = Math.max(0.35, rz * scale - bevel);
+  const qx = (px - cx) / effRx;
+  const qz = (pz - cz) / effRz;
+  const k0 = Math.hypot(qx, qz);
+  const radial =
+    k0 < 1e-6
+      ? -Math.min(effRx, effRz)
+      : (k0 * (k0 - 1.0)) / Math.max(Math.hypot(qx / effRx, qz / effRz), 1e-6);
+  const midY = (bottomY + topY) * 0.5;
+  const halfH = Math.max(0.2, h * 0.5 - bevel);
+  const vert = Math.abs(py - midY) - halfH;
+  const outX = Math.max(radial, 0);
+  const outY = Math.max(vert, 0);
+  return Math.hypot(outX, outY) + Math.min(Math.max(radial, vert), 0) - bevel;
+}
+
+/**
+ * Smooth sculpted sloped stone ramp / curved ridge causeway connecting two 3D points
+ * with optional upward arch lift.
+ */
+function sdRampArch(
+  px: number,
+  py: number,
+  pz: number,
+  ax: number,
+  ay: number,
+  az: number,
+  bx: number,
+  by: number,
+  bz: number,
+  width: number,
+  thickness: number,
+  archLift = 0.0,
+): number {
+  const dx = bx - ax;
+  const dz = bz - az;
+  const span = Math.hypot(dx, dz);
+  if (span < 1e-5) {
+    return sdSphere(px, py, pz, ax, (ay + by) * 0.5, az, thickness);
+  }
+  const ux = dx / span;
+  const uz = dz / span;
+  const proj = (px - ax) * ux + (pz - az) * uz;
+  const t = Math.max(0, Math.min(1, proj / span));
+  const cx = ax + ux * (t * span);
+  const cz = az + uz * (t * span);
+  const smoothT = t * t * (3 - 2 * t);
+  const pathY = ay + (by - ay) * smoothT + 4 * t * (1 - t) * archLift;
+  const distXZ = Math.hypot(px - cx, pz - cz);
+  const distY = Math.abs(py - pathY);
+  const nx = distXZ / Math.max(0.2, width);
+  const ny = distY / Math.max(0.2, thickness);
+  return (Math.hypot(nx, ny) - 1.0) * Math.min(width, thickness);
 }
 
 /**
@@ -2313,19 +2278,88 @@ export class SdfWorld {
         const radial = Math.hypot(x - this.centerX, z - this.centerZ);
         const quadrant =
           (x < this.centerX ? 0 : 1) + (z < this.centerZ ? 0 : 2);
-        const inBasin =
-          Math.abs(u) >= 0.38 &&
-          Math.abs(v) >= 0.38 &&
-          radial >= minBasinRadial &&
-          radial <= maxSafeRadial &&
-          surfaceY >= minBasinY &&
-          surfaceY <= maxBasinY;
+        let inBasin: boolean;
+        let distFromBasinIdeal: number;
+        let heightCapForScore = maxBasinY;
 
-        // Prefer broad central flats inside each sheltered quadrant basin (near |u|=0.6, |v|=0.6)
-        const distFromBasinIdeal = Math.hypot(
-          Math.abs(u) - 0.6,
-          Math.abs(v) - 0.6,
-        );
+        if (this.theme === "emerald_spire") {
+          inBasin =
+            Math.abs(u) >= 0.38 &&
+            Math.abs(v) >= 0.38 &&
+            radial >= minBasinRadial &&
+            radial <= maxSafeRadial &&
+            surfaceY >= minBasinY &&
+            surfaceY <= maxBasinY;
+          distFromBasinIdeal = Math.hypot(
+            Math.abs(u) - 0.6,
+            Math.abs(v) - 0.6,
+          );
+        } else if (this.theme === "canyon_arch") {
+          const canyonMinY = this.worldHeight * 0.38;
+          const canyonMaxY = this.worldHeight * 0.56;
+          heightCapForScore = canyonMaxY;
+          inBasin =
+            Math.abs(u) >= 0.48 &&
+            Math.abs(v) >= 0.42 &&
+            radial >= halfSpan * 0.62 &&
+            radial <= maxSafeRadial &&
+            surfaceY >= canyonMinY &&
+            surfaceY <= canyonMaxY;
+          distFromBasinIdeal = Math.hypot(
+            Math.abs(u) - 0.68,
+            Math.abs(v) - 0.58,
+          );
+        } else if (this.theme === "twin_pillars") {
+          const isUpperDeckQuad = quadrant === 0 || quadrant === 3;
+          if (isUpperDeckQuad) {
+            heightCapForScore = this.worldHeight * 0.66;
+            inBasin =
+              Math.abs(u) >= 0.32 &&
+              Math.abs(u) <= 0.64 &&
+              Math.abs(v) >= 0.14 &&
+              Math.abs(v) <= 0.4 &&
+              surfaceY >= this.worldHeight * 0.52 &&
+              surfaceY <= this.worldHeight * 0.66;
+            distFromBasinIdeal = Math.hypot(
+              Math.abs(u) - 0.48,
+              Math.abs(v) - 0.28,
+            );
+          } else {
+            heightCapForScore = this.worldHeight * 0.3;
+            inBasin =
+              Math.abs(u) >= 0.48 &&
+              Math.abs(v) >= 0.46 &&
+              radial >= minBasinRadial &&
+              radial <= maxSafeRadial &&
+              surfaceY >= Math.max(4.2, this.worldHeight * 0.16) &&
+              surfaceY <= this.worldHeight * 0.3;
+            distFromBasinIdeal = Math.hypot(
+              Math.abs(u) - 0.64,
+              Math.abs(v) - 0.6,
+            );
+          }
+        } else {
+          // mountain_spine: 4 staggered cantilevered cliffside rib-terraces
+          const spineMinY = this.worldHeight * 0.24;
+          const spineMaxY = this.worldHeight * 0.48;
+          heightCapForScore = spineMaxY;
+          const isOuterRib = quadrant === 1 || quadrant === 2;
+          const idealU = isOuterRib ? 0.64 : 0.52;
+          const idealV = isOuterRib ? 0.46 : 0.5;
+          inBasin =
+            Math.abs(u) >= 0.36 &&
+            Math.abs(v) >= 0.32 &&
+            radial >= minBasinRadial &&
+            radial <= maxSafeRadial &&
+            surfaceY >= spineMinY &&
+            surfaceY <= spineMaxY;
+          distFromBasinIdeal = Math.hypot(
+            Math.abs(u) - idealU,
+            Math.abs(v) - idealV,
+          );
+        }
+
+        // Prefer broad central flats inside each sheltered quadrant basin
         const basinCenterBonus = Math.max(0, 1.0 - distFromBasinIdeal * 2.2) * 8.0;
         const footingBonus = stableFooting ? 5.0 : 0.0;
         const score =
@@ -2333,7 +2367,7 @@ export class SdfWorld {
           basinCenterBonus +
           normal.y * 4.0 +
           footingBonus +
-          Math.min(surfaceY, maxBasinY) * 0.35 +
+          Math.min(surfaceY, heightCapForScore) * 0.35 +
           rng() * 0.35;
 
         candidates.push({
@@ -2352,68 +2386,106 @@ export class SdfWorld {
 
     candidates.sort((a, b) => b.score - a.score);
 
-    const selected: Vec3[] = [];
-    const usedQuadrants = new Set<number>();
-
     const primaryTarget = Math.min(targetCount, 4);
     const basinPreferred = candidates.filter((c) => c.inBasin);
     const firstPool = basinPreferred.length > 0 ? basinPreferred : candidates;
+
+    const runGreedyPrimary = (startCand: SpawnCandidate): Vec3[] => {
+      const picked: Vec3[] = [{ ...startCand.pos }];
+      const usedQuads = new Set<number>([startCand.quadrant]);
+
+      while (picked.length < primaryTarget && picked.length < candidates.length) {
+        let bestCandidate: SpawnCandidate | null = null;
+        let bestMetric = -Infinity;
+
+        const unusedQuadPool = candidates.filter(
+          (c) => !usedQuads.has(c.quadrant),
+        );
+        const searchPool = unusedQuadPool.length > 0 ? unusedQuadPool : candidates;
+
+        for (const cand of searchPool) {
+          let minDist = Infinity;
+          let blocksAllLos = true;
+          for (const existing of picked) {
+            const d = Math.hypot(
+              cand.pos.x - existing.x,
+              cand.pos.y - existing.y,
+              cand.pos.z - existing.z,
+            );
+            if (d < minDist) {
+              minDist = d;
+            }
+            if (blocksAllLos && this.hasDirectLineOfSight(cand.pos, existing, 1.1)) {
+              blocksAllLos = false;
+            }
+          }
+          if (minDist < 0.01) {
+            continue;
+          }
+          const losBonus = blocksAllLos ? 500.0 : 0.0;
+          const meetsSeparation = minDist >= minSep ? 120.0 : 0.0;
+          const basinBonus = cand.inBasin ? 60.0 : 0.0;
+          const safeInnerRing = cand.radial <= maxSafeRadial ? 25.0 : 0.0;
+          const metric =
+            losBonus +
+            meetsSeparation +
+            basinBonus +
+            safeInnerRing +
+            Math.min(minDist, minSep * 1.45) +
+            cand.score * 0.35;
+          if (metric > bestMetric) {
+            bestMetric = metric;
+            bestCandidate = cand;
+          }
+        }
+
+        if (!bestCandidate) {
+          break;
+        }
+        picked.push({ ...bestCandidate.pos });
+        usedQuads.add(bestCandidate.quadrant);
+      }
+      return picked;
+    };
+
+    const scorePrimarySet = (pts: readonly Vec3[]): number => {
+      let minPair = Infinity;
+      let losFailures = 0;
+      for (let i = 0; i < pts.length; i++) {
+        for (let j = i + 1; j < pts.length; j++) {
+          const a = pts[i];
+          const b = pts[j];
+          if (!a || !b) continue;
+          const d = Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
+          if (d < minPair) minPair = d;
+          if (this.hasDirectLineOfSight(a, b, 1.1)) {
+            losFailures += 1;
+          }
+        }
+      }
+      const sepOk = pts.length < 2 || minPair >= minSep ? 1 : 0;
+      return (losFailures === 0 ? 1000 : -losFailures * 500) + sepOk * 200 + Math.min(minPair, minSep * 1.5);
+    };
+
     const first = firstPool[0];
-    if (first) {
-      selected.push({ ...first.pos });
-      usedQuadrants.add(first.quadrant);
-    }
+    let selected: Vec3[] = first ? runGreedyPrimary(first) : [];
 
-    while (selected.length < primaryTarget && selected.length < candidates.length) {
-      let bestCandidate: SpawnCandidate | null = null;
-      let bestMetric = -Infinity;
-
-      const unusedQuadPool = candidates.filter(
-        (c) => !usedQuadrants.has(c.quadrant),
-      );
-      const searchPool = unusedQuadPool.length > 0 ? unusedQuadPool : candidates;
-
-      for (const cand of searchPool) {
-        let minDist = Infinity;
-        let blocksAllLos = true;
-        for (const existing of selected) {
-          const d = Math.hypot(
-            cand.pos.x - existing.x,
-            cand.pos.y - existing.y,
-            cand.pos.z - existing.z,
-          );
-          if (d < minDist) {
-            minDist = d;
-          }
-          if (blocksAllLos && this.hasDirectLineOfSight(cand.pos, existing, 1.1)) {
-            blocksAllLos = false;
+    // For non-emerald_spire distinct layouts, if greedy start missed any LOS/separation pair, try alternate quadrant starts
+    if (this.theme !== "emerald_spire" && selected.length >= 2) {
+      let bestSetScore = scorePrimarySet(selected);
+      if (bestSetScore < 1200) {
+        for (let q = 0; q < 4; q++) {
+          const altStart = firstPool.find((c) => c.quadrant === q);
+          if (!altStart || altStart === first) continue;
+          const altSelected = runGreedyPrimary(altStart);
+          const altScore = scorePrimarySet(altSelected);
+          if (altScore > bestSetScore) {
+            bestSetScore = altScore;
+            selected = altSelected;
+            if (bestSetScore >= 1200) break;
           }
         }
-        if (minDist < 0.01) {
-          continue;
-        }
-        const losBonus = blocksAllLos ? 500.0 : 0.0;
-        const meetsSeparation = minDist >= minSep ? 120.0 : 0.0;
-        const basinBonus = cand.inBasin ? 60.0 : 0.0;
-        const safeInnerRing = cand.radial <= maxSafeRadial ? 25.0 : 0.0;
-        const metric =
-          losBonus +
-          meetsSeparation +
-          basinBonus +
-          safeInnerRing +
-          Math.min(minDist, minSep * 1.45) +
-          cand.score * 0.35;
-        if (metric > bestMetric) {
-          bestMetric = metric;
-          bestCandidate = cand;
-        }
       }
-
-      if (!bestCandidate) {
-        break;
-      }
-      selected.push({ ...bestCandidate.pos });
-      usedQuadrants.add(bestCandidate.quadrant);
     }
 
     // Extra points beyond 4 (Evo Pod drop zones including central high-ground spires & arches)
@@ -2774,14 +2846,37 @@ export class SdfWorld {
 
     const spacingMult = isGrand ? 1.55 : 1.0;
 
-    // 1. Blast Barrels (radius 1.4): guarantee 1 volatile barrel tucked near each of the 4 destructible gate seams
-    const passOffset = this.theme === "canyon_arch" ? 0.62 : 0.58;
-    const gateSeamAnchors: ReadonlyArray<readonly [number, number]> = [
-      [this.centerX, this.centerZ - passOffset * halfSpan],
-      [this.centerX, this.centerZ + passOffset * halfSpan],
-      [this.centerX - passOffset * halfSpan, this.centerZ],
-      [this.centerX + passOffset * halfSpan, this.centerZ],
-    ];
+    // 1. Blast Barrels (radius 1.4): guarantee 1 volatile barrel near each theme's 4 signature chokepoints
+    //    (emerald_spire keeps exact 4 destructible gate seams unchanged)
+    const gateSeamAnchors: ReadonlyArray<readonly [number, number]> =
+      this.theme === "emerald_spire"
+        ? [
+            [this.centerX, this.centerZ - 0.58 * halfSpan],
+            [this.centerX, this.centerZ + 0.58 * halfSpan],
+            [this.centerX - 0.58 * halfSpan, this.centerZ],
+            [this.centerX + 0.58 * halfSpan, this.centerZ],
+          ]
+        : this.theme === "canyon_arch"
+          ? [
+              [this.centerX - 0.42 * halfSpan, this.centerZ - 0.38 * halfSpan],
+              [this.centerX + 0.32 * halfSpan, this.centerZ - 0.38 * halfSpan],
+              [this.centerX - 0.32 * halfSpan, this.centerZ + 0.38 * halfSpan],
+              [this.centerX + 0.42 * halfSpan, this.centerZ + 0.38 * halfSpan],
+            ]
+          : this.theme === "twin_pillars"
+            ? [
+                [this.centerX - 0.28 * halfSpan, this.centerZ - 0.04 * halfSpan],
+                [this.centerX + 0.28 * halfSpan, this.centerZ + 0.04 * halfSpan],
+                [this.centerX + 0.56 * halfSpan, this.centerZ - 0.38 * halfSpan],
+                [this.centerX - 0.56 * halfSpan, this.centerZ + 0.38 * halfSpan],
+              ]
+            : [
+                // mountain_spine: central rib-tunnel mouths & curved flank ridge necks
+                [this.centerX - 0.28 * halfSpan, this.centerZ - 0.24 * halfSpan],
+                [this.centerX + 0.28 * halfSpan, this.centerZ + 0.24 * halfSpan],
+                [this.centerX - 0.56 * halfSpan, this.centerZ - 0.02 * halfSpan],
+                [this.centerX + 0.56 * halfSpan, this.centerZ + 0.02 * halfSpan],
+              ];
     for (const [gx, gz] of gateSeamAnchors) {
       let bestGateCand: HazardCandidate | null = null;
       let bestGateScore = Infinity;
